@@ -3,85 +3,74 @@
 //! `Graph` codifica qué pares (i,j) tienen entradas no-nulas en la matriz
 //! de precisión Q. Es el equivalente Rust de `graph.c` (2127 líneas).
 //!
-//! ## Responsabilidades de Graph
+//! ## Convención de almacenamiento
 //!
-//! 1. **Patrón de Q** — vecinos de cada nodo (CSC o lista de adyacencia).
-//!    Usado por `QFunc::eval` para saber qué entradas evaluar.
+//! Solo guardamos la triangular superior (j > i). La diagonal es implícita.
 //!
-//! 2. **Patrón de llenado de L** (post-reordering AMD).
-//!    Calculado por Cholesky simbólico. Usado por `selected_inverse`.
-//!    IMPORTANTE: este patrón puede ser más denso que el de Q.
-//!
-//! 3. **Hash SHA-2** del grafo de Q, para invalidar/reutilizar el caché
-//!    de reorderings entre evaluaciones de BFGS.
-//!
-//! ## Por qué guardar el patrón de L aquí
-//!
-//! En INLA, la inversa seleccionada Q⁻¹ se evalúa SOLO en las entradas
-//! (i,j) del patrón de L (no de Q). Si Graph no expone ese patrón,
-//! el solver no sabe sobre qué entradas iterar. Diseñar esto bien en A.1
-//! evita reescribir Graph en A.3 (cuando implementemos selected_inverse).
+//! ```text
+//! Para Q tridiagonal n=4:
+//!   neighbors[0] = [1]   ← Q(0,1)
+//!   neighbors[1] = [2]   ← Q(1,2)
+//!   neighbors[2] = [3]   ← Q(2,3)
+//!   neighbors[3] = []
+//! ```
 
 use sha2::{Digest, Sha256};
 
 /// Grafo de dispersidad de Q.
-///
-/// Fase A.1 implementa los constructores y el hash.
-/// Fase A.3 añade `fill_pattern` (patrón de L post-AMD).
 #[derive(Debug, Clone)]
 pub struct Graph {
-    /// Número de nodos (= dimensión de Q).
     pub n: usize,
-
-    /// Lista de adyacencia: `neighbors[i]` contiene los índices j > i
-    /// con Q(i,j) ≠ 0 (solo triangular superior, la diagonal se omite).
-    ///
-    /// Por convención, los vecinos están ordenados ascendentemente.
-    /// Esto es equivalente al `adjacency` de GMRFLib.
     pub(crate) neighbors: Vec<Vec<usize>>,
-
-    /// Patrón de llenado de L después del reordering AMD.
-    /// `fill_pattern[i]` = índices j en la columna i de L (j ≥ i).
-    ///
-    /// Poblado por `FaerSolver::reorder()`. Vacío hasta entonces.
-    /// Fase A.3 lo completa.
+    #[allow(dead_code)] // poblado por FaerSolver::reorder() en Fase A.3
     pub(crate) fill_pattern: Vec<Vec<usize>>,
-
-    /// SHA-256 del patrón de Q. Se calcula una vez en el constructor.
-    /// `FaerSolver` lo compara con el hash cacheado para reutilizar
-    /// el reordering AMD sin recomputarlo.
     pub(crate) graph_hash: [u8; 32],
 }
 
 impl Graph {
-    /// Número de nodos del grafo.
+    // ── Accesores ─────────────────────────────────────────────────────────────
+
     #[inline]
     pub fn n(&self) -> usize {
         self.n
     }
 
-    /// ¿Son i y j vecinos en Q? (i ≠ j, sin importar el orden)
+    /// ¿Son i y j vecinos en Q? Funciona en ambas direcciones.
     pub fn are_neighbors(&self, i: usize, j: usize) -> bool {
         let (lo, hi) = if i < j { (i, j) } else { (j, i) };
         self.neighbors[lo].binary_search(&hi).is_ok()
     }
 
-    /// Número total de entradas no-nulas en Q (incluyendo diagonal).
-    /// nnz(Q) = n + 2 * Σ|neighbors[i]|
+    /// Vecinos del nodo i en la triangular superior (j > i).
+    /// El solver itera esto para evaluar QFunc::eval(i, j, theta).
+    #[inline]
+    pub fn neighbors_of(&self, i: usize) -> &[usize] {
+        &self.neighbors[i]
+    }
+
+    /// nnz(Q) = n (diagonal) + 2 * aristas (simetría)
     pub fn nnz(&self) -> usize {
         let off_diag: usize = self.neighbors.iter().map(|v| v.len()).sum();
         self.n + 2 * off_diag
     }
 
-    /// Hash del patrón de Q para caché de reorderings.
     pub fn hash(&self) -> &[u8; 32] {
         &self.graph_hash
     }
 
-    // ── Constructores (Fase A.1) ──────────────────────────────────────────────
+    /// Itera todos los pares (i, j) con j > i.
+    /// El solver llama a QFunc::eval(i, j, theta) para cada par
+    /// y rellena Q en formato CSC.
+    pub fn iter_upper_triangle(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.neighbors
+            .iter()
+            .enumerate()
+            .flat_map(|(i, nbrs)| nbrs.iter().map(move |&j| (i, j)))
+    }
 
-    /// Grafo vacío (sin aristas). Equivale a modelo iid: Q diagonal.
-    /// Cada nodo es su propio vecino solo en la diagonal.
+    // ── Constructores ─────────────────────────────────────────────────────────
+
+    /// Q diagonal. Uso: modelo iid.
     pub fn empty(n: usize) -> Self {
         let neighbors = vec![vec![]; n];
         let hash = Self::compute_hash(&neighbors, n);
@@ -93,13 +82,57 @@ impl Graph {
         }
     }
 
-    /// Grafo lineal (cadena): nodo i conectado a i+1.
-    /// Patrón de Q para RW1, RW2 (tridiagonal).
+    /// Alias semántico de empty para contextos iid.
+    pub fn iid(n: usize) -> Self {
+        Self::empty(n)
+    }
+
+    /// Q tridiagonal (cadena). Uso: modelos RW1, RW2.
     pub fn linear(n: usize) -> Self {
         let mut neighbors = vec![vec![]; n];
         for i in 0..n.saturating_sub(1) {
             neighbors[i].push(i + 1);
         }
+        let hash = Self::compute_hash(&neighbors, n);
+        Self {
+            n,
+            neighbors,
+            fill_pattern: vec![],
+            graph_hash: hash,
+        }
+    }
+
+    /// Alias semántico de linear para contextos AR1.
+    /// AR1 y RW1 tienen la misma estructura de grafo (cadena).
+    /// La diferencia está en los valores de Q(i,j,theta), no en la estructura.
+    pub fn ar1(n: usize) -> Self {
+        Self::linear(n)
+    }
+
+    /// Constructor genérico desde lista de aristas.
+    ///
+    /// Los pares pueden venir en cualquier orden y con duplicados:
+    /// el constructor normaliza a (lo, hi), deduplica y ordena.
+    ///
+    /// # Panics (debug)
+    /// Si algún índice >= n o si hay self-loop (i == j).
+    pub fn from_neighbors(n: usize, edges: &[(usize, usize)]) -> Self {
+        let mut neighbors: Vec<Vec<usize>> = vec![vec![]; n];
+
+        for &(a, b) in edges {
+            debug_assert!(a != b, "self-loops no permitidos");
+            debug_assert!(a < n && b < n, "índice fuera de rango");
+
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+
+            // Inserción ordenada sin duplicados.
+            // Para grafos dispersos (grado típico 1-6 en INLA) es O(k) por arista.
+            match neighbors[lo].binary_search(&hi) {
+                Ok(_) => {} // duplicado, ignorar
+                Err(pos) => neighbors[lo].insert(pos, hi),
+            }
+        }
+
         let hash = Self::compute_hash(&neighbors, n);
         Self {
             n,
@@ -119,22 +152,25 @@ impl Graph {
             for &j in nbrs {
                 hasher.update(j.to_le_bytes());
             }
-            // Separador entre nodos para evitar colisiones de concatenación.
-            hasher.update([0xFF]);
+            hasher.update([0xFF]); // separador para evitar colisiones
         }
         hasher.finalize().into()
     }
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Constructores ─────────────────────────────────────────────────────────
 
     #[test]
     fn empty_graph_has_no_edges() {
         let g = Graph::empty(5);
         assert_eq!(g.n(), 5);
-        assert_eq!(g.nnz(), 5); // solo diagonal
+        assert_eq!(g.nnz(), 5);
         for i in 0..5 {
             for j in 0..5 {
                 if i != j {
@@ -145,28 +181,156 @@ mod tests {
     }
 
     #[test]
-    fn linear_graph_has_chain_edges() {
-        let g = Graph::linear(5);
-        assert!(g.are_neighbors(0, 1));
-        assert!(g.are_neighbors(1, 2));
-        assert!(g.are_neighbors(2, 3));
-        assert!(g.are_neighbors(3, 4));
-        assert!(!g.are_neighbors(0, 2)); // no hay aristas largas
-        // nnz = 5 (diag) + 2*4 (off-diag simétrico) = 13
-        assert_eq!(g.nnz(), 13);
+    fn iid_equals_empty() {
+        let g1 = Graph::iid(10);
+        let g2 = Graph::empty(10);
+        assert_eq!(g1.hash(), g2.hash());
     }
 
     #[test]
+    fn linear_graph_has_chain_edges() {
+        let g = Graph::linear(5);
+        assert!(g.are_neighbors(0, 1));
+        assert!(g.are_neighbors(3, 4));
+        assert!(!g.are_neighbors(0, 2));
+        assert_eq!(g.nnz(), 13); // 5 + 2*4
+    }
+
+    #[test]
+    fn ar1_equals_linear() {
+        let g1 = Graph::ar1(20);
+        let g2 = Graph::linear(20);
+        assert_eq!(g1.hash(), g2.hash());
+        assert_eq!(g1.nnz(), g2.nnz());
+    }
+
+    // ── from_neighbors ────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_neighbors_builds_chain() {
+        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
+        let g = Graph::from_neighbors(5, &edges);
+        assert_eq!(g.n(), 5);
+        assert_eq!(g.nnz(), 13);
+        assert!(g.are_neighbors(0, 1));
+        assert!(g.are_neighbors(3, 4));
+        assert!(!g.are_neighbors(0, 4));
+    }
+
+    #[test]
+    fn from_neighbors_deduplicates() {
+        // (0,1) aparece tres veces — debe contar solo una
+        let edges = vec![(0, 1), (1, 0), (0, 1), (1, 2)];
+        let g = Graph::from_neighbors(3, &edges);
+        assert_eq!(g.nnz(), 3 + 2 * 2); // 3 diag + 2 aristas únicas × 2
+    }
+
+    #[test]
+    fn from_neighbors_handles_reversed_pairs() {
+        let edges = vec![(3, 1), (2, 0)];
+        let g = Graph::from_neighbors(4, &edges);
+        assert!(g.are_neighbors(1, 3));
+        assert!(g.are_neighbors(0, 2));
+    }
+
+    #[test]
+    fn from_neighbors_matches_linear() {
+        let n = 10;
+        let edges: Vec<(usize, usize)> = (0..n - 1).map(|i| (i, i + 1)).collect();
+        let g_from = Graph::from_neighbors(n, &edges);
+        let g_linear = Graph::linear(n);
+        assert_eq!(g_from.hash(), g_linear.hash());
+    }
+
+    // ── Iteradores ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn iter_upper_triangle_visits_all_edges() {
+        let g = Graph::linear(5);
+        let pairs: Vec<(usize, usize)> = g.iter_upper_triangle().collect();
+        assert_eq!(pairs.len(), 4);
+        assert!(pairs.contains(&(0, 1)));
+        assert!(pairs.contains(&(3, 4)));
+    }
+
+    #[test]
+    fn iter_upper_triangle_empty_graph_yields_nothing() {
+        let g = Graph::empty(10);
+        assert_eq!(g.iter_upper_triangle().count(), 0);
+    }
+
+    #[test]
+    fn neighbors_of_returns_correct_slice() {
+        let g = Graph::linear(5);
+        assert_eq!(g.neighbors_of(0), &[1]);
+        assert_eq!(g.neighbors_of(1), &[2]);
+        assert!(g.neighbors_of(4).is_empty()); // último nodo, sin vecinos hacia adelante
+    }
+
+    // ── Hash ──────────────────────────────────────────────────────────────────
+
+    #[test]
     fn hash_changes_with_structure() {
-        let g1 = Graph::empty(5);
-        let g2 = Graph::linear(5);
-        assert_ne!(g1.hash(), g2.hash());
+        assert_ne!(Graph::empty(5).hash(), Graph::linear(5).hash());
     }
 
     #[test]
     fn hash_is_stable() {
-        let g1 = Graph::linear(10);
-        let g2 = Graph::linear(10);
-        assert_eq!(g1.hash(), g2.hash());
+        assert_eq!(Graph::linear(10).hash(), Graph::linear(10).hash());
+    }
+
+    #[test]
+    fn hash_differs_by_size() {
+        assert_ne!(Graph::linear(10).hash(), Graph::linear(11).hash());
+    }
+
+    // ── Fixture: cholesky_rw1.json ────────────────────────────────────────────
+    //
+    // Valida que Graph::linear(10_000) coincide con el fixture de R-INLA.
+    //
+    // Para activar:
+    //   1. git add tests/fixtures/*.json && git commit
+    //   2. cargo test -- --ignored
+    #[test]
+    #[ignore = "requiere tests/fixtures/cholesky_rw1.json en el repositorio"]
+    fn fixture_cholesky_rw1_graph_structure() {
+        use std::collections::HashSet;
+
+        let raw = std::fs::read_to_string("tests/fixtures/cholesky_rw1.json")
+            .expect("fixture no encontrado");
+
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("JSON inválido");
+
+        let n = v["n"][0].as_u64().unwrap() as usize;
+        let rows = v["rows"].as_array().unwrap();
+        let cols = v["cols"].as_array().unwrap();
+
+        // Aristas únicas del triángulo superior (r < c)
+        let edges: Vec<(usize, usize)> = rows
+            .iter()
+            .zip(cols.iter())
+            .filter_map(|(r, c)| {
+                let ri = r.as_u64()? as usize;
+                let ci = c.as_u64()? as usize;
+                if ri < ci {
+                    Some((ri, ci))
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let g = Graph::from_neighbors(n, &edges);
+
+        assert_eq!(g.n(), n);
+        assert_eq!(g.nnz(), n + 2 * (n - 1), "RW1 tridiagonal n={n}");
+        assert!(g.are_neighbors(0, 1));
+        assert!(g.are_neighbors(n - 2, n - 1));
+        assert!(!g.are_neighbors(0, 2));
+
+        // Debe ser idéntico a linear(n)
+        assert_eq!(g.hash(), Graph::linear(n).hash());
     }
 }
