@@ -31,9 +31,7 @@ impl Graph {
     // ── Accesores ─────────────────────────────────────────────────────────────
 
     #[inline]
-    pub fn n(&self) -> usize {
-        self.n
-    }
+    pub fn n(&self) -> usize { self.n }
 
     /// ¿Son i y j vecinos en Q? Funciona en ambas direcciones.
     pub fn are_neighbors(&self, i: usize, j: usize) -> bool {
@@ -54,9 +52,7 @@ impl Graph {
         self.n + 2 * off_diag
     }
 
-    pub fn hash(&self) -> &[u8; 32] {
-        &self.graph_hash
-    }
+    pub fn hash(&self) -> &[u8; 32] { &self.graph_hash }
 
     /// Itera todos los pares (i, j) con j > i.
     /// El solver llama a QFunc::eval(i, j, theta) para cada par
@@ -74,18 +70,11 @@ impl Graph {
     pub fn empty(n: usize) -> Self {
         let neighbors = vec![vec![]; n];
         let hash = Self::compute_hash(&neighbors, n);
-        Self {
-            n,
-            neighbors,
-            fill_pattern: vec![],
-            graph_hash: hash,
-        }
+        Self { n, neighbors, fill_pattern: vec![], graph_hash: hash }
     }
 
     /// Alias semántico de empty para contextos iid.
-    pub fn iid(n: usize) -> Self {
-        Self::empty(n)
-    }
+    pub fn iid(n: usize) -> Self { Self::empty(n) }
 
     /// Q tridiagonal (cadena). Uso: modelos RW1, RW2.
     pub fn linear(n: usize) -> Self {
@@ -94,20 +83,13 @@ impl Graph {
             neighbors[i].push(i + 1);
         }
         let hash = Self::compute_hash(&neighbors, n);
-        Self {
-            n,
-            neighbors,
-            fill_pattern: vec![],
-            graph_hash: hash,
-        }
+        Self { n, neighbors, fill_pattern: vec![], graph_hash: hash }
     }
 
     /// Alias semántico de linear para contextos AR1.
     /// AR1 y RW1 tienen la misma estructura de grafo (cadena).
     /// La diferencia está en los valores de Q(i,j,theta), no en la estructura.
-    pub fn ar1(n: usize) -> Self {
-        Self::linear(n)
-    }
+    pub fn ar1(n: usize) -> Self { Self::linear(n) }
 
     /// Constructor genérico desde lista de aristas.
     ///
@@ -128,18 +110,13 @@ impl Graph {
             // Inserción ordenada sin duplicados.
             // Para grafos dispersos (grado típico 1-6 en INLA) es O(k) por arista.
             match neighbors[lo].binary_search(&hi) {
-                Ok(_) => {} // duplicado, ignorar
+                Ok(_)    => {}            // duplicado, ignorar
                 Err(pos) => neighbors[lo].insert(pos, hi),
             }
         }
 
         let hash = Self::compute_hash(&neighbors, n);
-        Self {
-            n,
-            neighbors,
-            fill_pattern: vec![],
-            graph_hash: hash,
-        }
+        Self { n, neighbors, fill_pattern: vec![], graph_hash: hash }
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────
@@ -149,9 +126,7 @@ impl Graph {
         hasher.update(n.to_le_bytes());
         for (i, nbrs) in neighbors.iter().enumerate() {
             hasher.update(i.to_le_bytes());
-            for &j in nbrs {
-                hasher.update(j.to_le_bytes());
-            }
+            for &j in nbrs { hasher.update(j.to_le_bytes()); }
             hasher.update([0xFF]); // separador para evitar colisiones
         }
         hasher.finalize().into()
@@ -173,9 +148,7 @@ mod tests {
         assert_eq!(g.nnz(), 5);
         for i in 0..5 {
             for j in 0..5 {
-                if i != j {
-                    assert!(!g.are_neighbors(i, j));
-                }
+                if i != j { assert!(!g.are_neighbors(i, j)); }
             }
         }
     }
@@ -208,7 +181,7 @@ mod tests {
 
     #[test]
     fn from_neighbors_builds_chain() {
-        let edges = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
+        let edges = vec![(0,1),(1,2),(2,3),(3,4)];
         let g = Graph::from_neighbors(5, &edges);
         assert_eq!(g.n(), 5);
         assert_eq!(g.nnz(), 13);
@@ -220,14 +193,14 @@ mod tests {
     #[test]
     fn from_neighbors_deduplicates() {
         // (0,1) aparece tres veces — debe contar solo una
-        let edges = vec![(0, 1), (1, 0), (0, 1), (1, 2)];
+        let edges = vec![(0,1),(1,0),(0,1),(1,2)];
         let g = Graph::from_neighbors(3, &edges);
-        assert_eq!(g.nnz(), 3 + 2 * 2); // 3 diag + 2 aristas únicas × 2
+        assert_eq!(g.nnz(), 3 + 2*2); // 3 diag + 2 aristas únicas × 2
     }
 
     #[test]
     fn from_neighbors_handles_reversed_pairs() {
-        let edges = vec![(3, 1), (2, 0)];
+        let edges = vec![(3,1),(2,0)];
         let g = Graph::from_neighbors(4, &edges);
         assert!(g.are_neighbors(1, 3));
         assert!(g.are_neighbors(0, 2));
@@ -236,8 +209,8 @@ mod tests {
     #[test]
     fn from_neighbors_matches_linear() {
         let n = 10;
-        let edges: Vec<(usize, usize)> = (0..n - 1).map(|i| (i, i + 1)).collect();
-        let g_from = Graph::from_neighbors(n, &edges);
+        let edges: Vec<(usize, usize)> = (0..n-1).map(|i| (i, i+1)).collect();
+        let g_from   = Graph::from_neighbors(n, &edges);
         let g_linear = Graph::linear(n);
         assert_eq!(g_from.hash(), g_linear.hash());
     }
@@ -247,10 +220,10 @@ mod tests {
     #[test]
     fn iter_upper_triangle_visits_all_edges() {
         let g = Graph::linear(5);
-        let pairs: Vec<(usize, usize)> = g.iter_upper_triangle().collect();
+        let pairs: Vec<(usize,usize)> = g.iter_upper_triangle().collect();
         assert_eq!(pairs.len(), 4);
-        assert!(pairs.contains(&(0, 1)));
-        assert!(pairs.contains(&(3, 4)));
+        assert!(pairs.contains(&(0,1)));
+        assert!(pairs.contains(&(3,4)));
     }
 
     #[test]
@@ -301,22 +274,17 @@ mod tests {
 
         let v: serde_json::Value = serde_json::from_str(&raw).expect("JSON inválido");
 
-        let n = v["n"][0].as_u64().unwrap() as usize;
+        let n    = v["n"][0].as_u64().unwrap() as usize;
         let rows = v["rows"].as_array().unwrap();
         let cols = v["cols"].as_array().unwrap();
 
         // Aristas únicas del triángulo superior (r < c)
-        let edges: Vec<(usize, usize)> = rows
-            .iter()
+        let edges: Vec<(usize,usize)> = rows.iter()
             .zip(cols.iter())
-            .filter_map(|(r, c)| {
+            .filter_map(|(r,c)| {
                 let ri = r.as_u64()? as usize;
                 let ci = c.as_u64()? as usize;
-                if ri < ci {
-                    Some((ri, ci))
-                } else {
-                    None
-                }
+                if ri < ci { Some((ri,ci)) } else { None }
             })
             .collect::<HashSet<_>>()
             .into_iter()
@@ -325,9 +293,9 @@ mod tests {
         let g = Graph::from_neighbors(n, &edges);
 
         assert_eq!(g.n(), n);
-        assert_eq!(g.nnz(), n + 2 * (n - 1), "RW1 tridiagonal n={n}");
+        assert_eq!(g.nnz(), n + 2*(n-1), "RW1 tridiagonal n={n}");
         assert!(g.are_neighbors(0, 1));
-        assert!(g.are_neighbors(n - 2, n - 1));
+        assert!(g.are_neighbors(n-2, n-1));
         assert!(!g.are_neighbors(0, 2));
 
         // Debe ser idéntico a linear(n)
