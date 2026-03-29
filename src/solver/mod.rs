@@ -124,5 +124,6 @@ pub trait SparseSolver {
     fn selected_inverse(&mut self) -> Result<SpMat, InlaError>;
 }
 
-// ── Implementación concreta (Fase A.3) ────────────────────────────────────────
-// `FaerSolver` se añade en src/solver/faer_solver.rs en Fase A.3.
+// ── Implementación concreta ────────────────────────────────────────────────────
+pub mod faer_solver;
+pub use faer_solver::FaerSolver;

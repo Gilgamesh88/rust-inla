@@ -46,4 +46,4 @@ pub use error::InlaError;
 pub use graph::Graph;
 pub use likelihood::{LinkFunction, LogLikelihood};
 pub use models::QFunc;
-pub use solver::{SpIdx, SpMat, SparseSolver};
+pub use solver::{SpIdx, SpMat, SparseSolver, FaerSolver};
