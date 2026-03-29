@@ -1,0 +1,7 @@
+# Directorio de compilación — puede pesar varios GB con faer compilado.
+# NUNCA se sube a GitHub.
+/target/
+
+# Cargo.lock SÍ se sube en aplicaciones binarias, pero en librerías es opcional.
+# Lo incluimos para reproducibilidad exacta en CI.
+# (no lo ignoramos)

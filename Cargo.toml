@@ -1,0 +1,59 @@
+[package]
+name    = "rust-inla"
+version = "0.1.0"
+edition = "2021"
+
+# ── Dependencias de producción ───────────────────────────────────────────────
+[dependencies]
+
+# Álgebra lineal sparse. NOTA: API de 0.19 cambió completamente en 0.24.
+# Cambios clave: try_new_from_triplets, row_idx_of_col_raw, val_of_col,
+# self_adjoint_eigen devuelve Result.
+faer     = "0.24.0"
+
+# NOTA: faer-ext 0.7.1 (última versión) depende de faer="0.23.0" —
+# incompatible con 0.24.0. Se añade en Fase D cuando exista versión
+# compatible, o se escribe la conversión faer→ndarray manualmente.
+
+# Paralelismo (equivalente a OpenMP del C backend).
+rayon = "1.10"
+
+# BFGS para optimización de hiperparámetros θ.
+# Equivalente al domin-interface.h/c original (bfgs3/bfgs4).
+argmin      = "0.10"
+argmin-math = "0.4"
+
+# Distribuciones estadísticas (equivalente a GSL del C backend).
+statrs = "0.18"
+
+# Hash del grafo para caché de reorderings AMD.
+sha2 = "0.10"
+
+# Muestreo (necesario en density/ para SCGAUSSIAN).
+rand = "0.8"
+
+# Manejo de errores ergonómico. Lección aprendida de SMuRF.
+thiserror = "2.0"
+
+# Formato de intercambio para resultados → PyO3/extendr.
+# El feature "approx" habilita assert_abs_diff_eq! en tests.
+ndarray = { version = "0.16", features = ["approx"] }
+# NOTA: el roadmap dice 0.17, pero 0.16 es la última estable en crates.io.
+# Actualizar a 0.17 cuando se publique.
+
+# ── Dependencias de desarrollo (tests y benchmarks) ──────────────────────────
+[dev-dependencies]
+
+# Para cargar los fixtures JSON contra R-INLA.
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# assert_abs_diff_eq! con tolerancias — para validar contra fixtures.
+approx = "0.5"
+
+# Benchmarks de rendimiento (Fase A.5).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name    = "cholesky_bench"
+harness = false

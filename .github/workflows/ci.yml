@@ -1,0 +1,67 @@
+# Pipeline de CI para rust-inla.
+# Se ejecuta automáticamente en cada push y pull request.
+# Puedes ver los resultados en la pestaña "Actions" de tu repositorio en GitHub.
+
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+# Un solo job por ahora. En Fase B añadiremos jobs separados para
+# tests de integración contra los fixtures R-INLA.
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Descarga el código del repositorio en la máquina de GitHub.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Instala Rust stable en la máquina de GitHub.
+      #    dtolnay/rust-toolchain es la forma estándar — más rápida que rustup manual.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # clippy: linter que detecta patrones problemáticos en Rust.
+          # rustfmt: formateador de código.
+          components: clippy, rustfmt
+
+      # 3. Cachea las dependencias compiladas entre runs.
+      #    Sin esto, cada push recompila faer + rayon + todas las deps (~3-5 min).
+      #    Con cache, solo recompila lo que cambió (~30 segundos).
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # 4. Verifica que el código compila sin errores.
+      #    --locked: usa exactamente las versiones de Cargo.lock (reproducible).
+      - name: Build
+        run: cargo build --locked
+
+      # 5. Corre todos los tests unitarios (los #[test] que escribimos en cada módulo).
+      - name: Test
+        run: cargo test --locked
+
+      # 6. Clippy: linter de Rust. Más estricto que el compilador.
+      #    -D warnings: trata warnings como errores (no pasan en CI).
+      #    Esto mantiene el código limpio — si escribes algo que clippy no aprueba,
+      #    el CI falla y te avisa exactamente dónde y por qué.
+      - name: Clippy
+        run: cargo clippy --locked -- -D warnings
+
+      # 7. Verifica formato. Si el código no está formateado con rustfmt, falla.
+      #    En Codespaces esto no ocurre porque "formatOnSave" está activado.
+      - name: Format check
+        run: cargo fmt --check
