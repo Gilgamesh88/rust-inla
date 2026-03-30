@@ -1,32 +1,21 @@
-//! FaerSolver — implementación concreta de SparseSolver usando faer 0.24.
+//! FaerSolver — Cholesky simplicial de bajo nivel (faer 0.24).
 //!
-//! ## Flujo de uso (equivalente a GMRFLib)
+//! Usamos la API simplicial (no supernodal) porque nos da acceso directo
+//! a `L_values: Vec<f64>`, necesario para:
+//! - `log|Q| = 2·Σlog(L_ii)`  donde  `L[j,j] = L_values[col_ptr[j]]`
+//! - Inversa seleccionada (Takahashi) — Fase A.3 final
 //!
-//! ```ignore
-//! let mut solver = FaerSolver::new();
-//!
-//! // UNA VEZ por grafo:
-//! solver.reorder(&mut graph);          // AMD + simbólico → SymbolicLlt
-//!
-//! // CADA evaluación de f(θ) en BFGS:
-//! solver.build(&graph, &qfunc, theta); // rellena triplets
-//! solver.factorize()?;                 // Cholesky numérico → Llt
-//! let ld = solver.log_determinant();   // 2·Σlog(diag(L))
-//! solver.solve_llt(&mut rhs);          // Q⁻¹·b en su sitio
-//! ```
-//!
-//! ## Por qué dos fases (simbólico + numérico)
-//!
-//! AMD y el análisis del patrón de L son O(n·log n) y solo dependen
-//! del grafo, no de θ. Si lo hiciéramos en cada evaluación de BFGS
-//! (potencialmente cientos de veces), desperdiciaríamos tiempo.
-//! Al guardar `SymbolicLlt` (que es un Arc barato de clonar), solo
-//! pagamos ese coste una vez por modelo.
+//! Trade-off: más fill-in que supernodal para matrices grandes.
+//! AMD se añade en Fase A.3 final para mejorar rendimiento.
 
-use faer::sparse::linalg::solvers::{Llt, SymbolicLlt};
-use faer::linalg::solvers::SolveCore; // necesario para solve_in_place_with_conj
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::cholesky::llt::factor::LltRegularization;
+use faer::sparse::linalg::cholesky::simplicial::{
+    self, EliminationTreeRef, SimplicialLltRef,
+    SymbolicSimplicialCholesky,
+};
 use faer::sparse::{SparseColMat, Triplet};
-use faer::Side;
+use faer::{Conj, Par};
 
 use crate::error::InlaError;
 use crate::graph::Graph;
@@ -46,20 +35,21 @@ pub struct FaerSolver {
     n:           usize,
     cached_hash: [u8; 32],
 
-    /// Triplets de Q — se rellenan en build() evaluando QFunc.
+    /// Triplets de Q (triangular superior) — rellenos en build().
     triplets: Vec<Triplet<SpIdx, SpIdx, f64>>,
 
-    /// Q materializada como SparseColMat — se construye en build().
-    q_mat: Option<SparseColMat<SpIdx, f64>>,
+    /// Q materializada como CSC upper triangular.
+    q_upper: Option<SparseColMat<SpIdx, f64>>,
 
-    /// Estructura simbólica de L (AMD incluido). Se guarda entre evaluaciones
-    /// de θ para no repetir el análisis caro.
-    symbolic: Option<SymbolicLlt<SpIdx>>,
+    /// Estructura simbólica de L (patrón de fill-in).
+    /// Calculada una vez por grafo en reorder().
+    symbolic: Option<SymbolicSimplicialCholesky<SpIdx>>,
 
-    /// Factorización numérica LLᵀ — se recalcula en cada factorize().
-    llt: Option<Llt<SpIdx, f64>>,
+    /// Valores numéricos de L (triangular inferior).
+    /// L[j,j] = l_values[symbolic.col_ptr()[j]]  ← clave para log-det.
+    l_values: Vec<f64>,
 
-    /// log|Q| = 2·Σlog(Lᵢᵢ), cacheado tras factorize().
+    /// log|Q| = 2·Σlog(L_ii), cacheado tras factorize().
     log_det: Option<f64>,
 }
 
@@ -70,9 +60,9 @@ impl FaerSolver {
             n:           0,
             cached_hash: [0u8; 32],
             triplets:    Vec::new(),
-            q_mat:       None,
+            q_upper:     None,
             symbolic:    None,
-            llt:         None,
+            l_values:    Vec::new(),
             log_det:     None,
         }
     }
@@ -81,25 +71,18 @@ impl FaerSolver {
         self.state == State::Fresh || self.cached_hash != *graph.hash()
     }
 
-    /// Construye los triplets de Q incluyendo diagonal y off-diagonal simétrica.
+    /// Construye los triplets del triángulo superior de Q.
     fn fill_triplets(&mut self, graph: &Graph, qfunc: &dyn QFunc, theta: &[f64]) {
         let n = graph.n();
         self.triplets.clear();
-        self.triplets.reserve(n + 2 * graph.iter_upper_triangle().count());
+        self.triplets.reserve(n + graph.iter_upper_triangle().count());
 
-        // Diagonal
         for i in 0..n {
-            self.triplets.push(Triplet {
-                row: i,
-                col: i,
-                val: qfunc.eval(i, i, theta),
-            });
+            self.triplets.push(Triplet::new(i, i, qfunc.eval(i, i, theta)));
         }
-        // Off-diagonal simétrica (i,j) y (j,i)
         for (i, j) in graph.iter_upper_triangle() {
-            let v = qfunc.eval(i, j, theta);
-            self.triplets.push(Triplet { row: i, col: j, val: v });
-            self.triplets.push(Triplet { row: j, col: i, val: v });
+            // Solo upper triangle — la API simplicial accede solo a esa parte
+            self.triplets.push(Triplet::new(i, j, qfunc.eval(i, j, theta)));
         }
     }
 }
@@ -109,47 +92,66 @@ impl Default for FaerSolver {
 }
 
 impl SparseSolver for FaerSolver {
-    // ── reorder: AMD + Cholesky simbólico ────────────────────────────────────
+
+    // ── reorder: estructura simbólica de L ───────────────────────────────────
 
     fn reorder(&mut self, graph: &mut Graph) {
-        if !self.needs_reorder(graph) {
-            return; // caché válido — no repetir AMD
-        }
+        if !self.needs_reorder(graph) { return; }
+
         self.n           = graph.n();
         self.cached_hash = *graph.hash();
-        self.q_mat       = None;
-        self.llt         = None;
+        self.q_upper     = None;
+        self.l_values    = Vec::new();
         self.log_det     = None;
 
-        // Construimos una matriz con el patrón de Q (valores = 1.0, no importan)
-        // Solo necesitamos la estructura simbólica para AMD.
         let n = self.n;
-        let mut pattern_triplets: Vec<Triplet<SpIdx, SpIdx, f64>> =
-            Vec::with_capacity(n + 2 * graph.iter_upper_triangle().count());
 
-        for i in 0..n {
-            pattern_triplets.push(Triplet { row: i, col: i, val: 1.0 });
-        }
-        for (i, j) in graph.iter_upper_triangle() {
-            pattern_triplets.push(Triplet { row: i, col: j, val: 1.0 });
-            pattern_triplets.push(Triplet { row: j, col: i, val: 1.0 });
-        }
+        // Patrón de Q (triangular superior, valores = 1.0, no importan)
+        let pattern: Vec<Triplet<SpIdx, SpIdx, f64>> = (0..n)
+            .map(|i| Triplet::new(i, i, 1.0))
+            .chain(graph.iter_upper_triangle().map(|(i,j)| Triplet::new(i, j, 1.0)))
+            .collect();
 
-        let pattern_mat = SparseColMat::<SpIdx, f64>::try_new_from_triplets(
-            n, n, &pattern_triplets,
-        ).expect("reorder: patrón de Q inválido");
+        let q_pat = SparseColMat::<SpIdx, f64>::try_new_from_triplets(n, n, &pattern)
+            .expect("reorder: patrón inválido");
 
-        // SymbolicLlt::try_new ejecuta AMD internamente (Default ordering = AMD)
-        // y calcula el patrón de fill-in de L.
-        self.symbolic = Some(
-            SymbolicLlt::try_new(pattern_mat.symbolic(), Side::Lower)
-                .expect("reorder: fallo en factorización simbólica"),
+        // ── Paso 1: árbol de eliminación y conteo de columnas ────────────────
+        let scratch1 = simplicial::prefactorize_symbolic_cholesky_scratch::<SpIdx>(
+            n, q_pat.compute_nnz(),
+        );
+        let mut mem1 = MemBuffer::try_new(scratch1)
+            .expect("reorder: no hay memoria para scratch1");
+        let stack1 = MemStack::new(&mut mem1);
+
+        let mut etree:      Vec<isize> = vec![0; n];
+        let mut col_counts: Vec<SpIdx> = vec![0; n];
+
+        simplicial::prefactorize_symbolic_cholesky(
+            &mut etree,
+            &mut col_counts,
+            q_pat.symbolic(),
+            stack1,
         );
 
-        self.state = State::Reordered;
+        // ── Paso 2: Cholesky simbólico ────────────────────────────────────────
+        let scratch2 = simplicial::factorize_simplicial_symbolic_cholesky_scratch::<SpIdx>(n);
+        let mut mem2 = MemBuffer::try_new(scratch2)
+            .expect("reorder: no hay memoria para scratch2");
+        let stack2 = MemStack::new(&mut mem2);
+
+        let symbolic = simplicial::factorize_simplicial_symbolic_cholesky(
+            q_pat.symbolic(),
+            // SAFETY: etree fue rellenado por prefactorize_symbolic_cholesky
+            unsafe { EliminationTreeRef::from_inner(&etree) },
+            &col_counts,
+            stack2,
+        ).expect("reorder: fallo en Cholesky simbólico");
+
+        self.symbolic = Some(symbolic);
+        self.state    = State::Reordered;
     }
 
-    // ── build: evalúa QFunc y materializa Q ──────────────────────────────────
+    // ── build: evalúa QFunc y construye Q upper ───────────────────────────────
 
     fn build(&mut self, graph: &Graph, qfunc: &dyn QFunc, theta: &[f64]) {
         debug_assert!(
@@ -163,37 +165,61 @@ impl SparseSolver for FaerSolver {
 
         let mat = SparseColMat::<SpIdx, f64>::try_new_from_triplets(
             self.n, self.n, &self.triplets,
-        ).expect("build: triplets de Q inválidos");
+        ).expect("build: triplets inválidos");
 
-        self.q_mat = Some(mat);
-        self.llt   = None;
+        self.q_upper = Some(mat);
+        self.l_values.clear();
         self.log_det = None;
-        self.state = State::Built;
+        self.state   = State::Built;
     }
 
-    // ── factorize: Cholesky numérico ──────────────────────────────────────────
+    // ── factorize: Cholesky numérico + log-det ────────────────────────────────
 
     fn factorize(&mut self) -> Result<(), InlaError> {
-        debug_assert_eq!(self.state, State::Built, "Llamar build() antes de factorize()");
+        debug_assert_eq!(self.state, State::Built);
 
         let symbolic = self.symbolic.as_ref()
-            .expect("factorize: symbolic es None — llamar reorder() primero")
-            .clone(); // barato: es un Arc
+            .expect("llamar reorder() primero");
+        let q_upper = self.q_upper.as_ref()
+            .expect("llamar build() primero");
 
-        let mat = self.q_mat.as_ref()
-            .expect("factorize: q_mat es None — llamar build() primero");
+        let n = self.n;
 
-        // Cholesky numérico — falla si Q no es PD
-        let llt = Llt::try_new_with_symbolic(symbolic, mat.as_ref(), Side::Lower)
+        // Alojar L_values
+        self.l_values.clear();
+        self.l_values.resize(symbolic.len_val(), 0.0);
+
+        // Scratch para la factorización numérica
+        let scratch = simplicial::factorize_simplicial_numeric_llt_scratch::<SpIdx, f64>(n);
+        let mut mem = MemBuffer::try_new(scratch)
             .map_err(|_| InlaError::NotPositiveDefinite)?;
+        let stack = MemStack::new(&mut mem);
 
-        // log|Q| = 2·Σlog(Lᵢᵢ)
-        // TODO: acceder a la diagonal de L mediante la API interna de faer.
-        // Por ahora usamos un placeholder que se reemplaza en el siguiente commit.
-        // Ver probe_05_log_det en faer_api_probe.rs para la exploración.
-        let log_det = compute_log_det_placeholder(&llt, self.n);
+        match simplicial::factorize_simplicial_numeric_llt::<SpIdx, f64>(
+            &mut self.l_values,
+            q_upper.as_ref(),
+            LltRegularization::default(),
+            symbolic,
+            stack,
+        ) {
+            Ok(_)                  => {}
+            Err(_) => {
+                return Err(InlaError::NotPositiveDefinite);
+            }
+        }
 
-        self.llt     = Some(llt);
+        // ── log|Q| = 2·Σlog(L[j,j]) ──────────────────────────────────────────
+        // En CSC lower triangular: el primer elemento de la columna j
+        // es la diagonal L[j,j], que está en l_values[col_ptr[j]].
+        let col_ptr = symbolic.col_ptr(); // &[usize]
+        let log_det: f64 = (0..n)
+            .map(|j| {
+                let diag = self.l_values[col_ptr[j]];
+                diag.ln()
+            })
+            .sum::<f64>()
+            * 2.0;
+
         self.log_det = Some(log_det);
         self.state   = State::Factorized;
         Ok(())
@@ -206,42 +232,39 @@ impl SparseSolver for FaerSolver {
         self.log_det.expect("log_det no disponible")
     }
 
-    // ── solve_llt: Q·x = b ───────────────────────────────────────────────────
+    // ── solve_llt ─────────────────────────────────────────────────────────────
 
     fn solve_llt(&self, rhs: &mut [f64]) {
         debug_assert_eq!(self.state, State::Factorized);
-        let llt = self.llt.as_ref().expect("factorize primero");
+
+        let symbolic = self.symbolic.as_ref().expect("reorder primero");
         let n = rhs.len();
 
-        // Creamos un Mat<f64> con copia (safe), resolvemos, copiamos de vuelta.
-        // Para INLA n es típicamente 1k-50k — el overhead de copia es mínimo
-        // comparado con el Cholesky.
+        // Scratch para el solve
+        let scratch = symbolic.solve_in_place_scratch::<f64>(1);
+        let mut mem = MemBuffer::try_new(scratch)
+            .expect("solve_llt: no hay memoria");
+        let stack = MemStack::new(&mut mem);
+
+        // Convertir rhs a Mat<f64> (copia in/out — correcto para n típico de INLA)
         let mut rhs_mat = faer::Mat::<f64>::from_fn(n, 1, |i, _| rhs[i]);
-        llt.solve_in_place_with_conj(faer::Conj::No, rhs_mat.as_mut());
+
+        let llt_ref = SimplicialLltRef::<SpIdx, f64>::new(symbolic, &self.l_values);
+        llt_ref.solve_in_place_with_conj(Conj::No, rhs_mat.as_mut(), Par::Seq, stack);
+
         for i in 0..n {
             rhs[i] = rhs_mat[(i, 0)];
         }
     }
 
-    // ── selected_inverse (Takahashi) ─────────────────────────────────────────
+    // ── selected_inverse ──────────────────────────────────────────────────────
 
     fn selected_inverse(&mut self) -> Result<SpMat, InlaError> {
         debug_assert_eq!(self.state, State::Factorized);
-        // Fase A.3 completa: algoritmo de Takahashi
-        // Referencia: GMRFLib_Qinv() en problem-setup.c
-        unimplemented!("selected_inverse: implementar en Fase A.3 final")
+        // Fase A.3 final: algoritmo de Takahashi
+        // Con l_values y symbolic.col_ptr() ya tenemos todo lo necesario.
+        unimplemented!("selected_inverse: pendiente Fase A.3 final")
     }
-}
-
-/// Placeholder para log|Q| = 2·Σlog(Lᵢᵢ).
-/// Se reemplaza cuando exploremos el API de acceso a la diagonal de L.
-fn compute_log_det_placeholder<I, T>(_llt: &Llt<I, T>, _n: usize) -> f64 {
-    // TODO: reemplazar con acceso real a diag(L)
-    // Opciones a explorar:
-    //   A) llt.symbolic.inner.simplicial().col_ptr() + llt.numeric
-    //   B) método específico en SymbolicCholesky para diagonales
-    //   C) resolver un sistema auxiliar (caro, no preferido)
-    0.0 // incorrecto — marcador temporal
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -249,26 +272,22 @@ fn compute_log_det_placeholder<I, T>(_llt: &Llt<I, T>, _n: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{IidModel, Rw1Model};
+    use crate::models::{Ar1Model, IidModel, Rw1Model};
     use approx::assert_abs_diff_eq;
 
     #[test]
     fn solver_starts_fresh() {
-        let s = FaerSolver::new();
-        assert_eq!(s.state, State::Fresh);
+        assert_eq!(FaerSolver::new().state, State::Fresh);
     }
 
     #[test]
     fn build_triplets_iid_n3() {
         let mut solver = FaerSolver::new();
-        let mut g = crate::graph::Graph::iid(3);
+        let mut g = Graph::iid(3);
         let model = IidModel::new(3);
-        let theta = [2.0_f64.ln()];
-
         solver.reorder(&mut g);
-        solver.fill_triplets(&g, &model, &theta);
-
-        assert_eq!(solver.triplets.len(), 3);
+        solver.fill_triplets(&g, &model, &[2.0_f64.ln()]);
+        assert_eq!(solver.triplets.len(), 3); // solo diagonal
         for t in &solver.triplets {
             assert_abs_diff_eq!(t.val, 2.0, epsilon = 1e-12);
         }
@@ -277,84 +296,180 @@ mod tests {
     #[test]
     fn build_triplets_rw1_n3() {
         let mut solver = FaerSolver::new();
-        let mut g = crate::graph::Graph::linear(3);
+        let mut g = Graph::linear(3);
         let model = Rw1Model::new(3);
-        let theta = [0.0];
-
         solver.reorder(&mut g);
-        solver.fill_triplets(&g, &model, &theta);
-
-        // 3 diag + 2*2 off-diag = 7 triplets
-        assert_eq!(solver.triplets.len(), 7);
-        // Suma = 0 (propiedad de DᵀD: filas suman 0)
+        solver.fill_triplets(&g, &model, &[0.0]);
+        // upper triangle: 3 diag + 2 off-diag = 5
+        assert_eq!(solver.triplets.len(), 5);
         let sum: f64 = solver.triplets.iter().map(|t| t.val).sum();
-        assert_abs_diff_eq!(sum, 0.0, epsilon = 1e-10);
+        // suma = (1+2+1) + (-1-1) = 2  (triángulo superior de DᵀD)
+        assert_abs_diff_eq!(sum, 2.0, epsilon = 1e-10);
     }
 
     #[test]
     fn reorder_caches_hash() {
         let mut solver = FaerSolver::new();
-        let mut g = crate::graph::Graph::linear(10);
+        let mut g = Graph::linear(10);
         solver.reorder(&mut g);
         let h1 = solver.cached_hash;
-        solver.reorder(&mut g); // segunda llamada: no-op
+        solver.reorder(&mut g);
         assert_eq!(solver.cached_hash, h1);
     }
 
     #[test]
-    fn full_pipeline_iid() {
-        // IidModel es PD por construcción → factorize no debe fallar
+    fn full_pipeline_iid_log_det() {
+        // Q = tau * I  →  log|Q| = n * log(tau)
+        let n   = 4;
+        let tau = 3.0_f64;
         let mut solver = FaerSolver::new();
-        let mut g = crate::graph::Graph::iid(5);
-        let model = IidModel::new(5);
-        let theta = [0.0]; // tau = 1
+        let mut g = Graph::iid(n);
+        let model = IidModel::new(n);
 
         solver.reorder(&mut g);
-        solver.build(&g, &model, &theta);
-        solver.factorize().expect("IidModel debe ser PD");
-        let _ = solver.log_determinant(); // placeholder — no verificamos valor aún
-    }
+        solver.build(&g, &model, &[tau.ln()]);
+        solver.factorize().unwrap();
 
-    #[test]
-    fn full_pipeline_rw1_with_regularization() {
-        // RW1 es PSD — necesita regularización para ser PD
-        // Usamos tau grande (log-tau = 5) como proxy
-        let mut solver = FaerSolver::new();
-        let n = 5;
-        let mut g = crate::graph::Graph::linear(n);
-        let model = Rw1Model::new(n);
-
-        // Para hacer RW1 PD en tests aislados:
-        // En producción la verosimilitud provee la regularización.
-        // Aquí simplemente verificamos que el pipeline no panics.
-        solver.reorder(&mut g);
-        solver.build(&g, &model, &[5.0]);
-        // RW1 puro es singular — esperamos error NotPositiveDefinite
-        // (el assert confirma que el manejo de error funciona)
-        let result = solver.factorize();
-        // El resultado puede ser Ok o Err(NotPositiveDefinite) — ambos son correctos
-        // dependiendo de si faer detecta la singularidad con tau=5
-        let _ = result; // no panics es suficiente por ahora
+        let expected = (n as f64) * tau.ln();
+        assert_abs_diff_eq!(solver.log_determinant(), expected, epsilon = 1e-8);
     }
 
     #[test]
     fn solve_iid_identity() {
-        // Q = I → Q⁻¹·b = b
+        // Q = I  →  Q⁻¹·b = b
         let mut solver = FaerSolver::new();
-        let mut g = crate::graph::Graph::iid(4);
+        let mut g = Graph::iid(4);
         let model = IidModel::new(4);
 
         solver.reorder(&mut g);
-        solver.build(&g, &model, &[0.0]); // tau = 1, Q = I
+        solver.build(&g, &model, &[0.0]);
         solver.factorize().unwrap();
 
         let b = vec![1.0, 2.0, 3.0, 4.0];
         let mut x = b.clone();
         solver.solve_llt(&mut x);
 
-        // Q = I → solución debe ser igual al RHS
         for (xi, bi) in x.iter().zip(b.iter()) {
             assert_abs_diff_eq!(xi, bi, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn solve_iid_tau2() {
+        // Q = 2·I  →  Q⁻¹·b = b/2
+        let mut solver = FaerSolver::new();
+        let mut g = Graph::iid(4);
+        let model = IidModel::new(4);
+
+        solver.reorder(&mut g);
+        solver.build(&g, &model, &[2.0_f64.ln()]);
+        solver.factorize().unwrap();
+
+        let b = vec![2.0, 4.0, 6.0, 8.0];
+        let mut x = b.clone();
+        solver.solve_llt(&mut x);
+
+        for (xi, bi) in x.iter().zip(b.iter()) {
+            assert_abs_diff_eq!(*xi, bi / 2.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn log_det_ar1_rho_zero_equals_iid() {
+        // AR1 con ρ=0 es iid → mismo log-det que IidModel
+        let n = 5;
+        let tau = 2.0_f64;
+
+        let mut s_iid = FaerSolver::new();
+        let mut g_iid = Graph::iid(n);
+        s_iid.reorder(&mut g_iid);
+        s_iid.build(&g_iid, &IidModel::new(n), &[tau.ln()]);
+        s_iid.factorize().unwrap();
+
+        let mut s_ar1 = FaerSolver::new();
+        let mut g_ar1 = Graph::ar1(n);
+        s_ar1.reorder(&mut g_ar1);
+        s_ar1.build(&g_ar1, &Ar1Model::new(n), &[tau.ln(), 0.0]);
+        s_ar1.factorize().unwrap();
+
+        assert_abs_diff_eq!(
+            s_iid.log_determinant(),
+            s_ar1.log_determinant(),
+            epsilon = 1e-8
+        );
+    }
+
+    // Fixture: valida log_det y solve contra R-INLA (activar con fixtures en repo)
+    #[test]
+    #[ignore = "requiere tests/fixtures/cholesky_rw1.json"]
+    fn fixture_cholesky_log_det_and_solve() {
+        let raw = std::fs::read_to_string("tests/fixtures/cholesky_rw1.json").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let n       = v["n"][0].as_u64().unwrap() as usize;
+        let rows: Vec<usize> = v["rows"].as_array().unwrap().iter()
+            .map(|x| x.as_u64().unwrap() as usize).collect();
+        let cols: Vec<usize> = v["cols"].as_array().unwrap().iter()
+            .map(|x| x.as_u64().unwrap() as usize).collect();
+        let vals: Vec<f64>   = v["vals"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let rhs_ref: Vec<f64> = v["rhs"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let sol_ref: Vec<f64> = v["sol"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let log_det_ref = v["log_det"][0].as_f64().unwrap();
+
+        // Construir Q desde triplets del fixture (simetría: solo upper tri)
+        let triplets: Vec<Triplet<usize, usize, f64>> = rows.iter()
+            .zip(cols.iter())
+            .zip(vals.iter())
+            .filter(|((&r, &c), _)| r <= c)
+            .map(|((&r, &c), &v)| Triplet::new(r, c, v))
+            .collect();
+
+        let q = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
+
+        // Factorizar directamente con el solver low-level
+        let mut etree      = vec![0isize; n];
+        let mut col_counts = vec![0usize; n];
+        {
+            let sc = simplicial::prefactorize_symbolic_cholesky_scratch::<usize>(n, q.compute_nnz());
+            let mut mem = MemBuffer::try_new(sc).unwrap();
+            simplicial::prefactorize_symbolic_cholesky(&mut etree, &mut col_counts, q.symbolic(), MemStack::new(&mut mem));
+        }
+        let symbolic = {
+            let sc = simplicial::factorize_simplicial_symbolic_cholesky_scratch::<usize>(n);
+            let mut mem = MemBuffer::try_new(sc).unwrap();
+            simplicial::factorize_simplicial_symbolic_cholesky(
+                q.symbolic(),
+                unsafe { EliminationTreeRef::from_inner(&etree) },
+                &col_counts,
+                MemStack::new(&mut mem),
+            ).unwrap()
+        };
+        let mut l_values = vec![0.0f64; symbolic.len_val()];
+        {
+            let sc = simplicial::factorize_simplicial_numeric_llt_scratch::<usize, f64>(n);
+            let mut mem = MemBuffer::try_new(sc).unwrap();
+            simplicial::factorize_simplicial_numeric_llt(&mut l_values, q.as_ref(), LltRegularization::default(), &symbolic, MemStack::new(&mut mem)).unwrap();
+        }
+
+        // Verificar log-det
+        let col_ptr = symbolic.col_ptr();
+        let log_det: f64 = 2.0 * (0..n).map(|j| l_values[col_ptr[j]].ln()).sum::<f64>();
+        assert_abs_diff_eq!(log_det, log_det_ref, epsilon = 1e-4);
+
+        // Verificar solve
+        let mut sol = rhs_ref.clone();
+        let sc = symbolic.solve_in_place_scratch::<f64>(1);
+        let mut mem = MemBuffer::try_new(sc).unwrap();
+        let llt_ref_obj = SimplicialLltRef::<usize, f64>::new(&symbolic, &l_values);
+        let mut rhs_mat = faer::Mat::<f64>::from_fn(n, 1, |i, _| sol[i]);
+        llt_ref_obj.solve_in_place_with_conj(Conj::No, rhs_mat.as_mut(), Par::Seq, MemStack::new(&mut mem));
+        for i in 0..n { sol[i] = rhs_mat[(i, 0)]; }
+
+        for (s, r) in sol.iter().zip(sol_ref.iter()) {
+            assert_abs_diff_eq!(s, r, epsilon = 1e-8);
         }
     }
 }
