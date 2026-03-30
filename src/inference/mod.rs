@@ -94,7 +94,15 @@ impl InlaEngine {
         }
 
         // Media posterior simplificada: x_hat = 0 (IRLS pendiente Fase C+)
-        let posterior_mean = vec![0.0_f64; n];
+        // Media posterior real via IRLS
+        let posterior_mean = problem.find_mode(
+            model.qfunc,
+            model.likelihood,
+            model.y,
+            &theta_opt,
+            20,
+            1e-6,
+        ).unwrap_or_else(|_| vec![0.0_f64; n]);
 
         let random: Vec<Marginal> = (0..n)
             .map(|i| {
