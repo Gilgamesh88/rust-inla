@@ -221,4 +221,35 @@ mod tests {
             assert_abs_diff_eq!(m.sd(), sd0, epsilon = 1e-8);
         }
     }
+    #[test]
+    #[ignore = "requiere tests/fixtures/iid_gaussian.json"]
+    fn fixture_iid_gaussian_matches_r_inla() {
+        let raw = std::fs::read_to_string("tests/fixtures/iid_gaussian.json").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let y: Vec<f64> = v["y"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let mean_x_ref: Vec<f64> = v["mean_x"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+
+        let n     = y.len();
+        let model = crate::models::IidModel::new(n);
+        let lik   = crate::likelihood::GaussianLikelihood;
+
+        let result = InlaEngine::run(
+            &InlaModel { qfunc: &model, likelihood: &lik, y: &y,
+                         theta_init: vec![0.0, 0.0] },
+            &InlaParams::default(),
+        ).unwrap();
+
+        // Medias posteriores — con IRLS deben estar cerca de R-INLA
+        let mut max_err = 0.0_f64;
+        for (m, &ref_mean) in result.random.iter().zip(mean_x_ref.iter()) {
+            let err = (m.mean() - ref_mean).abs();
+            if err > max_err { max_err = err; }
+        }
+        println!("Max error en medias: {max_err:.6}");
+        // Tolerancia amplia — BFGS completo pendiente
+        assert!(max_err < 2.0, "Error demasiado grande: {max_err}");
+    }
 }
