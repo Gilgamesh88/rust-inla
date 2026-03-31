@@ -7,7 +7,6 @@
 //! - `inla.emarginal` → E[g(x)] para función g arbitraria
 //! - `inla.tmarginal` → transforma la variable aleatoria
 
-use crate::integrator::gauss_kronrod_15;
 
 /// Densidad marginal discreta — evaluada en una cuadrícula de puntos.
 ///
