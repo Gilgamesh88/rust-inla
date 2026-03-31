@@ -261,12 +261,72 @@ impl SparseSolver for FaerSolver {
 
     fn selected_inverse(&mut self) -> Result<SpMat, InlaError> {
         debug_assert_eq!(self.state, State::Factorized);
-        // Fase A.3 final: algoritmo de Takahashi
-        // Con l_values y symbolic.col_ptr() ya tenemos todo lo necesario.
-        unimplemented!("selected_inverse: pendiente Fase A.3 final")
+
+        let symbolic  = self.symbolic.as_ref().expect("reorder primero");
+        let n         = self.n;
+        let col_ptr   = symbolic.col_ptr();
+        let row_idx   = symbolic.row_idx();
+        let nnz_l     = self.l_values.len();
+        let mut q_inv = vec![0.0_f64; nnz_l];
+
+        for j in (0..n).rev() {
+            let col_start = col_ptr[j];
+            let col_end   = col_ptr[j + 1];
+            let l_jj      = self.l_values[col_start];
+
+            let mut s = 1.0 / (l_jj * l_jj);
+            for idx in (col_start + 1)..col_end {
+                s -= self.l_values[idx] * q_inv[idx];
+            }
+            q_inv[col_start] = s;
+
+            for idx_i in (col_start + 1)..col_end {
+                let i = row_idx[idx_i];
+                let mut t = 0.0_f64;
+                for idx_k in idx_i..col_end {
+                    let k    = row_idx[idx_k];
+                    let l_kj = self.l_values[idx_k];
+                    if let Some(pos) = find_in_col(row_idx, col_ptr, i, k) {
+                        t += l_kj * q_inv[pos];
+                    }
+                }
+                q_inv[idx_i] = -t / l_jj;
+            }
+        }
+
+        let mut triplets = Vec::with_capacity(nnz_l * 2);
+        for j in 0..n {
+            let col_start = col_ptr[j];
+            let col_end   = col_ptr[j + 1];
+            for idx in col_start..col_end {
+                let i = row_idx[idx];
+                let v = q_inv[idx];
+                triplets.push(Triplet::new(i, j, v));
+                if i != j { triplets.push(Triplet::new(j, i, v)); }
+            }
+        }
+
+        SparseColMat::<SpIdx, f64>::try_new_from_triplets(n, n, &triplets)
+            .map_err(|_| InlaError::SolverNotInitialized)
     }
 }
 
+fn find_in_col(
+    row_idx: &[usize],
+    col_ptr: &[usize],
+    col:     usize,
+    row:     usize,
+) -> Option<usize> {
+    let start = col_ptr[col];
+    let end   = col_ptr[col + 1];
+    row_idx[start..end]
+        .binary_search(&row)
+        .ok()
+        .map(|pos| start + pos)
+}
+
+/// Busca el indice de la fila `row` dentro de la columna `col` de L.
+/// Retorna None si no esta en el patron.
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -470,6 +530,37 @@ mod tests {
 
         for (s, r) in sol.iter().zip(sol_ref.iter()) {
             assert_abs_diff_eq!(s, r, epsilon = 1e-8);
+        }
+    }
+    #[test]
+    fn selected_inverse_iid_diagonal() {
+        let tau = 3.0_f64;
+        let n   = 4;
+        let mut solver = FaerSolver::new();
+        let mut g = Graph::iid(n);
+        let model = IidModel::new(n);
+        solver.reorder(&mut g);
+        solver.build(&g, &model, &[tau.ln()]);
+        solver.factorize().unwrap();
+        let q_inv = solver.selected_inverse().unwrap();
+        for i in 0..n {
+            let val = q_inv.val_of_col(i)[0];
+            assert_abs_diff_eq!(val, 1.0 / tau, epsilon = 1e-8);
+        }
+    }
+
+    #[test]
+    fn selected_inverse_variance_positive() {
+        let mut solver = FaerSolver::new();
+        let mut g = Graph::iid(5);
+        let model = IidModel::new(5);
+        solver.reorder(&mut g);
+        solver.build(&g, &model, &[5.0]);
+        solver.factorize().unwrap();
+        let q_inv = solver.selected_inverse().unwrap();
+        for i in 0..5 {
+            let diag = q_inv.val_of_col(i)[0];
+            assert!(diag > 0.0, "varianza[{i}] fue {diag}");
         }
     }
 }
