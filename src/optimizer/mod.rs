@@ -28,6 +28,7 @@ use crate::error::InlaError;
 use crate::likelihood::LogLikelihood;
 use crate::models::QFunc;
 use crate::problem::Problem;
+use crate::solver::SparseSolver;
 
 /// Resultado de la optimización.
 pub struct OptimResult {
@@ -154,15 +155,78 @@ pub fn optimize(
 
     // Gradiente por diferencias finitas
     let gradient = |problem: &mut Problem, theta: &[f64]| -> Vec<f64> {
-        let f0 = objective(problem, theta);
-        let mut grad = vec![0.0_f64; n_theta];
-        for i in 0..n_theta {
-            let mut theta_h = theta.to_vec();
-            theta_h[i] += h;
-            let fh = objective(problem, &theta_h);
-            grad[i] = (fh - f0) / h;
+        let theta_model = &theta[..n_model];
+
+        // Intentar gradiente analitico
+        // d f/d theta_k = 0.5 * traza(Q^-1 * dQ/d theta_k)
+        // Verificar si deval esta implementado (devuelve Some)
+        let has_analytic = qfunc.deval(0, 0, theta_model, 0).is_some();
+
+        if has_analytic {
+            // Necesitamos diag(Q^-1) = selected_inverse diagonal
+            // y la traza de Q^-1 * dQ/d theta_k
+            // Para modelos donde dQ/d theta_k = c_k * Q (iid, rw1):
+            //   traza(Q^-1 * dQ/d theta_k) = c_k * traza(Q^-1 * Q) = c_k * n
+            // Para AR1 con k=0: mismo, c_0 = 1
+            // Para AR1 con k=1: mas complejo, usamos diferencias finitas
+            let n_obs = y.len();
+            let mut grad = vec![0.0_f64; n_theta];
+
+            // Evaluar Q en theta actual (ya deberia estar factorizado)
+            let _ = problem.eval(qfunc, theta_model);
+
+            // Obtener diag(Q^-1) via Takahashi
+            if let Ok(q_inv) = problem.solver.selected_inverse() {
+                let diag_qinv: Vec<f64> = (0..n_obs)
+                    .map(|i| q_inv.val_of_col(i as usize)[0])
+                    .collect();
+
+                for k in 0..n_model {
+                    // traza(Q^-1 * dQ/d theta_k) = sum_i (Q^-1)_ii * dQ_ii/d theta_k
+                    // + 2 * sum_{i<j} (Q^-1)_ij * dQ_ij/d theta_k
+                    // Para modelos con dQ = c*Q: traza = c * n
+                    let dq_diag: f64 = (0..n_obs)
+                        .map(|i| {
+                            let dq = qfunc.deval(i, i, theta_model, k).unwrap_or(0.0);
+                            diag_qinv[i] * dq
+                        })
+                        .sum();
+
+                    grad[k] = -0.5 * dq_diag;
+                }
+            } else {
+                // Fallback a diferencias finitas si Takahashi falla
+                let f0 = objective(problem, theta);
+                for i in 0..n_theta {
+                    let mut theta_h = theta.to_vec();
+                    theta_h[i] += h;
+                    let fh = objective(problem, &theta_h);
+                    grad[i] = (fh - f0) / h;
+                }
+            }
+
+            // Para parametros de likelihood: siempre diferencias finitas
+            let f0 = objective(problem, theta);
+            for i in n_model..n_theta {
+                let mut theta_h = theta.to_vec();
+                theta_h[i] += h;
+                let fh = objective(problem, &theta_h);
+                grad[i] = (fh - f0) / h;
+            }
+
+            grad
+        } else {
+            // Diferencias finitas completas
+            let f0 = objective(problem, theta);
+            let mut grad = vec![0.0_f64; n_theta];
+            for i in 0..n_theta {
+                let mut theta_h = theta.to_vec();
+                theta_h[i] += h;
+                let fh = objective(problem, &theta_h);
+                grad[i] = (fh - f0) / h;
+            }
+            grad
         }
-        grad
     };
 
     // Descenso de gradiente con paso adaptativo (Barzilai-Borwein)

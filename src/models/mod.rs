@@ -35,6 +35,12 @@ pub trait QFunc: Send + Sync {
 
     /// Número de hiperparámetros θ de este modelo.
     fn n_hyperparams(&self) -> usize;
+    /// Derivada de Q(i,j,theta) respecto a theta[k].
+    /// Por defecto None — usa diferencias finitas en el optimizador.
+    /// Implementar para gradientes exactos y BFGS eficiente.
+    fn deval(&self, _i: usize, _j: usize, _theta: &[f64], _k: usize) -> Option<f64> {
+        None
+    }
 }
 
 // ── IidModel ──────────────────────────────────────────────────────────────────
@@ -65,6 +71,12 @@ impl QFunc for IidModel {
     }
 
     fn n_hyperparams(&self) -> usize { 1 }
+
+    fn deval(&self, i: usize, j: usize, theta: &[f64], k: usize) -> Option<f64> {
+        if k != 0 { return Some(0.0); }
+        // d/d(log_tau) [tau * structure] = tau * structure = Q(i,j)
+        Some(self.eval(i, j, theta))
+    }
 }
 
 // ── Rw1Model ──────────────────────────────────────────────────────────────────
@@ -116,6 +128,11 @@ impl QFunc for Rw1Model {
     }
 
     fn n_hyperparams(&self) -> usize { 1 }
+    fn deval(&self, i: usize, j: usize, theta: &[f64], k: usize) -> Option<f64> {
+        if k != 0 { return Some(0.0); }
+        // d/d(log_tau) [tau * structure] = tau * structure = Q(i,j)
+        Some(self.eval(i, j, theta))
+    }
 }
 
 // ── Ar1Model ──────────────────────────────────────────────────────────────────
@@ -171,6 +188,27 @@ impl QFunc for Ar1Model {
     }
 
     fn n_hyperparams(&self) -> usize { 2 }
+
+    fn deval(&self, i: usize, j: usize, theta: &[f64], k: usize) -> Option<f64> {
+        let tau = theta[0].exp();
+        let rho = theta[1].tanh();
+        let n   = self.graph.n();
+        match k {
+            0 => Some(self.eval(i, j, theta)), // d/d(log_tau) = Q(i,j)
+            1 => {
+                // d/d(arctanh_rho)
+                // drho/d(arctanh_rho) = 1 - rho^2
+                let drho = 1.0 - rho * rho;
+                if i == j {
+                    if i == 0 || i == n - 1 { Some(0.0) }
+                    else { Some(tau * 2.0 * rho * drho) }
+                } else {
+                    Some(-tau * drho)
+                }
+            }
+            _ => Some(0.0),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
