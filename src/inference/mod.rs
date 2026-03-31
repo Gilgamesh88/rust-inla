@@ -29,6 +29,7 @@ use crate::likelihood::LogLikelihood;
 use crate::marginal::Marginal;
 use crate::models::QFunc;
 use crate::optimizer::{self, OptimizerParams};
+use crate::solver::SparseSolver;
 use crate::problem::Problem;
 
 pub struct InlaModel<'a> {
@@ -85,13 +86,20 @@ impl InlaEngine {
         let n = problem.n();
 
         // Varianzas: diag(Q^-1) via n solves. Correcto, O(n^2).
-        let mut variances = vec![0.0_f64; n];
-        for i in 0..n {
-            let mut e_i = vec![0.0_f64; n];
-            e_i[i] = 1.0;
-            problem.solve(&mut e_i);
-            variances[i] = e_i[i].max(0.0);
-        }
+        let variances: Vec<f64> = match problem.solver.selected_inverse() {
+            Ok(q_inv) => (0..n)
+                .map(|i| q_inv.val_of_col(i as usize)[0].max(0.0))
+                .collect(),
+            Err(_) => {
+                // fallback O(n^2) si Takahashi falla
+                (0..n).map(|i| {
+                    let mut e_i = vec![0.0_f64; n];
+                    e_i[i] = 1.0;
+                    problem.solve(&mut e_i);
+                    e_i[i].max(0.0)
+                }).collect()
+            }
+        };
 
         // Media posterior simplificada: x_hat = 0 (IRLS pendiente Fase C+)
         // Media posterior real via IRLS
