@@ -42,12 +42,28 @@ impl Problem {
         max_iter:   usize,
         tol:        f64,
     ) -> Result<Vec<f64>, InlaError> {
+        let (x, _) = self.find_mode_with_logdet(qfunc, likelihood, y, theta, max_iter, tol)?;
+        Ok(x)
+    }
+
+    /// Igual que find_mode pero tambien devuelve log|Q+W| de la ultima iteracion.
+    /// Necesario para la aproximacion de Laplace completa en el optimizador.
+    pub fn find_mode_with_logdet(
+        &mut self,
+        qfunc:      &dyn QFunc,
+        likelihood: &dyn crate::likelihood::LogLikelihood,
+        y:          &[f64],
+        theta:      &[f64],
+        max_iter:   usize,
+        tol:        f64,
+    ) -> Result<(Vec<f64>, f64), InlaError> {
         let n           = self.n();
         let n_model     = qfunc.n_hyperparams();
         let theta_model = &theta[..n_model];
         let theta_lik   = &theta[n_model..];
         let h           = 1e-5;
         let mut x       = vec![0.0_f64; n];
+        let mut log_det_aug = 0.0_f64;
 
         for _iter in 0..max_iter {
             let x_old = x.clone();
@@ -79,6 +95,7 @@ impl Problem {
             let aug = AugmentedQFunc { inner: qfunc, diag_add: &curv };
             self.solver.build(&self.graph, &aug, theta_model);
             self.solver.factorize()?;
+            log_det_aug = self.solver.log_determinant();
             self.solver.solve_llt(&mut rhs);
             x = rhs;
 
@@ -88,7 +105,7 @@ impl Problem {
             if delta < tol { break; }
         }
 
-        Ok(x)
+        Ok((x, log_det_aug))
     }
 }
 
@@ -218,5 +235,24 @@ mod tests {
         for (a, b) in x1.iter().zip(x2.iter()) {
             assert_abs_diff_eq!(a, b, epsilon = 1e-3);
         }
+    }
+
+    #[test]
+    fn find_mode_with_logdet_returns_positive_logdet() {
+        let n = 5;
+        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let model = IidModel::new(n);
+        let lik   = GaussianLikelihood;
+        let mut p = Problem::new(&model);
+        let theta = vec![0.0_f64, 0.0_f64];
+        let (x_hat, log_det_aug) = p.find_mode_with_logdet(
+            &model, &lik, &y, &theta, 20, 1e-6
+        ).unwrap();
+        assert_eq!(x_hat.len(), n);
+        assert!(log_det_aug.is_finite(), "log_det_aug debe ser finito");
+        // Para Q+W con W>0, log_det debe ser mayor que log_det de Q solo
+        let log_det_q = p.eval(&model, &[0.0]).unwrap();
+        assert!(log_det_aug > log_det_q,
+            "log|Q+W| debe ser mayor que log|Q|: {log_det_aug} vs {log_det_q}");
     }
 }
