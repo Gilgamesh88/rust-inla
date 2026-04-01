@@ -166,7 +166,141 @@ impl Problem {
         Ok((x, log_det_aug, diag_aug_inv))
     }
 
-    /// Igual que find_mode pero también devuelve log|Q+W|.
+    /// IRLS con estimación de intercepto β₀ + Takahashi sobre Q+W.
+    ///
+    /// ## Equivalencia con R-INLA
+    ///
+    /// En R-INLA el predictor lineal es η = Aβ + x donde A=1 (intercept global).
+    /// El intercepto se estima por "perfil" en cada paso IRLS:
+    ///
+    ///   β₀ = Σᵢ Wᵢ·(zᵢ - xᵢ) / ΣᵢWᵢ    (inla.c ~2600)
+    ///
+    /// lo que centra el working response antes de resolver el sistema Cholesky.
+    /// Esto es equivalente a incluir β₀ en el campo latente aumentado con una
+    /// columna de unos y un prior difuso (varianza → ∞).
+    ///
+    /// ## Returns
+    /// `(beta0, x_hat, log_det_aug, diag_aug_inv)` donde:
+    /// - `beta0`:        intercepto estimado
+    /// - `x_hat`:        efecto latente centrado (sin intercepto)
+    /// - `log_det_aug`:  log|Q+W|
+    /// - `diag_aug_inv`: diag((Q+W)⁻¹)
+    pub fn find_mode_with_intercept_and_inverse(
+        &mut self,
+        qfunc:      &dyn QFunc,
+        likelihood: &dyn crate::likelihood::LogLikelihood,
+        y:          &[f64],
+        theta:      &[f64],
+        x_init:     &[f64],
+        beta0_init: f64,
+        max_iter:   usize,
+        tol:        f64,
+    ) -> Result<(f64, Vec<f64>, f64, Vec<f64>), InlaError> {
+        let n           = self.n();
+        let n_model     = qfunc.n_hyperparams();
+        let theta_model = &theta[..n_model];
+        let theta_lik   = &theta[n_model..];
+        let h           = 1e-5;
+
+        let mut x = if x_init.len() == n {
+            x_init.to_vec()
+        } else {
+            vec![0.0_f64; n]
+        };
+        let mut beta0       = beta0_init;
+        let mut log_det_aug = 0.0_f64;
+
+        for _iter in 0..max_iter {
+            let x_old    = x.clone();
+            let beta0_old = beta0;
+
+            // Predictor lineal: η = β₀ + x
+            let eta: Vec<f64> = x.iter().map(|xi| beta0 + xi).collect();
+
+            let mut ll_center = vec![0.0_f64; n];
+            let mut ll_plus   = vec![0.0_f64; n];
+            let mut ll_minus  = vec![0.0_f64; n];
+            let mut grad      = vec![0.0_f64; n];
+            let mut curv      = vec![0.0_f64; n];
+
+            likelihood.evaluate(&mut ll_center, &eta, y, theta_lik);
+
+            for i in 0..n {
+                let mut ep = eta.clone(); ep[i] += h;
+                let mut em = eta.clone(); em[i] -= h;
+                likelihood.evaluate(&mut ll_plus,  &ep, y, theta_lik);
+                likelihood.evaluate(&mut ll_minus, &em, y, theta_lik);
+                grad[i] = (ll_plus[i] - ll_minus[i]) / (2.0 * h);
+                curv[i] = (-(ll_plus[i] - 2.0*ll_center[i] + ll_minus[i])
+                            / (h * h)).max(1e-6);
+            }
+
+            // Working response (en escala de η): zᵢ = ηᵢ + gradᵢ/Wᵢ
+            let z: Vec<f64> = (0..n).map(|i| eta[i] + grad[i] / curv[i]).collect();
+
+            // Estimar β₀ por perfil — weighted mean del residuo (zᵢ - xᵢ)
+            // Equivale a resolver la ecuación normal de β₀ con prior difuso:
+            //   β₀ = Σ Wᵢ·(zᵢ - xᵢ) / Σ Wᵢ
+            let sum_w:  f64 = curv.iter().sum();
+            let sum_wz: f64 = (0..n).map(|i| curv[i] * (z[i] - x[i])).sum();
+            beta0 = sum_wz / sum_w;
+
+            // Centrar el working response: z_c = z - β₀
+            // Resolver (Q + W)·x = W·z_c
+            let mut rhs: Vec<f64> = (0..n).map(|i| curv[i] * (z[i] - beta0)).collect();
+
+            let aug = AugmentedQFunc { inner: qfunc, diag_add: &curv };
+            self.solver.build(&self.graph, &aug, theta_model);
+            self.solver.factorize()?;
+            log_det_aug = self.solver.log_determinant();
+            self.solver.solve_llt(&mut rhs);
+            x = rhs;
+
+            // Constraint suma-a-cero: Σxᵢ = 0 (inla.c ~2800 GMRFLib_constr_add)
+            //
+            // Para priors impropios (Rw1, Rw2), el nivel de x no está identificado
+            // separado de β₀ — cualquier (β₀+c, x-c) da el mismo predictor η.
+            // La constraint Σxᵢ = 0 fija el nivel de x y hace β₀ identificable.
+            //
+            // Sin esta constraint, el IRLS puede converger a β₀ muy negativo y
+            // x muy positivo (o viceversa), dando el predictor correcto pero con
+            // x e intercept individuales erróneos.
+            //
+            // Para priors propios (iid, ar1), la constraint mejora la estabilidad
+            // numérica sin cambiar el resultado (Q ya penaliza valores grandes de x).
+            let mean_x: f64 = x.iter().sum::<f64>() / n as f64;
+            for xi in x.iter_mut() { *xi -= mean_x; }
+            beta0 += mean_x;
+
+            // Convergencia: max cambio en (β₀, x)
+            let delta_x: f64 = x.iter().zip(x_old.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            let delta_b = (beta0 - beta0_old).abs();
+            if delta_x.max(delta_b) < tol { break; }
+        }
+
+        // Takahashi sobre Q+W — idéntico a find_mode_with_inverse
+        let aug_inv  = self.solver.selected_inverse()?;
+        let col_ptr  = aug_inv.symbolic().col_ptr();
+        let row_idx  = aug_inv.symbolic().row_idx();
+        let all_vals = aug_inv.val();
+
+        let diag_aug_inv: Vec<f64> = (0..n)
+            .map(|j| {
+                let start    = col_ptr[j];
+                let end      = col_ptr[j + 1];
+                let col_rows = &row_idx[start..end];
+                let pos      = col_rows.binary_search(&j)
+                    .expect("diagonal en patrón de (Q+W)⁻¹");
+                all_vals[start + pos]
+            })
+            .collect();
+
+        Ok((beta0, x, log_det_aug, diag_aug_inv))
+    }
+
+        /// Igual que find_mode pero también devuelve log|Q+W|.
     /// Delega en find_mode_with_inverse con cold start.
     pub fn find_mode_with_logdet(
         &mut self,
