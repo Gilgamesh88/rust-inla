@@ -26,6 +26,75 @@ impl Problem {
         Ok(self.log_det)
     }
 
+    /// Evaluación atómica: factoriza Q y calcula la inversa seleccionada
+    /// en una sola llamada, garantizando que `selected_inverse()` ve siempre
+    /// el estado `Factorized` correcto.
+    ///
+    /// # Returns
+    /// `(log_det, diag_qinv)` donde:
+    /// - `log_det`   = log|Q(θ)|
+    /// - `diag_qinv` = diag(Q⁻¹), vector de longitud n
+    ///
+    /// # Por qué existe este método
+    /// `selected_inverse()` requiere estado `Factorized`. Cuando `build()` y
+    /// `factorize()` se invocan desde rutas distintas (p.ej. el bucle del
+    /// optimizador), cualquier llamada intermedia a `build()` resetea el
+    /// estado a `Built` y `selected_inverse()` falla. Al fusionar las tres
+    /// operaciones aquí, el estado nunca puede quedar inconsistente.
+    ///
+    /// # Nota sobre la diagonal en SpMat simétrica
+    /// `selected_inverse()` emite triplets lower+upper → la SpMat resultante
+    /// es simétrica. En la columna j, el elemento diagonal (fila == j) NO es
+    /// necesariamente el primero: puede estar precedido por filas i < j.
+    /// Se usa `binary_search` sobre `row_idx_of_col(j)`, que siempre está
+    /// ordenado ascendentemente por invariante CSC.
+    pub fn eval_with_inverse(
+        &mut self,
+        qfunc: &dyn QFunc,
+        theta: &[f64],
+    ) -> Result<(f64, Vec<f64>), InlaError> {
+        // Paso 1: build + factorize
+        self.solver.build(&self.graph, qfunc, theta);
+        self.solver.factorize()?;
+        let log_det  = self.solver.log_determinant();
+        self.log_det  = log_det;
+        self.n_evals += 1;
+
+        // Paso 2: Takahashi — el solver está en Factorized, garantizado
+        // porque build+factorize y selected_inverse viven en la misma llamada.
+        let q_inv = self.solver.selected_inverse()?;
+
+        // Paso 3: extraer diagonal usando los arrays CSC raw.
+        //
+        // row_idx_of_col() en faer 0.24 devuelve un iterador, no un slice,
+        // por lo que binary_search no está disponible directamente en él.
+        // Accedemos a col_ptr y row_idx del simbólico (igual que en
+        // faer_solver.rs) para obtener slices sobre los que sí funciona
+        // binary_search. Esto es correcto para cualquier modelo: en la SpMat
+        // simétrica que devuelve selected_inverse(), el elemento diagonal (j,j)
+        // puede NO ser el primero de la columna (hay entradas i < j antes),
+        // por lo que val_of_col(j)[0] sería incorrecto para Rw1/Ar1.
+        let n        = self.n();
+        let col_ptr  = q_inv.symbolic().col_ptr();
+        let row_idx  = q_inv.symbolic().row_idx();
+        let all_vals = q_inv.val();
+
+        let diag_qinv: Vec<f64> = (0..n)
+            .map(|j| {
+                let start    = col_ptr[j];
+                let end      = col_ptr[j + 1];
+                let col_rows = &row_idx[start..end];
+                // col_rows está ordenado ascendentemente (invariante CSC).
+                let pos = col_rows
+                    .binary_search(&j)
+                    .expect("la diagonal siempre pertenece al patrón de Q⁻¹");
+                all_vals[start + pos]
+            })
+            .collect();
+
+        Ok((log_det, diag_qinv))
+    }
+
     pub fn solve(&self, rhs: &mut [f64]) {
         self.solver.solve_llt(rhs);
     }
@@ -250,9 +319,107 @@ mod tests {
         ).unwrap();
         assert_eq!(x_hat.len(), n);
         assert!(log_det_aug.is_finite(), "log_det_aug debe ser finito");
-        // Para Q+W con W>0, log_det debe ser mayor que log_det de Q solo
         let log_det_q = p.eval(&model, &[0.0]).unwrap();
         assert!(log_det_aug > log_det_q,
             "log|Q+W| debe ser mayor que log|Q|: {log_det_aug} vs {log_det_q}");
+    }
+
+    // ── Tests de eval_with_inverse ────────────────────────────────────────────
+
+    #[test]
+    fn eval_with_inverse_iid_diagonal_equals_one_over_tau() {
+        // Q = tau*I  →  Q⁻¹ = (1/tau)*I
+        let n   = 6;
+        let tau = 4.0_f64;
+        let model = IidModel::new(n);
+        let mut p = Problem::new(&model);
+        let (log_det, diag) = p.eval_with_inverse(&model, &[tau.ln()]).unwrap();
+
+        assert_abs_diff_eq!(log_det, (n as f64) * tau.ln(), epsilon = 1e-8);
+        assert_eq!(diag.len(), n);
+        for (i, d) in diag.iter().enumerate() {
+            assert!(
+                (*d - 1.0 / tau).abs() < 1e-8,
+                "diag[{i}] esperado {}, obtenido {d}", 1.0 / tau
+            );
+        }
+    }
+
+    #[test]
+    fn eval_with_inverse_log_det_matches_eval() {
+        // log_det debe ser idéntico al de eval() con los mismos theta
+        let n = 5;
+        let model = IidModel::new(n);
+        let mut p1 = Problem::new(&model);
+        let mut p2 = Problem::new(&model);
+        let theta = [2.0_f64.ln()];
+
+        let (ld_inv, _) = p1.eval_with_inverse(&model, &theta).unwrap();
+        let ld_eval     = p2.eval(&model, &theta).unwrap();
+
+        assert_abs_diff_eq!(ld_inv, ld_eval, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn eval_with_inverse_diag_all_positive() {
+        let n = 8;
+        let model = IidModel::new(n);
+        let mut p = Problem::new(&model);
+        let (_, diag) = p.eval_with_inverse(&model, &[1.5_f64.ln()]).unwrap();
+        for (i, d) in diag.iter().enumerate() {
+            assert!(*d > 0.0, "diag[{i}] = {d} debe ser positivo");
+        }
+    }
+
+    #[test]
+    fn eval_with_inverse_ar1_log_det_matches_eval() {
+        // Ar1 tiene fill-in no-trivial en L — verifica binary_search y log_det
+        let n   = 7;
+        let tau = 2.0_f64;
+        let rho = 0.6_f64;
+        let model = Ar1Model::new(n);
+        let mut p1 = Problem::new(&model);
+        let mut p2 = Problem::new(&model);
+        let theta = [tau.ln(), rho.atanh()];
+
+        let (ld_inv, diag) = p1.eval_with_inverse(&model, &theta).unwrap();
+        let ld_eval        = p2.eval(&model, &theta).unwrap();
+
+        assert_abs_diff_eq!(ld_inv, ld_eval, epsilon = 1e-10);
+        assert_eq!(diag.len(), n);
+        for (i, d) in diag.iter().enumerate() {
+            assert!(*d > 0.0 && d.is_finite(),
+                "diag[{i}] = {d} debe ser positivo y finito");
+        }
+    }
+
+    #[test]
+    fn eval_with_inverse_n_evals_increments() {
+        let model = IidModel::new(4);
+        let mut p = Problem::new(&model);
+        assert_eq!(p.n_evals, 0);
+        p.eval_with_inverse(&model, &[0.0]).unwrap();
+        assert_eq!(p.n_evals, 1);
+        p.eval_with_inverse(&model, &[1.0]).unwrap();
+        assert_eq!(p.n_evals, 2);
+    }
+
+    #[test]
+    fn eval_with_inverse_idempotent_across_calls() {
+        // Dos llamadas seguidas con los mismos theta deben dar resultados idénticos.
+        // Verifica que el estado interno se resetea correctamente en cada llamada.
+        let n   = 5;
+        let tau = 3.0_f64;
+        let model = IidModel::new(n);
+        let mut p = Problem::new(&model);
+        let theta = [tau.ln()];
+
+        let (ld1, diag1) = p.eval_with_inverse(&model, &theta).unwrap();
+        let (ld2, diag2) = p.eval_with_inverse(&model, &theta).unwrap();
+
+        assert_abs_diff_eq!(ld1, ld2, epsilon = 1e-12);
+        for (a, b) in diag1.iter().zip(diag2.iter()) {
+            assert_abs_diff_eq!(a, b, epsilon = 1e-12);
+        }
     }
 }

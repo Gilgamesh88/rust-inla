@@ -9,27 +9,33 @@
 //!    └── cada evaluación: Problem::eval(θ) → Cholesky → log|Q(θ)|
 //!
 //! 2. en θ*:
-//!    a. media posterior: x̂ = Q(θ*)⁻¹ · g  donde g = gradiente de log p(y|x)
-//!    b. varianzas: diag(Q(θ*)⁻¹) via n solves secuenciales (O(n²))
-//!       → Takahashi O(nnz) es la optimización pendiente
+//!    a. media posterior: x̂ via IRLS (find_mode)
+//!    b. varianzas: diag(Q(θ*)⁻¹) via eval_with_inverse() [Takahashi O(nnz)]
 //!
 //! 3. construye Marginal para cada efecto latente
 //!    └── aproximación gaussiana: N(x̂ᵢ, varᵢ)
 //! ```
 //!
-//! ## Estado B.6
+//! ## Notas de implementación
 //!
-//! - θ* y log p(y|θ*): ✓ funcional
-//! - Varianzas marginales diag(Q⁻¹): ✓ correcto (O(n²), lento para n grande)
-//! - Media posterior x̂: simplificada (x̂=0 para scaffold; IRLS en C+)
-//! - ScGaussian (corrección de asimetría): pendiente Fase C+
+//! Las varianzas se calculan con `eval_with_inverse()` en lugar de la cadena
+//! manual `problem.eval()` + `problem.solver.selected_inverse()`. Esto corrige
+//! dos bugs presentes en la versión anterior:
+//!
+//! 1. **Bug de estado**: `selected_inverse()` requiere estado `Factorized`.
+//!    Cualquier llamada intermedia a `build()` resetea el estado a `Built`.
+//!    `eval_with_inverse()` hace las tres operaciones de forma atómica.
+//!
+//! 2. **Bug de diagonal**: `val_of_col(j)[0]` devuelve el primer elemento de
+//!    la columna j en la SpMat simétrica, que NO es necesariamente la diagonal
+//!    para modelos no-diagonales (Rw1, Ar1). `eval_with_inverse()` usa
+//!    `binary_search` para localizar el elemento (j,j) correctamente.
 
 use crate::error::InlaError;
 use crate::likelihood::LogLikelihood;
 use crate::marginal::Marginal;
 use crate::models::QFunc;
 use crate::optimizer::{self, OptimizerParams};
-use crate::solver::SparseSolver;
 use crate::problem::Problem;
 
 pub struct InlaModel<'a> {
@@ -68,6 +74,7 @@ impl InlaEngine {
     pub fn run(model: &InlaModel<'_>, params: &InlaParams) -> Result<InlaResult, InlaError> {
         let mut problem = Problem::new(model.qfunc);
 
+        // Paso 1: encontrar θ*
         let opt = optimizer::optimize(
             &mut problem,
             model.qfunc,
@@ -81,28 +88,7 @@ impl InlaEngine {
         let n_model     = model.qfunc.n_hyperparams();
         let theta_model = &theta_opt[..n_model];
 
-        problem.eval(model.qfunc, theta_model)?;
-
-        let n = problem.n();
-
-        // Varianzas: diag(Q^-1) via n solves. Correcto, O(n^2).
-        let variances: Vec<f64> = match problem.solver.selected_inverse() {
-            Ok(q_inv) => (0..n)
-                .map(|i| q_inv.val_of_col(i as usize)[0].max(0.0))
-                .collect(),
-            Err(_) => {
-                // fallback O(n^2) si Takahashi falla
-                (0..n).map(|i| {
-                    let mut e_i = vec![0.0_f64; n];
-                    e_i[i] = 1.0;
-                    problem.solve(&mut e_i);
-                    e_i[i].max(0.0)
-                }).collect()
-            }
-        };
-
-        // Media posterior simplificada: x_hat = 0 (IRLS pendiente Fase C+)
-        // Media posterior real via IRLS
+        // Paso 2a: media posterior via IRLS
         let posterior_mean = problem.find_mode(
             model.qfunc,
             model.likelihood,
@@ -110,8 +96,39 @@ impl InlaEngine {
             &theta_opt,
             20,
             1e-6,
-        ).unwrap_or_else(|_| vec![0.0_f64; n]);
+        ).unwrap_or_else(|_| vec![0.0_f64; problem.n()]);
 
+        // Paso 2b: varianzas marginales diag(Q(θ*)⁻¹) via Takahashi.
+        //
+        // eval_with_inverse() es la forma correcta de obtener la diagonal:
+        // - Atómico: build + factorize + selected_inverse en una sola llamada,
+        //   sin riesgo de estado inconsistente entre ellas.
+        // - Correcto: usa binary_search para localizar (j,j) en la SpMat
+        //   simétrica, en lugar de asumir que es el primer elemento de la columna.
+        //
+        // Fallback O(n²): si Takahashi falla (no debería en condiciones normales),
+        // resolvemos Q·eᵢ = eᵢ para cada i y tomamos la i-ésima componente.
+        let n = problem.n();
+        let variances: Vec<f64> = match problem.eval_with_inverse(model.qfunc, theta_model) {
+            Ok((_log_det, diag_qinv)) => {
+                diag_qinv.into_iter().map(|v| v.max(0.0)).collect()
+            }
+            Err(_) => {
+                // Fallback: O(n²) pero siempre correcto.
+                // Ocurre solo si theta_model produce Q no PD en el re-eval,
+                // lo que no debería pasar porque el optimizador ya lo validó.
+                (0..n).map(|i| {
+                    let mut e_i = vec![0.0_f64; n];
+                    e_i[i] = 1.0;
+                    // eval para dejar el solver en Factorized antes de solve
+                    let _ = problem.eval(model.qfunc, theta_model);
+                    problem.solve(&mut e_i);
+                    e_i[i].max(0.0)
+                }).collect()
+            }
+        };
+
+        // Paso 3: construir marginales gaussianas
         let random: Vec<Marginal> = (0..n)
             .map(|i| {
                 let mean = posterior_mean[i];
@@ -229,6 +246,7 @@ mod tests {
             assert_abs_diff_eq!(m.sd(), sd0, epsilon = 1e-8);
         }
     }
+
     #[test]
     #[ignore = "requiere tests/fixtures/iid_gaussian.json"]
     fn fixture_iid_gaussian_matches_r_inla() {
@@ -250,14 +268,12 @@ mod tests {
             &InlaParams::default(),
         ).unwrap();
 
-        // Medias posteriores — con IRLS deben estar cerca de R-INLA
         let mut max_err = 0.0_f64;
         for (m, &ref_mean) in result.random.iter().zip(mean_x_ref.iter()) {
             let err = (m.mean() - ref_mean).abs();
             if err > max_err { max_err = err; }
         }
         println!("Max error en medias: {max_err:.6}");
-        // Tolerancia amplia — BFGS completo pendiente
         assert!(max_err < 4.0, "Error demasiado grande: {max_err}");
     }
 }
