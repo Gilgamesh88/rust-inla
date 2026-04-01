@@ -41,6 +41,14 @@ pub trait QFunc: Send + Sync {
     fn deval(&self, _i: usize, _j: usize, _theta: &[f64], _k: usize) -> Option<f64> {
         None
     }
+
+    /// Si true, Q es definida positiva (prior propio).
+    /// Si false, Q es solo semidefinida positiva (prior impropio, e.g. Rw1, Rw2).
+    ///
+    /// El optimizador usa este flag para omitir el término 0.5·log|Q| cuando
+    /// Q es singular: para un prior impropio log|Q| = -∞ y no contribuye al
+    /// modo de p(y|θ). Solo la verosimilitud y log|Q+W| determinan θ*.
+    fn is_proper(&self) -> bool { true }
 }
 
 // ── IidModel ──────────────────────────────────────────────────────────────────
@@ -133,6 +141,9 @@ impl QFunc for Rw1Model {
         // d/d(log_tau) [tau * structure] = tau * structure = Q(i,j)
         Some(self.eval(i, j, theta))
     }
+    /// Rw1 es un prior impropio: Q = τ·DᵀD es solo semidefinida positiva.
+    /// El vector constante [1,1,...,1] está en el kernel → log|Q| = -∞.
+    fn is_proper(&self) -> bool { false }
 }
 
 // ── Ar1Model ──────────────────────────────────────────────────────────────────

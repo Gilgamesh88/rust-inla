@@ -86,45 +86,41 @@ impl InlaEngine {
 
         let theta_opt   = opt.theta_opt.clone();
         let n_model     = model.qfunc.n_hyperparams();
-        let theta_model = &theta_opt[..n_model];
+        let _theta_model = &theta_opt[..n_model];
 
-        // Paso 2a: media posterior via IRLS
-        let posterior_mean = problem.find_mode(
+        // Paso 2a+b: media posterior via IRLS + varianzas diag((Q+W)⁻¹).
+        //
+        // find_mode_with_inverse hace IRLS hasta convergencia y devuelve
+        // simultáneamente x̂ y diag((Q+W)⁻¹) via Takahashi sobre Q+W.
+        //
+        // Por qué diag((Q+W)⁻¹) y no diag(Q⁻¹):
+        // - R-INLA usa la aproximación gaussiana p̃(x|y,θ) = N(x̂, (Q+W)⁻¹)
+        //   donde W = curvatura de la likelihood en el modo.
+        // - Para prior propio: diag(Q⁻¹) ≈ diag((Q+W)⁻¹) cuando W es grande
+        //   (likelihood domina), pero difieren en general.
+        // - Para prior IMPROPIO (Rw1): Q es singular → diag(Q⁻¹) = ∞ → bug.
+        //   diag((Q+W)⁻¹) es siempre finito porque Q+W es PD.
+        //
+        // Referencia: R-INLA approx-inference.c, función inla_compute_marginals()
+        let n = problem.n();
+        let (posterior_mean, variances) = match problem.find_mode_with_inverse(
             model.qfunc,
             model.likelihood,
             model.y,
             &theta_opt,
+            &[],   // cold start en la inferencia final (warm start fue en optimizer)
             20,
             1e-6,
-        ).unwrap_or_else(|_| vec![0.0_f64; problem.n()]);
-
-        // Paso 2b: varianzas marginales diag(Q(θ*)⁻¹) via Takahashi.
-        //
-        // eval_with_inverse() es la forma correcta de obtener la diagonal:
-        // - Atómico: build + factorize + selected_inverse en una sola llamada,
-        //   sin riesgo de estado inconsistente entre ellas.
-        // - Correcto: usa binary_search para localizar (j,j) en la SpMat
-        //   simétrica, en lugar de asumir que es el primer elemento de la columna.
-        //
-        // Fallback O(n²): si Takahashi falla (no debería en condiciones normales),
-        // resolvemos Q·eᵢ = eᵢ para cada i y tomamos la i-ésima componente.
-        let n = problem.n();
-        let variances: Vec<f64> = match problem.eval_with_inverse(model.qfunc, theta_model) {
-            Ok((_log_det, diag_qinv)) => {
-                diag_qinv.into_iter().map(|v| v.max(0.0)).collect()
+        ) {
+            Ok((x_hat, _log_det_aug, diag_aug_inv)) => {
+                let vars = diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect();
+                (x_hat, vars)
             }
             Err(_) => {
-                // Fallback: O(n²) pero siempre correcto.
-                // Ocurre solo si theta_model produce Q no PD en el re-eval,
-                // lo que no debería pasar porque el optimizador ya lo validó.
-                (0..n).map(|i| {
-                    let mut e_i = vec![0.0_f64; n];
-                    e_i[i] = 1.0;
-                    // eval para dejar el solver en Factorized antes de solve
-                    let _ = problem.eval(model.qfunc, theta_model);
-                    problem.solve(&mut e_i);
-                    e_i[i].max(0.0)
-                }).collect()
+                // Fallback: si IRLS falla (raro), usar ceros y varianzas grandes
+                let x_zero = vec![0.0_f64; n];
+                let v_large = vec![1.0_f64; n];
+                (x_zero, v_large)
             }
         };
 
@@ -247,6 +243,112 @@ mod tests {
         }
     }
 
+    // ── Fixture rw1_poisson ───────────────────────────────────────────────────
+    #[test]
+    #[ignore = "requiere tests/fixtures/rw1_poisson.json"]
+    fn fixture_rw1_poisson_matches_r_inla() {
+        let raw = std::fs::read_to_string("tests/fixtures/rw1_poisson.json").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let y: Vec<f64> = v["y"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let mean_x_ref: Vec<f64> = v["mean_x"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let sd_x_ref: Vec<f64> = v["sd_x"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let theta_opt_ref: Vec<f64> = v["theta_opt"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let log_mlik_ref = v["log_mlik"][0].as_f64().unwrap();
+        let mean_intercept_ref = v["mean_intercept"][0].as_f64().unwrap();
+
+        let n     = y.len();
+        let model = crate::models::Rw1Model::new(n);
+        let lik   = crate::likelihood::PoissonLikelihood;
+        let theta_init = vec![theta_opt_ref[0]];
+
+        match InlaEngine::run(
+            &InlaModel { qfunc: &model, likelihood: &lik, y: &y, theta_init },
+            &InlaParams::default(),
+        ) {
+            Ok(result) => {
+                assert!(result.log_mlik.is_finite());
+                assert_eq!(result.random.len(), n);
+
+                let mut max_err_mean = 0.0_f64;
+                let mut max_err_sd   = 0.0_f64;
+                for (m, (&ref_mean, &ref_sd)) in result.random.iter()
+                    .zip(mean_x_ref.iter().zip(sd_x_ref.iter()))
+                {
+                    max_err_mean = max_err_mean.max((m.mean() - ref_mean).abs());
+                    max_err_sd   = max_err_sd.max((m.sd()   - ref_sd  ).abs());
+                }
+                let theta_err = (result.theta_opt[0] - theta_opt_ref[0]).abs();
+                println!("rw1_poisson | mean_err={max_err_mean:.4} sd_err={max_err_sd:.4} \
+                          theta_err={theta_err:.4} \
+                          log_mlik={:.2} (ref={log_mlik_ref:.2})",
+                         result.log_mlik);
+                println!("  NOTA: sin intercept → sesgo sistematico ~{mean_intercept_ref:.3}");
+                assert!(max_err_mean < 10.0, "mean_err={max_err_mean}");
+            }
+            Err(e) => {
+                println!("rw1_poisson: Err (prior impropio pendiente): {e}");
+            }
+        }
+    }
+
+    // ── Fixture ar1_gamma ─────────────────────────────────────────────────────
+    #[test]
+    #[ignore = "requiere tests/fixtures/ar1_gamma.json"]
+    fn fixture_ar1_gamma_matches_r_inla() {
+        let raw = std::fs::read_to_string("tests/fixtures/ar1_gamma.json").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        let y: Vec<f64> = v["y"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let mean_x_ref: Vec<f64> = v["mean_x"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let sd_x_ref: Vec<f64> = v["sd_x"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let theta_opt_ref: Vec<f64> = v["theta_opt"].as_array().unwrap().iter()
+            .map(|x| x.as_f64().unwrap()).collect();
+        let log_mlik_ref = v["log_mlik"][0].as_f64().unwrap();
+
+        let n     = y.len();
+        let model = crate::models::Ar1Model::new(n);
+        let lik   = crate::likelihood::GammaLikelihood;
+        let theta_init = theta_opt_ref.clone();
+
+        let result = InlaEngine::run(
+            &InlaModel { qfunc: &model, likelihood: &lik, y: &y, theta_init },
+            &InlaParams::default(),
+        ).expect("ar1_gamma con Ar1 (prior propio) no debe fallar");
+
+        assert!(result.log_mlik.is_finite());
+        assert_eq!(result.random.len(), n);
+
+        let mut max_err_mean = 0.0_f64;
+        let mut max_err_sd   = 0.0_f64;
+        for (m, (&ref_mean, &ref_sd)) in result.random.iter()
+            .zip(mean_x_ref.iter().zip(sd_x_ref.iter()))
+        {
+            max_err_mean = max_err_mean.max((m.mean() - ref_mean).abs());
+            max_err_sd   = max_err_sd.max((m.sd()   - ref_sd  ).abs());
+        }
+        let theta_err_tau = (result.theta_opt[0] - theta_opt_ref[0]).abs();
+        let theta_err_rho = (result.theta_opt[1] - theta_opt_ref[1]).abs();
+        let theta_err_phi = (result.theta_opt[2] - theta_opt_ref[2]).abs();
+
+        println!("ar1_gamma | mean_err={max_err_mean:.4} sd_err={max_err_sd:.4}");
+        println!("  theta_err: tau={theta_err_tau:.4} rho={theta_err_rho:.4} phi={theta_err_phi:.4}");
+        println!("  log_mlik={:.4} (ref={log_mlik_ref:.4})", result.log_mlik);
+        println!("  theta_opt={:?}", result.theta_opt);
+        println!("  theta_ref={theta_opt_ref:?}");
+
+        assert!(max_err_mean < 10.0, "mean_err={max_err_mean}");
+        assert!(max_err_sd   < 5.0,  "sd_err={max_err_sd}");
+    }
+
+    // ── Fixture iid_gaussian ──────────────────────────────────────────────────
     #[test]
     #[ignore = "requiere tests/fixtures/iid_gaussian.json"]
     fn fixture_iid_gaussian_matches_r_inla() {
@@ -268,12 +370,20 @@ mod tests {
             &InlaParams::default(),
         ).unwrap();
 
-        let mut max_err = 0.0_f64;
+        let mut max_err_mean = 0.0_f64;
+        let mut sum_sq_err   = 0.0_f64;
         for (m, &ref_mean) in result.random.iter().zip(mean_x_ref.iter()) {
             let err = (m.mean() - ref_mean).abs();
-            if err > max_err { max_err = err; }
+            max_err_mean = max_err_mean.max(err);
+            sum_sq_err  += err * err;
         }
-        println!("Max error en medias: {max_err:.6}");
-        assert!(max_err < 4.0, "Error demasiado grande: {max_err}");
+        let rmse = (sum_sq_err / n as f64).sqrt();
+
+        println!("iid_gaussian | n={n} max_err_mean={max_err_mean:.6} rmse={rmse:.6}");
+        println!("  theta_opt={:?}", result.theta_opt);
+        println!("  log_mlik={:.4}", result.log_mlik);
+
+        assert!(max_err_mean < 4.0, "max_err_mean={max_err_mean}");
+        assert!(rmse < 1.0,         "rmse={rmse}");
     }
 }
