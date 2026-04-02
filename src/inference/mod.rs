@@ -434,9 +434,14 @@ mod tests {
         let model = crate::models::IidModel::new(n);
         let lik   = crate::likelihood::GaussianLikelihood;
 
+        // El fixture fue generado con intercepto (mean_intercept=1.978 ≈ mean(y)).
+        // R-INLA aplicó sum-to-zero constraint sobre x → mean(mean_x)=0.
+        // Usar intercept: true para que nuestro engine haga lo mismo.
+        let mean_intercept_ref = v["mean_intercept"][0].as_f64().unwrap();
+
         let result = InlaEngine::run(
             &InlaModel { qfunc: &model, likelihood: &lik, y: &y,
-                         theta_init: vec![0.0, 0.0], intercept: false },
+                         theta_init: vec![0.0, 0.0], intercept: true },
             &InlaParams::default(),
         ).unwrap();
 
@@ -448,12 +453,16 @@ mod tests {
             sum_sq_err  += err * err;
         }
         let rmse = (sum_sq_err / n as f64).sqrt();
+        let intercept_err = (result.intercept_mean - mean_intercept_ref).abs();
 
         println!("iid_gaussian | n={n} max_err_mean={max_err_mean:.6} rmse={rmse:.6}");
         println!("  theta_opt={:?}", result.theta_opt);
         println!("  log_mlik={:.4}", result.log_mlik);
+        println!("  intercept_mean={:.4} (ref={mean_intercept_ref:.4}) err={intercept_err:.4}",
+                 result.intercept_mean);
 
         assert!(max_err_mean < 4.0, "max_err_mean={max_err_mean}");
         assert!(rmse < 1.0,         "rmse={rmse}");
+        assert!(intercept_err < 1.0, "intercept_err={intercept_err}");
     }
 }
