@@ -316,8 +316,8 @@ pub fn optimize(
 
                     theta  = theta_new;
                     f_cur  = f_new;
-                    x_hat  = x_new.clone();
                     x_warm = x_new;
+                    x_hat  = x_warm.clone();
                     grad   = grad_new;
                     n_evals += 1;
                     accepted = true;
