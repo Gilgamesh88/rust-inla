@@ -106,6 +106,8 @@ fn laplace_eval(
     y:          &[f64],
     theta:      &[f64],
     x_warm:     &[f64],
+    beta0_warm: f64,        // warm start para el intercepto (0.0 si no hay intercept)
+    intercept:  bool,       // true → estima β₀ junto con x (domin-interface.c)
     n_model:    usize,
     n_irls:     usize,
     tol_irls:   f64,
@@ -113,9 +115,27 @@ fn laplace_eval(
     let theta_model = &theta[..n_model];
     let theta_lik   = &theta[n_model..];
 
-    let (x_hat, log_det_aug, diag_aug_inv) = problem.find_mode_with_inverse(
-        qfunc, likelihood, y, theta, x_warm, n_irls, tol_irls,
-    )?;
+    // Rama con intercept: find_mode_with_intercept_and_inverse()
+    // Equivale a domin-interface.c cuando el predictor lineal incluye efectos fijos.
+    //
+    // IMPORTANTE: la likelihood debe evaluarse en el predictor COMPLETO η = β₀ + x̂,
+    // no solo en x̂ (el x centrado). Evaluar en x̂ da un error de β₀² por observación.
+    // Esto es lo que hacía que con β₀=1.978 el iid_gaussian divergiera.
+    let (x_hat, log_det_aug, diag_aug_inv, eta_for_lik) = if intercept {
+        let (beta0, x, ld, d) = problem.find_mode_with_intercept_and_inverse(
+            qfunc, likelihood, y, theta, x_warm, beta0_warm, n_irls, tol_irls,
+        )?;
+        // eta_for_lik = β₀ + x̂  — predictor completo para la likelihood
+        // q_form sigue usando x̂ centrado (correcto: x̂ᵀQx̂ no cambia con β₀)
+        let eta: Vec<f64> = x.iter().map(|xi| beta0 + xi).collect();
+        (x, ld, d, eta)
+    } else {
+        let (x, ld, d) = problem.find_mode_with_inverse(
+            qfunc, likelihood, y, theta, x_warm, n_irls, tol_irls,
+        )?;
+        let eta = x.clone();
+        (x, ld, d, eta)
+    };
 
     let (log_det_q, diag_q_inv) = if qfunc.is_proper() {
         problem.eval_with_inverse(qfunc, theta_model)?
@@ -125,7 +145,8 @@ fn laplace_eval(
 
     let n = y.len();
     let mut logll = vec![0.0_f64; n];
-    likelihood.evaluate(&mut logll, &x_hat, y, theta_lik);
+    // Evaluar en el predictor completo η = β₀ + x̂ (o η = x̂ si no hay intercept)
+    likelihood.evaluate(&mut logll, &eta_for_lik, y, theta_lik);
     let sum_logll: f64 = logll.iter().sum();
 
     // Prior logGamma(1,5e-5): log π(θ_k) = θ_k - 5e-5·exp(θ_k)
@@ -150,6 +171,8 @@ fn laplace_gradient(
     theta:      &[f64],
     f0:         f64,
     x_hat:      &[f64],
+    beta0_warm: f64,
+    intercept:  bool,
     n_model:    usize,
     n_lik:      usize,
     h:          f64,
@@ -161,7 +184,7 @@ fn laplace_gradient(
         theta_h[k] += h;
         let fh = laplace_eval(
             problem, qfunc, likelihood, y, &theta_h,
-            x_hat, n_model, 5, 1e-3,
+            x_hat, beta0_warm, intercept, n_model, 5, 1e-3,
         ).map(|(f, ..)| f).unwrap_or(f64::MAX / 2.0);
         grad[k] = (fh - f0) / h;
     }
@@ -235,6 +258,7 @@ pub fn optimize(
     y:          &[f64],
     theta_init: &[f64],
     params:     &OptimizerParams,
+    intercept:  bool,   // si true, β₀ entra en la Laplace (domin-interface.c)
 ) -> Result<OptimResult, InlaError> {
     let n_model  = qfunc.n_hyperparams();
     let n_lik    = likelihood.n_hyperparams();
@@ -252,13 +276,16 @@ pub fn optimize(
     let mut y_list: Vec<Vec<f64>> = Vec::with_capacity(m);
 
     // Evaluación inicial
+    let beta0_warm = 0.0_f64;  // warm start del intercepto β₀
     let (mut f_cur, ..) = laplace_eval(
-        problem, qfunc, likelihood, y, &theta, &x_warm, n_model, 10, 1e-4,
+        problem, qfunc, likelihood, y, &theta, &x_warm, beta0_warm, intercept,
+        n_model, 10, 1e-4,
     ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; y.len()], vec![], vec![]));
     n_evals += 1;
 
     let mut grad = laplace_gradient(
-        problem, qfunc, likelihood, y, &theta, f_cur, &x_warm, n_model, n_lik, h,
+        problem, qfunc, likelihood, y, &theta, f_cur, &x_warm, beta0_warm, intercept,
+        n_model, n_lik, h,
     );
     n_evals += n_model + n_lik;
 
@@ -285,7 +312,8 @@ pub fn optimize(
                 .collect();
 
             match laplace_eval(
-                problem, qfunc, likelihood, y, &theta_new, &x_warm, n_model, 10, 1e-4,
+                problem, qfunc, likelihood, y, &theta_new, &x_warm, beta0_warm, intercept,
+                n_model, 10, 1e-4,
             ) {
                 Ok((f_new, x_new, ..)) if f_new <= f_cur + c1 * alpha * grad_d => {
                     // Actualizar historia L-BFGS con el nuevo par (s, y)
@@ -294,7 +322,7 @@ pub fn optimize(
 
                     let grad_new = laplace_gradient(
                         problem, qfunc, likelihood, y, &theta_new,
-                        f_new, &x_new, n_model, n_lik, h,
+                        f_new, &x_new, beta0_warm, intercept, n_model, n_lik, h,
                     );
                     n_evals += n_model + n_lik;
 
@@ -380,6 +408,7 @@ mod tests {
             &mut p, &model, &lik, &y,
             &[2.0_f64.ln(), 1.0_f64.ln()],
             &OptimizerParams::default(),
+            false,
         ).unwrap();
         assert!(result.log_mlik.is_finite());
         assert!(result.n_evals > 0);
@@ -395,8 +424,8 @@ mod tests {
         let mut p1 = Problem::new(&model);
         let mut p2 = Problem::new(&model);
 
-        let (f1, ..) = laplace_eval(&mut p1, &model, &lik, &y, &[0.0, 0.0], &[], 1, 10, 1e-6).unwrap();
-        let (f2, ..) = laplace_eval(&mut p2, &model, &lik, &y, &[2.0, 0.0], &[], 1, 10, 1e-6).unwrap();
+        let (f1, ..) = laplace_eval(&mut p1, &model, &lik, &y, &[0.0, 0.0], &[], 0.0, false, 1, 10, 1e-6).unwrap();
+        let (f2, ..) = laplace_eval(&mut p2, &model, &lik, &y, &[2.0, 0.0], &[], 0.0, false, 1, 10, 1e-6).unwrap();
 
         assert!((f1 - f2).abs() > 1e-3,
             "f1={f1} f2={f2} — deben diferir para theta distintos");
@@ -412,6 +441,7 @@ mod tests {
         let result = optimize(
             &mut p, &model, &lik, &y,
             &[0.0, 0.0], &OptimizerParams::default(),
+            false,
         ).unwrap();
         assert!(result.log_mlik.is_finite());
         assert!(result.log_mlik > -10000.0);
@@ -427,10 +457,10 @@ mod tests {
         let mut p = Problem::new(&model);
 
         let (f1, x1, _, _) = laplace_eval(
-            &mut p, &model, &lik, &y, &theta, &[], 1, 10, 1e-6,
+            &mut p, &model, &lik, &y, &theta, &[], 0.0, false, 1, 10, 1e-6,
         ).unwrap();
         let (f2, _, _, _) = laplace_eval(
-            &mut p, &model, &lik, &y, &theta, &x1, 1, 10, 1e-6,
+            &mut p, &model, &lik, &y, &theta, &x1, 0.0, false, 1, 10, 1e-6,
         ).unwrap();
 
         assert!((f1 - f2).abs() < 1e-4, "f1={f1}, f2={f2}");
@@ -445,7 +475,7 @@ mod tests {
         let mut p = Problem::new(&model);
         let result = optimize(
             &mut p, &model, &lik, &y,
-            &[1.0], &OptimizerParams::default(),
+            &[1.0], &OptimizerParams::default(), false,
         );
         match result {
             Ok(r)  => { assert!(r.log_mlik.is_finite()); }
@@ -467,6 +497,7 @@ mod tests {
         let result = optimize(
             &mut p, &model, &lik, &y,
             &[0.0, 0.0], &OptimizerParams::default(),
+            false,
         ).unwrap();
 
         // L-BFGS debe producir theta_x != theta_obs (asimetría)

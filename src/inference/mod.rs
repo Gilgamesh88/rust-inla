@@ -84,6 +84,10 @@ impl InlaEngine {
         let mut problem = Problem::new(model.qfunc);
 
         // Paso 1: encontrar θ*
+        // Pasar intercept al optimizer para que la Laplace durante la
+        // búsqueda de θ* incluya β₀ en el predictor lineal.
+        // Equivale a domin-interface.c donde el predictor η = Aβ + Bx
+        // incluye siempre todos los efectos fijos definidos en la formula.
         let opt = optimizer::optimize(
             &mut problem,
             model.qfunc,
@@ -91,6 +95,7 @@ impl InlaEngine {
             model.y,
             &model.theta_init,
             &params.optimizer,
+            model.intercept,
         )?;
 
         let theta_opt   = opt.theta_opt.clone();
