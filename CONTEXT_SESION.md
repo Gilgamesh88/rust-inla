@@ -94,6 +94,8 @@ Nota: log_mlik_err en rw1_poisson porque optimizer no usa intercept en su objeti
 
 ## Próxima tarea PRIORITARIA
 
+
+
 ### 1. Integrar intercept en el objetivo del optimizer
 El rw1_poisson tiene log_mlik=-1065 (ref=-507) porque laplace_eval usa
 find_mode_with_inverse (sin intercept) en lugar de find_mode_with_intercept.
@@ -108,6 +110,29 @@ desde [0,0,0] no converge al óptimo correcto.
 ### 3. Likelihoods adicionales (Fase C)
 Binomial, NegativeBinomial — las más solicitadas después de Poisson.
 
+
+## FIX ARQUITECTURAL PENDIENTE — intercept via AugmentedQFunc
+
+El bug activo del intercept requiere implementar el campo aumentado
+z=[β₀,x] siguiendo hgmrfm.c de gmrflib.
+
+### 1. models/mod.rs — nuevo AugmentedQFunc
+    Q_aug[0,0] = prior_precision (0.001)
+    Q_aug[i+1,j+1] = inner.eval(i,j,theta)
+    Q_aug[0,i+1] = 0.0
+    Grafo de n+1 nodos (un nodo extra para β₀)
+
+### 2. problem/mod.rs — find_mode_augmented()
+    IRLS sobre z=[β₀,x] de tamano n+1
+    Devuelve (z[0]=β₀, z[1..]=x, log_det_aug, diag_aug_inv)
+    NO necesita centrado ad-hoc — β₀ tiene su propio prior
+
+### 3. inference/mod.rs + optimizer/mod.rs
+    Eliminar find_mode_with_intercept_and_inverse()
+    Usar find_mode_augmented() cuando intercept=true
+
+Referencia gmrflib: hgmrfm.c lineas 159-178 (campo z) y linea 798 (prior_precision)
+prior_precision default para intercept: 0.001
 ---
 
 ## Inicio de sesión
