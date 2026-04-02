@@ -252,14 +252,13 @@ pub fn optimize(
     let mut y_list: Vec<Vec<f64>> = Vec::with_capacity(m);
 
     // Evaluación inicial
-    let (mut f_cur, mut x_hat, ..) = laplace_eval(
+    let (mut f_cur, ..) = laplace_eval(
         problem, qfunc, likelihood, y, &theta, &x_warm, n_model, 10, 1e-4,
     ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; y.len()], vec![], vec![]));
-    x_warm = x_hat.clone();
     n_evals += 1;
 
     let mut grad = laplace_gradient(
-        problem, qfunc, likelihood, y, &theta, f_cur, &x_hat, n_model, n_lik, h,
+        problem, qfunc, likelihood, y, &theta, f_cur, &x_warm, n_model, n_lik, h,
     );
     n_evals += n_model + n_lik;
 
@@ -317,7 +316,6 @@ pub fn optimize(
                     theta  = theta_new;
                     f_cur  = f_new;
                     x_warm = x_new;
-                    x_hat  = x_warm.clone();
                     grad   = grad_new;
                     n_evals += 1;
                     accepted = true;
