@@ -131,7 +131,7 @@ impl InlaEngine {
                 model.qfunc, model.likelihood, model.y, &theta_opt,
                 &[], 0.0, 20, 1e-6,
             ) {
-                Ok((beta0, x_hat, _log_det_aug, diag_aug_inv)) => {
+                Ok((beta0, x_hat, _log_det_aug, diag_aug_inv, _schur_s)) => {
                     let vars = diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect();
                     (beta0, x_hat, vars)
                 }

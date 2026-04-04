@@ -54,6 +54,10 @@ pub trait LogLikelihood: Send + Sync {
 
     /// Número de hiperparámetros propios de la likelihood.
     fn n_hyperparams(&self) -> usize;
+
+    /// Evalúa analíticamente la primera derivada (gradiente) y 
+    /// el negativo de la segunda derivada (curvatura observada) respecto a ηᵢ.
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]);
 }
 
 // ── Gaussian ──────────────────────────────────────────────────────────────────
@@ -79,6 +83,14 @@ impl LogLikelihood for GaussianLikelihood {
 
     fn link(&self) -> LinkFunction { LinkFunction::Identity }
     fn n_hyperparams(&self) -> usize { 1 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let tau = theta[0].exp();
+        for i in 0..eta.len() {
+            grad[i] = tau * (y[i] - eta[i]);
+            curv[i] = tau;
+        }
+    }
 }
 
 // ── Poisson ───────────────────────────────────────────────────────────────────
@@ -102,6 +114,14 @@ impl LogLikelihood for PoissonLikelihood {
 
     fn link(&self) -> LinkFunction { LinkFunction::Log }
     fn n_hyperparams(&self) -> usize { 0 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], _theta: &[f64]) {
+        for i in 0..eta.len() {
+            let lambda = eta[i].exp();
+            grad[i] = y[i] - lambda;
+            curv[i] = lambda;
+        }
+    }
 }
 
 // ── Gamma ─────────────────────────────────────────────────────────────────────
@@ -135,6 +155,15 @@ impl LogLikelihood for GammaLikelihood {
 
     fn link(&self) -> LinkFunction { LinkFunction::Log }
     fn n_hyperparams(&self) -> usize { 1 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let phi = theta[0].exp();
+        for i in 0..eta.len() {
+            let mu = eta[i].exp();
+            grad[i] = phi * (y[i] / mu - 1.0);
+            curv[i] = phi * y[i] / mu;
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

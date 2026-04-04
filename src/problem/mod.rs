@@ -3,6 +3,8 @@ use crate::graph::Graph;
 use crate::models::QFunc;
 use crate::solver::{FaerSolver, SparseSolver};
 
+pub const PRIOR_PREC_BETA: f64 = 0.001;
+
 pub struct Problem {
     graph:   Graph,
     pub(crate) solver:  FaerSolver,
@@ -109,24 +111,13 @@ impl Problem {
             let x_old = x.clone();
             let eta   = x.clone();
 
-            let mut ll_center = vec![0.0_f64; n];
-            let mut ll_plus   = vec![0.0_f64; n];
-            let mut ll_minus  = vec![0.0_f64; n];
-            let mut grad      = vec![0.0_f64; n];
-            let mut curv      = vec![0.0_f64; n];
+            let mut grad = vec![0.0_f64; n];
+            let mut curv = vec![0.0_f64; n];
 
-            likelihood.evaluate(&mut ll_center, &eta, y, theta_lik);
-
+            likelihood.gradient_and_curvature(&mut grad, &mut curv, &eta, y, theta_lik);
+            
             for i in 0..n {
-                let mut eta_plus  = eta.clone();
-                let mut eta_minus = eta.clone();
-                eta_plus[i]  += h;
-                eta_minus[i] -= h;
-                likelihood.evaluate(&mut ll_plus,  &eta_plus,  y, theta_lik);
-                likelihood.evaluate(&mut ll_minus, &eta_minus, y, theta_lik);
-                grad[i] = (ll_plus[i] - ll_minus[i]) / (2.0 * h);
-                curv[i] = (-(ll_plus[i] - 2.0 * ll_center[i] + ll_minus[i])
-                           / (h * h)).max(1e-6);
+                curv[i] = curv[i].max(1e-6);
             }
 
             let z: Vec<f64>       = (0..n).map(|i| eta[i] + grad[i] / curv[i]).collect();
@@ -195,7 +186,7 @@ impl Problem {
         beta0_init: f64,
         max_iter:   usize,
         tol:        f64,
-    ) -> Result<(f64, Vec<f64>, f64, Vec<f64>), InlaError> {
+    ) -> Result<(f64, Vec<f64>, f64, Vec<f64>, f64), InlaError> {
         let n           = self.n();
         let n_model     = qfunc.n_hyperparams();
         let theta_model = &theta[..n_model];
@@ -209,6 +200,7 @@ impl Problem {
         };
         let mut beta0       = beta0_init;
         let mut log_det_aug = 0.0_f64;
+        let mut final_curv  = vec![0.0_f64; n];
 
         for _iter in 0..max_iter {
             let x_old    = x.clone();
@@ -217,44 +209,43 @@ impl Problem {
             // Predictor lineal: η = β₀ + x
             let eta: Vec<f64> = x.iter().map(|xi| beta0 + xi).collect();
 
-            let mut ll_center = vec![0.0_f64; n];
-            let mut ll_plus   = vec![0.0_f64; n];
-            let mut ll_minus  = vec![0.0_f64; n];
             let mut grad      = vec![0.0_f64; n];
             let mut curv      = vec![0.0_f64; n];
 
-            likelihood.evaluate(&mut ll_center, &eta, y, theta_lik);
+            likelihood.gradient_and_curvature(&mut grad, &mut curv, &eta, y, theta_lik);
 
             for i in 0..n {
-                let mut ep = eta.clone(); ep[i] += h;
-                let mut em = eta.clone(); em[i] -= h;
-                likelihood.evaluate(&mut ll_plus,  &ep, y, theta_lik);
-                likelihood.evaluate(&mut ll_minus, &em, y, theta_lik);
-                grad[i] = (ll_plus[i] - ll_minus[i]) / (2.0 * h);
-                curv[i] = (-(ll_plus[i] - 2.0*ll_center[i] + ll_minus[i])
-                            / (h * h)).max(1e-6);
+                curv[i] = curv[i].max(1e-6);
             }
+            final_curv = curv.clone();
 
             // Working response (en escala de η): zᵢ = ηᵢ + gradᵢ/Wᵢ
             let z: Vec<f64> = (0..n).map(|i| eta[i] + grad[i] / curv[i]).collect();
 
-            // Estimar β₀ por perfil — weighted mean del residuo (zᵢ - xᵢ)
-            // Equivale a resolver la ecuación normal de β₀ con prior difuso:
-            //   β₀ = Σ Wᵢ·(zᵢ - xᵢ) / Σ Wᵢ
-            let sum_w:  f64 = curv.iter().sum();
-            let sum_wz: f64 = (0..n).map(|i| curv[i] * (z[i] - x[i])).sum();
-            beta0 = sum_wz / sum_w;
-
-            // Centrar el working response: z_c = z - β₀
-            // Resolver (Q + W)·x = W·z_c
-            let mut rhs: Vec<f64> = (0..n).map(|i| curv[i] * (z[i] - beta0)).collect();
+            // 1. Joint Newton step: Resolver simultáneamente [P+ΣW, W^T; W, Q+W] [β; x]
+            let mut u: Vec<f64> = (0..n).map(|i| curv[i] * z[i]).collect();
+            let mut v = curv.clone();
 
             let aug = AugmentedQFunc { inner: qfunc, diag_add: &curv };
             self.solver.build(&self.graph, &aug, theta_model);
             self.solver.factorize()?;
             log_det_aug = self.solver.log_determinant();
-            self.solver.solve_llt(&mut rhs);
-            x = rhs;
+            
+            self.solver.solve_llt(&mut u);
+            self.solver.solve_llt(&mut v);
+            
+            let sum_w: f64  = curv.iter().sum();
+            let wt_v: f64   = curv.iter().zip(v.iter()).map(|(w, vi)| w * vi).sum();
+            let schur_denom = PRIOR_PREC_BETA + (sum_w - wt_v).max(0.0);
+            
+            let sum_wz: f64 = (0..n).map(|i| final_curv[i] * z[i]).sum();
+            let wt_u: f64   = final_curv.iter().zip(u.iter()).map(|(w, ui)| w * ui).sum();
+            
+            beta0 = (sum_wz - wt_u) / schur_denom;
+            // println!("IRLS {}: b0_old={:.4} b0_new={:.4} sum_wz={:.4} wt_u={:.4} denom={:.4}", _iter, beta0_old, beta0, sum_wz, wt_u, schur_denom);
+            // assert!(!beta0.is_nan(), "beta0 became NaN! iter={} sum_wz={}, wt_u={}, denom={}", _iter, sum_wz, wt_u, schur_denom);
+            
+            x = u.into_iter().zip(v.iter()).map(|(ui, vi)| ui - beta0 * vi).collect();
 
             // Constraint suma-a-cero: Σxᵢ = 0 (inla.c ~2800 GMRFLib_constr_add)
             //
@@ -297,7 +288,16 @@ impl Problem {
             })
             .collect();
 
-        Ok((beta0, x, log_det_aug, diag_aug_inv))
+        // 2. Schur complement S final (para determinantes en Laplace)
+        let schur_s = {
+            let mut v = final_curv.clone();
+            self.solver.solve_llt(&mut v);
+            let sum_w: f64 = final_curv.iter().sum();
+            let wt_v: f64  = final_curv.iter().zip(v.iter()).map(|(w, vi)| w * vi).sum();
+            (crate::problem::PRIOR_PREC_BETA + sum_w - wt_v).max(1e-300)
+        };
+
+        Ok((beta0, x, log_det_aug, diag_aug_inv, schur_s))
     }
 
         /// Igual que find_mode pero también devuelve log|Q+W|.

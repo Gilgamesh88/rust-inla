@@ -107,11 +107,11 @@ fn laplace_eval(
     theta:      &[f64],
     x_warm:     &[f64],
     beta0_warm: f64,        // warm start para el intercepto (0.0 si no hay intercept)
-    intercept:  bool,       // true → estima β₀ junto con x (domin-interface.c)
+    intercept:  bool,
     n_model:    usize,
     n_irls:     usize,
     tol_irls:   f64,
-) -> Result<(f64, Vec<f64>, Vec<f64>, Vec<f64>), InlaError> {
+) -> Result<(f64, Vec<f64>, f64, Vec<f64>, Vec<f64>), InlaError> {
     let theta_model = &theta[..n_model];
     let theta_lik   = &theta[n_model..];
 
@@ -121,20 +121,18 @@ fn laplace_eval(
     // IMPORTANTE: la likelihood debe evaluarse en el predictor COMPLETO η = β₀ + x̂,
     // no solo en x̂ (el x centrado). Evaluar en x̂ da un error de β₀² por observación.
     // Esto es lo que hacía que con β₀=1.978 el iid_gaussian divergiera.
-    let (x_hat, log_det_aug, diag_aug_inv, eta_for_lik) = if intercept {
-        let (beta0, x, ld, d) = problem.find_mode_with_intercept_and_inverse(
+    let (x_hat, log_det_aug, diag_aug_inv, eta_for_lik, beta0_out, schur_s) = if intercept {
+        let (beta0, x, ld, d, s) = problem.find_mode_with_intercept_and_inverse(
             qfunc, likelihood, y, theta, x_warm, beta0_warm, n_irls, tol_irls,
         )?;
-        // eta_for_lik = β₀ + x̂  — predictor completo para la likelihood
-        // q_form sigue usando x̂ centrado (correcto: x̂ᵀQx̂ no cambia con β₀)
         let eta: Vec<f64> = x.iter().map(|xi| beta0 + xi).collect();
-        (x, ld, d, eta)
+        (x, ld, d, eta, beta0, s)
     } else {
         let (x, ld, d) = problem.find_mode_with_inverse(
             qfunc, likelihood, y, theta, x_warm, n_irls, tol_irls,
         )?;
         let eta = x.clone();
-        (x, ld, d, eta)
+        (x, ld, d, eta, 0.0_f64, 1.0_f64)
     };
 
     let (log_det_q, diag_q_inv) = if qfunc.is_proper() {
@@ -145,20 +143,34 @@ fn laplace_eval(
 
     let n = y.len();
     let mut logll = vec![0.0_f64; n];
-    // Evaluar en el predictor completo η = β₀ + x̂ (o η = x̂ si no hay intercept)
     likelihood.evaluate(&mut logll, &eta_for_lik, y, theta_lik);
     let sum_logll: f64 = logll.iter().sum();
 
-    // Prior logGamma(1,5e-5): log π(θ_k) = θ_k - 5e-5·exp(θ_k)
-    // (inla.c:inla_hyperpar_default_prior() + Jacobian del cambio de variable)
     let log_prior: f64 = theta.iter().map(|&th| th - 5e-5_f64 * th.exp()).sum();
 
-    // Término cuadrático del prior: -0.5·x̂ᵀQx̂  (inla.c ~3400 DAXPY)
     let q_form = problem.quadratic_form_x(qfunc, theta_model, &x_hat);
 
-    let log_mlik = 0.5 * (log_det_q - log_det_aug) + sum_logll - 0.5 * q_form + log_prior;
+    // Ajustes por campo aumentado: el grafo subyacente de dimensión n debe corregirse
+    // matemáticamente (Schur) para reflejar la dimensión n+1 si hay un intercepto
+    let (final_log_det_q, final_log_det_aug, final_q_form) = if intercept {
+        (
+            log_det_q + crate::problem::PRIOR_PREC_BETA.ln(),
+            log_det_aug + schur_s.ln(),
+            q_form + crate::problem::PRIOR_PREC_BETA * beta0_out * beta0_out
+        )
+    } else {
+        (log_det_q, log_det_aug, q_form)
+    };
 
-    Ok((-log_mlik, x_hat, diag_q_inv, diag_aug_inv))
+    let log_mlik = 0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form + log_prior;
+    
+    // DEBUG:
+    if intercept {
+        println!("laplace_eval DEBUG: b0={:.4} schur={:.4e} detQ={:.2} detAug={:.2} ll={:.2} qf={:.2}", 
+                 beta0_out, schur_s, final_log_det_q, final_log_det_aug, sum_logll, final_q_form);
+    }
+
+    Ok((-log_mlik, x_hat, beta0_out, diag_q_inv, diag_aug_inv))
 }
 
 // ── Gradiente por diferencias finitas ────────────────────────────────────────
@@ -276,11 +288,12 @@ pub fn optimize(
     let mut y_list: Vec<Vec<f64>> = Vec::with_capacity(m);
 
     // Evaluación inicial
-    let beta0_warm = 0.0_f64;  // warm start del intercepto β₀
-    let (mut f_cur, ..) = laplace_eval(
+    let mut beta0_warm = 0.0_f64;  // warm start del intercepto β₀
+    let (mut f_cur, _, beta0_init_warm, _, _) = laplace_eval(
         problem, qfunc, likelihood, y, &theta, &x_warm, beta0_warm, intercept,
         n_model, 10, 1e-4,
-    ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; y.len()], vec![], vec![]));
+    ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; y.len()], 0.0, vec![], vec![]));
+    beta0_warm = beta0_init_warm;
     n_evals += 1;
 
     let mut grad = laplace_gradient(
@@ -315,14 +328,14 @@ pub fn optimize(
                 problem, qfunc, likelihood, y, &theta_new, &x_warm, beta0_warm, intercept,
                 n_model, 10, 1e-4,
             ) {
-                Ok((f_new, x_new, ..)) if f_new <= f_cur + c1 * alpha * grad_d => {
+                Ok((f_new, x_new, beta0_new, ..)) if f_new <= f_cur + c1 * alpha * grad_d => {
                     // Actualizar historia L-BFGS con el nuevo par (s, y)
                     let s_k: Vec<f64> = theta_new.iter().zip(theta.iter())
                         .map(|(tn, t)| tn - t).collect();
 
                     let grad_new = laplace_gradient(
                         problem, qfunc, likelihood, y, &theta_new,
-                        f_new, &x_new, beta0_warm, intercept, n_model, n_lik, h,
+                        f_new, &x_new, beta0_new, intercept, n_model, n_lik, h,
                     );
                     n_evals += n_model + n_lik;
 
@@ -341,10 +354,11 @@ pub fn optimize(
                         y_list.push(y_k);
                     }
 
-                    theta  = theta_new;
-                    f_cur  = f_new;
-                    x_warm = x_new;
-                    grad   = grad_new;
+                    theta      = theta_new;
+                    f_cur      = f_new;
+                    x_warm     = x_new;
+                    beta0_warm = beta0_new;
+                    grad       = grad_new;
                     n_evals += 1;
                     accepted = true;
                     break;
@@ -359,32 +373,13 @@ pub fn optimize(
     }
 
     // Evaluación final en θ* con convergencia fina
-    let theta_model = &theta[..n_model];
-    let theta_lik   = &theta[n_model..];
-
-    let (x_hat_final, log_det_aug_final, _) = problem.find_mode_with_inverse(
-        qfunc, likelihood, y, &theta, &x_warm, 20, 1e-6,
+    let (neg_log_mlik, _, _, _, _) = laplace_eval(
+        problem, qfunc, likelihood, y, &theta, &x_warm, beta0_warm, intercept, n_model, 20, 1e-6,
     ).map_err(|_| InlaError::ConvergenceFailed {
         reason: "IRLS no convergió en theta*".to_string(),
     })?;
-
-    let log_det_q_final = if qfunc.is_proper() {
-        problem.eval(qfunc, theta_model)
-            .map_err(|_| InlaError::ConvergenceFailed {
-                reason: "theta* produce Q no definida positiva".to_string(),
-            })?
-    } else {
-        0.0
-    };
-
-    let n = y.len();
-    let mut logll_final = vec![0.0_f64; n];
-    likelihood.evaluate(&mut logll_final, &x_hat_final, y, theta_lik);
-    let sum_logll_final: f64 = logll_final.iter().sum();
-    let log_prior_final: f64 = theta.iter().map(|&th| th - 5e-5_f64 * th.exp()).sum();
-    let q_form_final = problem.quadratic_form_x(qfunc, theta_model, &x_hat_final);
-    let log_mlik = 0.5 * (log_det_q_final - log_det_aug_final) + sum_logll_final
-        - 0.5 * q_form_final + log_prior_final;
+    
+    let log_mlik = -neg_log_mlik;
 
     Ok(OptimResult { theta_opt: theta, log_mlik, n_evals })
 }
@@ -456,10 +451,10 @@ mod tests {
         let theta = [1.0, 0.5];
         let mut p = Problem::new(&model);
 
-        let (f1, x1, _, _) = laplace_eval(
+        let (f1, x1, _, _, _) = laplace_eval(
             &mut p, &model, &lik, &y, &theta, &[], 0.0, false, 1, 10, 1e-6,
         ).unwrap();
-        let (f2, _, _, _) = laplace_eval(
+        let (f2, _, _, _, _) = laplace_eval(
             &mut p, &model, &lik, &y, &theta, &x1, 0.0, false, 1, 10, 1e-6,
         ).unwrap();
 
