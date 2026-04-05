@@ -169,12 +169,6 @@ pub(crate) fn laplace_eval(
 
     let log_mlik = 0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form + log_prior;
     
-    // DEBUG:
-    if intercept {
-        println!("laplace_eval DEBUG: b0={:.4} schur={:.4e} detQ={:.2} detAug={:.2} ll={:.2} qf={:.2}", 
-                 beta0_out, schur_s, final_log_det_q, final_log_det_aug, sum_logll, final_q_form);
-    }
-
     Ok((-log_mlik, x_hat, beta0_out, diag_q_inv, diag_aug_inv))
 }
 
