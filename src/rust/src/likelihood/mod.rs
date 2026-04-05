@@ -171,6 +171,127 @@ impl LogLikelihood for GammaLikelihood {
     }
 }
 
+// ── Zero-Inflated Poisson (ZIP) Type-1 ─────────────────────────────────────────
+
+/// y ~ ZIP(p, μ)
+/// 
+/// p = logit^{-1}(θ_0) (probabilidad de exceso de ceros)
+/// μ = exp(η) (media de Poisson)
+///
+/// log p(y|η,p) = 
+///   y=0: log(p + (1-p)e^{-μ})
+///   y>0: log(1-p) + y·log(μ) - μ - log(y!)
+pub struct ZipLikelihood;
+
+impl LogLikelihood for ZipLikelihood {
+    fn evaluate(&self, logll: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let p = 1.0 / (1.0 + (-theta[0]).exp());
+        
+        for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            let safe_eta = ei.clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if yi == 0.0 {
+                let p0_pois = (-mu).exp();
+                *ll = (p + (1.0 - p) * p0_pois).ln();
+            } else {
+                let log_y_factorial = statrs::function::gamma::ln_gamma(yi + 1.0);
+                *ll = (1.0 - p).ln() + yi * safe_eta - mu - log_y_factorial;
+            }
+        }
+    }
+
+    fn link(&self) -> LinkFunction { LinkFunction::Log }
+    fn n_hyperparams(&self) -> usize { 1 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let p = 1.0 / (1.0 + (-theta[0]).exp());
+        
+        for i in 0..eta.len() {
+            let safe_eta = eta[i].clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if y[i] == 0.0 {
+                let p0_pois = (-mu).exp();
+                let L0 = p + (1.0 - p) * p0_pois;
+                // w is the posterior probability that a 0 came from Poisson
+                let w = (1.0 - p) * p0_pois / L0;
+                
+                grad[i] = -mu * w;
+                curv[i] = w * mu * (1.0 - mu * (1.0 - w));
+            } else {
+                grad[i] = y[i] - mu;
+                curv[i] = mu;
+            }
+        }
+    }
+}
+
+// ── Tweedie (Saddlepoint Approximation) ───────────────────────────────────────
+
+/// y ~ Tweedie(μ, φ, p)
+/// 
+/// φ = exp(θ_0) (dispersion)
+/// p = 1.0 + logit^{-1}(θ_1) (power, bounded between 1 and 2)
+/// μ = exp(η)
+pub struct TweedieLikelihood;
+
+impl LogLikelihood for TweedieLikelihood {
+    fn evaluate(&self, logll: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let phi = theta[0].exp();
+        let p_power = 1.0 + 1.0 / (1.0 + (-theta[1]).exp()); // maps to (1,2)
+        
+        for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            let safe_eta = ei.clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if yi == 0.0 {
+                *ll = - (mu.powf(2.0 - p_power)) / (phi * (2.0 - p_power));
+            } else {
+                let d = 2.0 * (
+                    (yi.powf(2.0 - p_power)) / ((1.0 - p_power) * (2.0 - p_power))
+                    - (yi * mu.powf(1.0 - p_power)) / (1.0 - p_power)
+                    + (mu.powf(2.0 - p_power)) / (2.0 - p_power)
+                );
+                
+                let log_term = -0.5 * (2.0 * std::f64::consts::PI * phi * yi.powf(p_power)).ln();
+                *ll = log_term - d / (2.0 * phi);
+            }
+        }
+    }
+
+    fn link(&self) -> LinkFunction { LinkFunction::Log }
+    fn n_hyperparams(&self) -> usize { 2 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let phi = theta[0].exp();
+        let p_power = 1.0 + 1.0 / (1.0 + (-theta[1]).exp());
+        
+        for i in 0..eta.len() {
+            let safe_eta = eta[i].clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if y[i] == 0.0 {
+                grad[i] = - (mu.powf(2.0 - p_power)) / phi;
+                curv[i] = (2.0 - p_power) * mu.powf(2.0 - p_power) / phi;
+            } else {
+                grad[i] = (y[i] * mu.powf(1.0 - p_power) - mu.powf(2.0 - p_power)) / phi;
+                let expected_info = false; // Choose observed info
+                if expected_info {
+                    curv[i] = mu.powf(2.0 - p_power) / phi;
+                } else {
+                    curv[i] = ((2.0 - p_power) * mu.powf(2.0 - p_power) - y[i] * (1.0 - p_power) * mu.powf(1.0 - p_power)) / phi;
+                }
+            }
+            
+            // To ensure positive definiteness in non-convex regions, fallback to expected info if curvature is negative
+            if curv[i] <= 0.0 {
+                curv[i] = mu.powf(2.0 - p_power) / phi;
+            }
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

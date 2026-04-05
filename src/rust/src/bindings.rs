@@ -1,6 +1,6 @@
 use extendr_api::prelude::*;
 use crate::models::{IidModel, Rw1Model, Ar1Model, QFunc};
-use crate::likelihood::{GaussianLikelihood, PoissonLikelihood, GammaLikelihood, LogLikelihood};
+use crate::likelihood::{GaussianLikelihood, PoissonLikelihood, GammaLikelihood, ZipLikelihood, TweedieLikelihood, LogLikelihood};
 use crate::inference::{InlaParams, InlaModel, InlaEngine};
 
 /// Execute rust-inla backend from R.
@@ -52,6 +52,8 @@ fn rust_inla_run(
         "gaussian" => Box::new(GaussianLikelihood),
         "poisson" => Box::new(PoissonLikelihood),
         "gamma" => Box::new(GammaLikelihood),
+        "zeroinflatedpoisson1" => Box::new(ZipLikelihood),
+        "tweedie" => Box::new(TweedieLikelihood),
         _ => return r!(format!("Unknown likelihood_type: {}", likelihood_type)),
     };
 
