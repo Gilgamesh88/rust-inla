@@ -8,7 +8,8 @@ rust_inla_run(
   data,
   model_type,
   likelihood_type,
-  intercept,
+  fixed_matrix_arg,
+  n_fixed_arg,
   n_latent_arg,
   x_idx_arg
 )
@@ -20,7 +21,9 @@ rust_inla_run(
 
 \item{likelihood_type}{String identifier ("gaussian", "poisson", "gamma").}
 
-\item{intercept}{Boolean to estimate global beta0.}
+\item{fixed_matrix_arg}{Optional flat vector of K columns combined}
+
+\item{n_fixed_arg}{Number of columns K}
 }
 \description{
 Execute rust-inla backend from R.

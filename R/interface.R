@@ -13,17 +13,24 @@ rusty_inla <- function(formula, data, family) {
     y_var <- as.character(attr(tf, "variables")[[resp_idx + 1]])
     y <- as.numeric(data[[y_var]])
     
-    # Check for intercept
-    intercept <- as.logical(attr(tf, "intercept"))
 
     # 2. Extract f() term
     f_idx <- attr(tf, "specials")$f
     if (is.null(f_idx)) {
         stop("Formula must contain exactly one f(covariate, model=...) term for the current RustyINLA prototype.")
     }
-    if (length(f_idx) > 1) {
-        stop("Current RustyINLA prototype supports only one f() term.")
+    # Extract fixed terms design matrix
+    t_labels <- attr(tf, "term.labels")
+    f_term_idx <- grep("^f\\(", t_labels)
+    if (length(f_term_idx) > 0) {
+        tf_fixed <- drop.terms(tf, f_term_idx, keep.response = FALSE)
+        X_fixed <- model.matrix(tf_fixed, data)
+    } else {
+        X_fixed <- model.matrix(tf, data)
     }
+    
+    n_fixed <- ncol(X_fixed)
+    x_matrix_flat <- as.numeric(X_fixed)
     
     # Parse the f() term securely. We use a local environment providing our f() function.
     f_call <- attr(tf, "variables")[[f_idx + 1]]
@@ -49,7 +56,8 @@ rusty_inla <- function(formula, data, family) {
         data = y,
         model_type = model_type,
         likelihood_type = family,
-        intercept = intercept,
+        fixed_matrix_arg = x_matrix_flat,
+        n_fixed_arg = as.integer(n_fixed),
         n_latent_arg = as.integer(n_latent),
         x_idx_arg = as.integer(idx - 1)
     )
@@ -63,9 +71,9 @@ rusty_inla <- function(formula, data, family) {
         formula = formula,
         mlik = res$log_mlik,
         summary.fixed = data.frame(
-            row.names = c("(Intercept)"),
-            mean = res$intercept_mean,
-            sd = res$intercept_sd
+            row.names = colnames(X_fixed),
+            mean = res$fixed_means,
+            sd = res$fixed_sds
         ),
         summary.random = list()
     )

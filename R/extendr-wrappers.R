@@ -15,9 +15,10 @@ NULL
 #' @param data A numeric array of length N (the response y).
 #' @param model_type String identifier ("iid", "rw1", "ar1").
 #' @param likelihood_type String identifier ("gaussian", "poisson", "gamma").
-#' @param intercept Boolean to estimate global beta0.
+#' @param fixed_matrix_arg Optional flat vector of K columns combined
+#' @param n_fixed_arg Number of columns K
 #' @export
-rust_inla_run <- function(data, model_type, likelihood_type, intercept, n_latent_arg, x_idx_arg) .Call(wrap__rust_inla_run, data, model_type, likelihood_type, intercept, n_latent_arg, x_idx_arg)
+rust_inla_run <- function(data, model_type, likelihood_type, fixed_matrix_arg, n_fixed_arg, n_latent_arg, x_idx_arg) .Call(wrap__rust_inla_run, data, model_type, likelihood_type, fixed_matrix_arg, n_fixed_arg, n_latent_arg, x_idx_arg)
 
 
 # nolint end

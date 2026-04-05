@@ -15,7 +15,8 @@ fn rust_inla_run(
     data: Robj, 
     model_type: &str, 
     likelihood_type: &str, 
-    intercept: bool,
+    fixed_matrix_arg: Robj,
+    n_fixed_arg: i32,
     n_latent_arg: Robj,
     x_idx_arg: Robj
 ) -> Robj {
@@ -27,6 +28,9 @@ fn rust_inla_run(
     
     let n_data = y_slice.len();
     
+    let x_mat_slice = fixed_matrix_arg.as_real_slice();
+    let n_fixed = n_fixed_arg as usize;
+
     let (n_latent, x_idx_vec) = if x_idx_arg.is_null() {
         (n_data, None)
     } else {
@@ -58,14 +62,15 @@ fn rust_inla_run(
     };
 
     // Initialize theta based on n_hyperparams
-    let mut theta_init = vec![0.0; qfunc.n_hyperparams() + lik.n_hyperparams()];
+    let theta_init = vec![0.0; qfunc.n_hyperparams() + lik.n_hyperparams()];
     
     let model = InlaModel {
         qfunc: qfunc.as_ref(),
         likelihood: lik.as_ref(),
         y: y_slice,
         theta_init,
-        intercept,
+        fixed_matrix: x_mat_slice,
+        n_fixed,
         n_latent,
         x_idx: x_idx_vec.as_deref(),
     };
@@ -86,8 +91,8 @@ fn rust_inla_run(
             list!(
                 log_mlik = res.log_mlik,
                 theta_opt = res.theta_opt,
-                intercept_mean = res.intercept_mean,
-                intercept_sd = res.intercept_sd,
+                fixed_means = res.fixed_means,
+                fixed_sds = res.fixed_sds,
                 marg_means = marg_means,
                 marg_vars = marg_vars,
                 ccd_thetas = res.ccd_thetas,
