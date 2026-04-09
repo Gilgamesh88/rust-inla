@@ -119,6 +119,38 @@ impl Graph {
         Self { n, neighbors, fill_pattern: vec![], graph_hash: hash }
     }
 
+    /// Descubre las conexiones inducidas por la matriz A de observaciones cruzadas.
+    pub fn build_a_t_a_edges(a_i: &[usize], a_j: &[usize], n_data: usize) -> Vec<(usize, usize)> {
+        let mut row_to_cols: Vec<Vec<usize>> = vec![vec![]; n_data];
+        for k in 0..a_i.len() {
+            row_to_cols[a_i[k]].push(a_j[k]);
+        }
+        
+        let mut edges = Vec::new();
+        for cols in row_to_cols {
+            for m in 0..cols.len() {
+                for n in (m + 1)..cols.len() {
+                    edges.push((cols[m], cols[n]));
+                }
+            }
+        }
+        edges
+    }
+
+    /// Combina aristas en el grafo actual de manera determinista (sin duplicados, rehashea).
+    pub fn merge_edges(&mut self, edges: &[(usize, usize)]) {
+        for &(a, b) in edges {
+            if a == b { continue; }
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            if hi >= self.n { continue; }
+            match self.neighbors[lo].binary_search(&hi) {
+                Ok(_)    => {} 
+                Err(pos) => self.neighbors[lo].insert(pos, hi),
+            }
+        }
+        self.graph_hash = Self::compute_hash(&self.neighbors, self.n);
+    }
+
     // ── Internals ─────────────────────────────────────────────────────────────
 
     fn compute_hash(neighbors: &[Vec<usize>], n: usize) -> [u8; 32] {

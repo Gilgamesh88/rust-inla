@@ -54,6 +54,10 @@ pub trait LogLikelihood: Send + Sync {
 
     /// Número de hiperparámetros propios de la likelihood.
     fn n_hyperparams(&self) -> usize;
+
+    /// Evalúa analíticamente la primera derivada (gradiente) y 
+    /// el negativo de la segunda derivada (curvatura observada) respecto a ηᵢ.
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]);
 }
 
 // ── Gaussian ──────────────────────────────────────────────────────────────────
@@ -79,6 +83,14 @@ impl LogLikelihood for GaussianLikelihood {
 
     fn link(&self) -> LinkFunction { LinkFunction::Identity }
     fn n_hyperparams(&self) -> usize { 1 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let tau = theta[0].exp();
+        for i in 0..eta.len() {
+            grad[i] = tau * (y[i] - eta[i]);
+            curv[i] = tau;
+        }
+    }
 }
 
 // ── Poisson ───────────────────────────────────────────────────────────────────
@@ -95,13 +107,24 @@ impl LogLikelihood for PoissonLikelihood {
         for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
             // log(y!) usando la aproximación exacta por lgamma
             // lgamma(y+1) = log(y!) para y entero
+            let safe_eta = ei.clamp(-50.0, 50.0);
             let log_y_factorial = statrs::function::gamma::ln_gamma(yi + 1.0);
-            *ll = yi * ei - ei.exp() - log_y_factorial;
+            *ll = yi * safe_eta - safe_eta.exp() - log_y_factorial;
         }
     }
 
     fn link(&self) -> LinkFunction { LinkFunction::Log }
     fn n_hyperparams(&self) -> usize { 0 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], _theta: &[f64]) {
+        for i in 0..eta.len() {
+            // Clamp eta to prevent Inf/NaN in exp() during wild Newton steps
+            let safe_eta = eta[i].clamp(-50.0, 50.0);
+            let lambda = safe_eta.exp();
+            grad[i] = y[i] - lambda;
+            curv[i] = lambda;
+        }
+    }
 }
 
 // ── Gamma ─────────────────────────────────────────────────────────────────────
@@ -124,7 +147,8 @@ impl LogLikelihood for GammaLikelihood {
         let log_gamma_phi = statrs::function::gamma::ln_gamma(phi);
 
         for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
-            let mu = ei.exp(); // link log: μ = exp(η)
+            let safe_eta = ei.clamp(-50.0, 50.0);
+            let mu = safe_eta.exp(); // link log: μ = exp(η)
             *ll = phi * log_phi
                 - phi * mu.ln()
                 + (phi - 1.0) * yi.ln()
@@ -135,6 +159,144 @@ impl LogLikelihood for GammaLikelihood {
 
     fn link(&self) -> LinkFunction { LinkFunction::Log }
     fn n_hyperparams(&self) -> usize { 1 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let phi = theta[0].clamp(-50.0, 50.0).exp();
+        for i in 0..eta.len() {
+            let safe_eta = eta[i].clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            grad[i] = phi * (y[i] / mu - 1.0);
+            curv[i] = phi * y[i] / mu;
+        }
+    }
+}
+
+// ── Zero-Inflated Poisson (ZIP) Type-1 ─────────────────────────────────────────
+
+/// y ~ ZIP(p, μ)
+/// 
+/// p = logit^{-1}(θ_0) (probabilidad de exceso de ceros)
+/// μ = exp(η) (media de Poisson)
+///
+/// log p(y|η,p) = 
+///   y=0: log(p + (1-p)e^{-μ})
+///   y>0: log(1-p) + y·log(μ) - μ - log(y!)
+pub struct ZipLikelihood;
+
+impl LogLikelihood for ZipLikelihood {
+    fn evaluate(&self, logll: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let p = 1.0 / (1.0 + (-theta[0]).exp());
+        
+        for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            let safe_eta = ei.clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if yi == 0.0 {
+                let p0_pois = (-mu).exp();
+                *ll = (p + (1.0 - p) * p0_pois).ln();
+            } else {
+                let log_y_factorial = statrs::function::gamma::ln_gamma(yi + 1.0);
+                *ll = (1.0 - p).ln() + yi * safe_eta - mu - log_y_factorial;
+            }
+        }
+    }
+
+    fn link(&self) -> LinkFunction { LinkFunction::Log }
+    fn n_hyperparams(&self) -> usize { 1 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let p = 1.0 / (1.0 + (-theta[0]).exp());
+        
+        for i in 0..eta.len() {
+            let safe_eta = eta[i].clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if y[i] == 0.0 {
+                let p0_pois = (-mu).exp();
+                let l0 = p + (1.0 - p) * p0_pois;
+                // w is the posterior probability that a 0 came from Poisson
+                let w = (1.0 - p) * p0_pois / l0;
+                
+                grad[i] = -mu * w;
+                // Observed Fisher info for ZIP at y=0: w·μ·(1 - μ·(1-w)).
+                // Can be negative for large μ and small p — fall back to
+                // expected Fisher info (w·μ) to keep IRLS positive-definite.
+                curv[i] = w * mu * (1.0 - mu * (1.0 - w));
+                if curv[i] <= 0.0 {
+                    curv[i] = w * mu; // expected Fisher info fallback
+                }
+            } else {
+                grad[i] = y[i] - mu;
+                curv[i] = mu;
+            }
+        }
+    }
+}
+
+// ── Tweedie (Saddlepoint Approximation) ───────────────────────────────────────
+
+/// y ~ Tweedie(μ, φ, p)
+/// 
+/// φ = exp(θ_0) (dispersion)
+/// p = 1.0 + logit^{-1}(θ_1) (power, bounded between 1 and 2)
+/// μ = exp(η)
+pub struct TweedieLikelihood;
+
+impl LogLikelihood for TweedieLikelihood {
+    fn evaluate(&self, logll: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let phi = theta[0].exp();
+        // Clamp p_power away from singularities: (1-p) and (2-p) are denominators.
+        let p_power = (1.0 + 1.0 / (1.0 + (-theta[1]).exp()))
+            .clamp(1.0 + 1e-6, 2.0 - 1e-6);
+
+        for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            let safe_eta = ei.clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if yi == 0.0 {
+                *ll = - (mu.powf(2.0 - p_power)) / (phi * (2.0 - p_power));
+            } else {
+                let d = 2.0 * (
+                    (yi.powf(2.0 - p_power)) / ((1.0 - p_power) * (2.0 - p_power))
+                    - (yi * mu.powf(1.0 - p_power)) / (1.0 - p_power)
+                    + (mu.powf(2.0 - p_power)) / (2.0 - p_power)
+                );
+                
+                let log_term = -0.5 * (2.0 * std::f64::consts::PI * phi * yi.powf(p_power)).ln();
+                *ll = log_term - d / (2.0 * phi);
+            }
+        }
+    }
+
+    fn link(&self) -> LinkFunction { LinkFunction::Log }
+    fn n_hyperparams(&self) -> usize { 2 }
+
+    fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
+        let phi = theta[0].exp();
+        let p_power = (1.0 + 1.0 / (1.0 + (-theta[1]).exp()))
+            .clamp(1.0 + 1e-6, 2.0 - 1e-6);
+
+        for i in 0..eta.len() {
+            let safe_eta = eta[i].clamp(-50.0, 50.0);
+            let mu = safe_eta.exp();
+            
+            if y[i] == 0.0 {
+                grad[i] = - (mu.powf(2.0 - p_power)) / phi;
+                curv[i] = (2.0 - p_power) * mu.powf(2.0 - p_power) / phi;
+            } else {
+                grad[i] = (y[i] * mu.powf(1.0 - p_power) - mu.powf(2.0 - p_power)) / phi;
+                // Observed Fisher information for Tweedie y>0.
+                curv[i] = ((2.0 - p_power) * mu.powf(2.0 - p_power)
+                    - y[i] * (1.0 - p_power) * mu.powf(1.0 - p_power))
+                    / phi;
+            }
+            
+            // To ensure positive definiteness in non-convex regions, fallback to expected info if curvature is negative
+            if curv[i] <= 0.0 {
+                curv[i] = mu.powf(2.0 - p_power) / phi;
+            }
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

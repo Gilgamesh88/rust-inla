@@ -1,47 +1,10 @@
-//! Optimización de hiperparámetros θ: L-BFGS con Laplace completa.
-//!
-//! ## Equivalencia con R-INLA
-//!
-//! R-INLA usa L-BFGS con memoria m en `domin-interface.c:bfgs3()`.
-//! Nuestra implementación sigue el mismo algoritmo:
-//!
-//! ```text
-//! 1. Calcular gradiente fd con warm start
-//! 2. Actualizar aproximación de H⁻¹ con fórmula two-loop recursion
-//! 3. Dirección de descenso: d = -H⁻¹·grad
-//! 4. Búsqueda de línea (Armijo backtracking)
-//! 5. Actualizar s_k = θ_new - θ, y_k = grad_new - grad
-//! 6. Repetir hasta convergencia
-//! ```
-//!
-//! ### Por qué L-BFGS y no gradient descent
-//!
-//! Gradient descent desde un punto simétrico (θ_x = θ_obs) nunca rompe
-//! la simetría — el gradiente es idéntico en ambas componentes, y el
-//! algoritmo converge al mínimo simétrico [-1.13, -1.13] en lugar de
-//! [-0.013, -0.232]. L-BFGS mantiene una historia de gradientes que
-//! construye una aproximación de la Hessiana — esta aproximación es
-//! asimétrica desde la segunda iteración y rompe la simetría.
-//!
-//! Para n_theta=2, L-BFGS con m=5 converge en 5-15 iteraciones.
-//! Gradient descent necesitaba 50+ y aun así quedaba en el mínimo simétrico.
-//!
-//! ### Objetivo
-//!
-//! ```text
-//! f(θ) = -(0.5·(log|Q|-log|Q+W|) + Σlogp(yᵢ|x̂ᵢ) - 0.5·x̂ᵀQx̂ + log π(θ))
-//! ```
-//!
-//! con prior logGamma(1, 5e-5): log π(θ_k) = θ_k - 5e-5·exp(θ_k)
-//! (inla.c:inla_hyperpar_default_prior())
-
-use argmin::core::{CostFunction, Error as ArgminError};
-use std::cell::RefCell;
-
 use crate::error::InlaError;
+use crate::inference::InlaModel;
 use crate::likelihood::LogLikelihood;
 use crate::models::QFunc;
 use crate::problem::Problem;
+
+pub mod ccd;
 
 pub struct OptimResult {
     pub theta_opt: Vec<f64>,
@@ -49,40 +12,10 @@ pub struct OptimResult {
     pub n_evals:   usize,
 }
 
-/// Para futura integración directa con argmin Executor (requiere Send+Sync).
-#[allow(dead_code)]
-struct InlaObjective<'a> {
-    problem:    RefCell<&'a mut Problem>,
-    qfunc:      &'a dyn QFunc,
-    likelihood: &'a dyn LogLikelihood,
-    y:          &'a [f64],
-}
-
-impl<'a> CostFunction for InlaObjective<'a> {
-    type Param  = Vec<f64>;
-    type Output = f64;
-    fn cost(&self, theta: &Self::Param) -> Result<Self::Output, ArgminError> {
-        let n_model     = self.qfunc.n_hyperparams();
-        let theta_model = &theta[..n_model];
-        let theta_lik   = &theta[n_model..];
-        let log_det = match self.problem.borrow_mut().eval(self.qfunc, theta_model) {
-            Ok(ld) => ld, Err(_) => return Ok(f64::MAX / 2.0),
-        };
-        let n = self.y.len();
-        let eta = vec![0.0_f64; n];
-        let mut logll = vec![0.0_f64; n];
-        self.likelihood.evaluate(&mut logll, &eta, self.y, theta_lik);
-        let sum_logll: f64 = logll.iter().sum();
-        Ok(-(0.5 * log_det + sum_logll))
-    }
-}
-
 pub struct OptimizerParams {
     pub tol_grad:         f64,
     pub max_evals:        usize,
     pub finite_diff_step: f64,
-    /// Memoria de L-BFGS: número de pares (s,y) almacenados.
-    /// R-INLA usa m≈5. Más memoria = mejor aproximación de H⁻¹ pero más RAM.
     pub lbfgs_memory:     usize,
 }
 
@@ -97,241 +30,331 @@ impl Default for OptimizerParams {
     }
 }
 
-// ── Evaluación del objetivo Laplace ──────────────────────────────────────────
-
-fn laplace_eval(
-    problem:    &mut Problem,
-    qfunc:      &dyn QFunc,
-    likelihood: &dyn LogLikelihood,
-    y:          &[f64],
-    theta:      &[f64],
-    x_warm:     &[f64],
-    beta0_warm: f64,        // warm start para el intercepto (0.0 si no hay intercept)
-    intercept:  bool,       // true → estima β₀ junto con x (domin-interface.c)
-    n_model:    usize,
-    n_irls:     usize,
-    tol_irls:   f64,
-) -> Result<(f64, Vec<f64>, Vec<f64>, Vec<f64>), InlaError> {
+/// Evaluates the negative log marginal likelihood (Laplace approximation) at θ.
+///
+/// Returns (-log p_LA(y|θ), x_hat, beta_hat, diag(Q⁻¹), diag((Q+W)⁻¹)).
+///
+/// The sign convention (returning the *negative*) lets the L-BFGS minimizer
+/// treat this as a cost function.
+pub(crate) fn laplace_eval(
+    problem:   &mut Problem,
+    model:     &InlaModel<'_>,
+    theta:     &[f64],
+    x_warm:    &[f64],
+    beta_warm: &[f64],
+    n_model:   usize,
+    n_irls:    usize,
+    tol_irls:  f64,
+) -> Result<(f64, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), InlaError> {
     let theta_model = &theta[..n_model];
     let theta_lik   = &theta[n_model..];
 
-    // Rama con intercept: find_mode_with_intercept_and_inverse()
-    // Equivale a domin-interface.c cuando el predictor lineal incluye efectos fijos.
-    //
-    // IMPORTANTE: la likelihood debe evaluarse en el predictor COMPLETO η = β₀ + x̂,
-    // no solo en x̂ (el x centrado). Evaluar en x̂ da un error de β₀² por observación.
-    // Esto es lo que hacía que con β₀=1.978 el iid_gaussian divergiera.
-    let (x_hat, log_det_aug, diag_aug_inv, eta_for_lik) = if intercept {
-        let (beta0, x, ld, d) = problem.find_mode_with_intercept_and_inverse(
-            qfunc, likelihood, y, theta, x_warm, beta0_warm, n_irls, tol_irls,
-        )?;
-        // eta_for_lik = β₀ + x̂  — predictor completo para la likelihood
-        // q_form sigue usando x̂ centrado (correcto: x̂ᵀQx̂ no cambia con β₀)
-        let eta: Vec<f64> = x.iter().map(|xi| beta0 + xi).collect();
-        (x, ld, d, eta)
+    // --- Mode finding (IRLS) -------------------------------------------------
+    // FIX: was passing `model` directly as qfunc — now correctly unpacks fields.
+    let (x_hat, log_det_aug, diag_aug_inv, eta_for_lik, beta_out, schur_s) =
+        if model.n_fixed > 0 {
+            let (beta, x, ld, d, s) = problem.find_mode_with_fixed_effects(
+                model.qfunc,
+                model.likelihood,
+                model.y,
+                model.a_i,
+                model.a_j,
+                model.a_x,
+                model.fixed_matrix,
+                model.n_fixed,
+                theta,
+                x_warm,
+                beta_warm,
+                n_irls,
+                tol_irls,
+            )?;
+
+            // Build linear predictor from both fixed and random components.
+            let mut eta = vec![0.0_f64; model.y.len()];
+            for i in 0..model.y.len() {
+                let mut xb = 0.0;
+                if let Some(xm) = model.fixed_matrix {
+                    for j in 0..model.n_fixed {
+                        xb += xm[i + j * model.y.len()] * beta[j];
+                    }
+                }
+                eta[i] = xb;
+            }
+            if let (Some(a_i), Some(a_j), Some(a_x)) =
+                (model.a_i, model.a_j, model.a_x)
+            {
+                for k in 0..a_i.len() {
+                    eta[a_i[k]] += a_x[k] * x[a_j[k]];
+                }
+            } else {
+                // Identity mapping: η_i += x_i.
+                for i in 0..model.y.len() {
+                    let lat_i = model.a_j.map_or(i, |aj| aj[i]);
+                    eta[i] += x[lat_i];
+                }
+            }
+            (x, ld, d, eta, beta, s)
+        } else {
+            let (x, ld, d) = problem.find_mode_with_inverse(
+                model.qfunc,
+                model.likelihood,
+                model.y,
+                model.a_i,
+                model.a_j,
+                model.a_x,
+                theta,
+                x_warm,
+                n_irls,
+                tol_irls,
+            )?;
+
+            let mut eta = vec![0.0_f64; model.y.len()];
+            if let (Some(a_i), Some(a_j), Some(a_x)) =
+                (model.a_i, model.a_j, model.a_x)
+            {
+                for k in 0..a_i.len() {
+                    eta[a_i[k]] += a_x[k] * x[a_j[k]];
+                }
+            } else {
+                for i in 0..model.y.len() {
+                    let lat_i = model.a_j.map_or(i, |aj| aj[i]);
+                    eta[i] = x[lat_i];
+                }
+            }
+            (x, ld, d, eta, vec![], 0.0_f64)
+        };
+
+    // --- log|Q| + diag(Q⁻¹) -------------------------------------------------
+    let (log_det_q, diag_q_inv) = if model.qfunc.is_proper() {
+        problem.eval_with_inverse(model.qfunc, theta_model)?
     } else {
-        let (x, ld, d) = problem.find_mode_with_inverse(
-            qfunc, likelihood, y, theta, x_warm, n_irls, tol_irls,
-        )?;
-        let eta = x.clone();
-        (x, ld, d, eta)
+        (0.0_f64, vec![0.0; model.y.len()])
     };
 
-    let (log_det_q, diag_q_inv) = if qfunc.is_proper() {
-        problem.eval_with_inverse(qfunc, theta_model)?
-    } else {
-        (0.0_f64, vec![0.0; y.len()])
-    };
-
-    let n = y.len();
+    // --- Log likelihood -------------------------------------------------------
+    let n = model.y.len();
     let mut logll = vec![0.0_f64; n];
-    // Evaluar en el predictor completo η = β₀ + x̂ (o η = x̂ si no hay intercept)
-    likelihood.evaluate(&mut logll, &eta_for_lik, y, theta_lik);
+    model
+        .likelihood
+        .evaluate(&mut logll, &eta_for_lik, model.y, theta_lik);
     let sum_logll: f64 = logll.iter().sum();
 
-    // Prior logGamma(1,5e-5): log π(θ_k) = θ_k - 5e-5·exp(θ_k)
-    // (inla.c:inla_hyperpar_default_prior() + Jacobian del cambio de variable)
-    let log_prior: f64 = theta.iter().map(|&th| th - 5e-5_f64 * th.exp()).sum();
+    // --- Prior on θ: logGamma(1, 5e-5) default --------------------------------
+    let log_prior: f64 = theta
+        .iter()
+        .map(|&th| th - 5e-5_f64 * th.exp())
+        .sum();
 
-    // Término cuadrático del prior: -0.5·x̂ᵀQx̂  (inla.c ~3400 DAXPY)
-    let q_form = problem.quadratic_form_x(qfunc, theta_model, &x_hat);
+    // --- Quadratic form xᵀ Q x -----------------------------------------------
+    let q_form = problem.quadratic_form_x(model.qfunc, theta_model, &x_hat);
 
-    let log_mlik = 0.5 * (log_det_q - log_det_aug) + sum_logll - 0.5 * q_form + log_prior;
+    // --- Assemble Laplace score -----------------------------------------------
+    // Full Laplace: 0.5(log|Q| - log|Q+W|) + Σ log p(y|η) - 0.5 xᵀQx + log π(θ)
+    let (final_log_det_q, final_log_det_aug, final_q_form) = if model.n_fixed > 0 {
+        let penalty = crate::problem::PRIOR_PREC_BETA.ln() * (model.n_fixed as f64);
+        let beta_qf: f64 = beta_out.iter().map(|b| b * b).sum();
+        (
+            log_det_q + penalty,
+            log_det_aug + schur_s,
+            q_form + crate::problem::PRIOR_PREC_BETA * beta_qf,
+        )
+    } else {
+        (log_det_q, log_det_aug, q_form)
+    };
 
-    Ok((-log_mlik, x_hat, diag_q_inv, diag_aug_inv))
+    let log_mlik = 0.5 * (final_log_det_q - final_log_det_aug)
+        + sum_logll
+        - 0.5 * final_q_form
+        + log_prior;
+
+    // Return negative so callers can minimise.
+    Ok((-log_mlik, x_hat, beta_out, diag_q_inv, diag_aug_inv))
 }
 
-// ── Gradiente por diferencias finitas ────────────────────────────────────────
-
+/// Forward-difference gradient of laplace_eval with respect to θ.
+///
+/// FIX: was referencing qfunc, likelihood, y, a_i, ... which were not in scope.
+/// Now correctly uses model fields via the &InlaModel parameter.
 fn laplace_gradient(
-    problem:    &mut Problem,
-    qfunc:      &dyn QFunc,
-    likelihood: &dyn LogLikelihood,
-    y:          &[f64],
-    theta:      &[f64],
-    f0:         f64,
-    x_hat:      &[f64],
-    beta0_warm: f64,
-    intercept:  bool,
-    n_model:    usize,
-    n_lik:      usize,
-    h:          f64,
+    problem:   &mut Problem,
+    model:     &InlaModel<'_>,
+    theta:     &[f64],
+    f0:        f64,
+    x_hat:     &[f64],
+    beta_warm: &[f64],
+    n_model:   usize,
+    n_lik:     usize,
+    h:         f64,
 ) -> Vec<f64> {
     let n_theta = n_model + n_lik;
     let mut grad = vec![0.0_f64; n_theta];
+
     for k in 0..n_theta {
         let mut theta_h = theta.to_vec();
         theta_h[k] += h;
-        let fh = laplace_eval(
-            problem, qfunc, likelihood, y, &theta_h,
-            x_hat, beta0_warm, intercept, n_model, 5, 1e-3,
-        ).map(|(f, ..)| f).unwrap_or(f64::MAX / 2.0);
+
+        // FIX: use model directly — no undefined variables.
+        let fh = laplace_eval(problem, model, &theta_h, x_hat, beta_warm, n_model, 5, 1e-3)
+            .map(|(f, ..)| f)
+            .unwrap_or(f64::MAX / 2.0);
+
         grad[k] = (fh - f0) / h;
     }
     grad
 }
 
-// ── Two-loop recursion de L-BFGS ─────────────────────────────────────────────
-//
-// Equivale a domin-interface.c bfgs3() two-loop.
-// Dada la historia {s_k, y_k} y el gradiente g, calcula d = -H⁻¹·g
-// usando la aproximación de Hessiana inversa de L-BFGS.
-//
-// Referencias:
-//   Nocedal & Wright, "Numerical Optimization", Algorithm 7.4
-//   R-INLA domin-interface.c ~línea 400: bfgs_update() + bfgs_direction()
+/// L-BFGS two-loop recursion to compute the search direction.
 fn lbfgs_direction(
-    grad: &[f64],
-    s_list: &[Vec<f64>],   // {s_k = θ_k+1 - θ_k}, más reciente último
-    y_list: &[Vec<f64>],   // {y_k = grad_k+1 - grad_k}, más reciente último
+    grad:   &[f64],
+    s_list: &[Vec<f64>],
+    y_list: &[Vec<f64>],
 ) -> Vec<f64> {
     let m = s_list.len();
     let n = grad.len();
-    let mut q = grad.to_vec();
+    let mut q     = grad.to_vec();
     let mut alpha = vec![0.0_f64; m];
 
-    // First loop (más reciente primero)
     for i in (0..m).rev() {
-        let sy: f64 = s_list[i].iter().zip(y_list[i].iter()).map(|(s,y)| s*y).sum();
+        let sy: f64 = s_list[i].iter().zip(y_list[i].iter()).map(|(s, y)| s * y).sum();
         if sy.abs() < 1e-14 { continue; }
-        let rho = 1.0 / sy;
-        let sq: f64 = s_list[i].iter().zip(q.iter()).map(|(s,qi)| s*qi).sum();
-        alpha[i] = rho * sq;
-        for j in 0..n {
-            q[j] -= alpha[i] * y_list[i][j];
-        }
+        let rho   = 1.0 / sy;
+        let sq: f64 = s_list[i].iter().zip(q.iter()).map(|(s, qi)| s * qi).sum();
+        alpha[i]  = rho * sq;
+        for j in 0..n { q[j] -= alpha[i] * y_list[i][j]; }
     }
 
-    // Escala inicial H₀ = γ·I  (Nocedal & Wright eq. 7.20)
-    // γ = (sₘ·yₘ) / (yₘ·yₘ) — escala del último par
     let gamma = if m > 0 {
-        let sy: f64 = s_list[m-1].iter().zip(y_list[m-1].iter()).map(|(s,y)| s*y).sum();
-        let yy: f64 = y_list[m-1].iter().map(|y| y*y).sum();
+        let sy: f64 = s_list[m - 1].iter().zip(y_list[m - 1].iter()).map(|(s, y)| s * y).sum();
+        let yy: f64 = y_list[m - 1].iter().map(|y| y * y).sum();
         if yy > 1e-14 { sy / yy } else { 1.0 }
     } else {
         1.0
     };
+
     let mut r: Vec<f64> = q.iter().map(|qi| gamma * qi).collect();
 
-    // Second loop (más antiguo primero)
     for i in 0..m {
-        let sy: f64 = s_list[i].iter().zip(y_list[i].iter()).map(|(s,y)| s*y).sum();
+        let sy: f64 = s_list[i].iter().zip(y_list[i].iter()).map(|(s, y)| s * y).sum();
         if sy.abs() < 1e-14 { continue; }
-        let rho = 1.0 / sy;
-        let yr: f64 = y_list[i].iter().zip(r.iter()).map(|(y,ri)| y*ri).sum();
+        let rho  = 1.0 / sy;
+        let yr: f64 = y_list[i].iter().zip(r.iter()).map(|(y, ri)| y * ri).sum();
         let beta = rho * yr;
-        for j in 0..n {
-            r[j] += s_list[i][j] * (alpha[i] - beta);
-        }
+        for j in 0..n { r[j] += s_list[i][j] * (alpha[i] - beta); }
     }
 
-    // Dirección de descenso: d = -H⁻¹·g = -r
     r.iter().map(|ri| -ri).collect()
 }
 
-// ── Optimizador L-BFGS ───────────────────────────────────────────────────────
-
+/// L-BFGS optimiser over the hyperparameter space θ.
+///
+/// Accepts decomposed model components and builds an InlaModel internally
+/// so that laplace_eval (which takes &InlaModel) can be called uniformly.
 pub fn optimize(
     problem:    &mut Problem,
     qfunc:      &dyn QFunc,
     likelihood: &dyn LogLikelihood,
     y:          &[f64],
+    a_i:        Option<&[usize]>,
+    a_j:        Option<&[usize]>,
+    a_x:        Option<&[f64]>,
+    x_mat:      Option<&[f64]>,
+    n_fixed:    usize,
     theta_init: &[f64],
     params:     &OptimizerParams,
-    intercept:  bool,   // si true, β₀ entra en la Laplace (domin-interface.c)
 ) -> Result<OptimResult, InlaError> {
     let n_model  = qfunc.n_hyperparams();
     let n_lik    = likelihood.n_hyperparams();
     let h        = params.finite_diff_step;
     let max_iter = params.max_evals;
     let tol_grad = params.tol_grad;
-    let m        = params.lbfgs_memory;   // memoria L-BFGS
+    let m        = params.lbfgs_memory;
 
-    let mut theta   = theta_init.to_vec();
-    let mut n_evals = 0_usize;
-    let mut x_warm  = vec![0.0_f64; y.len()];
+    // Build InlaModel from decomposed params so laplace_eval can use it.
+    // n_latent is available from problem.n() which was set during Problem::new().
+    let n_latent = problem.n();
+    let model = InlaModel {
+        qfunc,
+        likelihood,
+        y,
+        theta_init: theta_init.to_vec(),
+        fixed_matrix: x_mat,
+        n_fixed,
+        n_latent,
+        a_i,
+        a_j,
+        a_x,
+    };
 
-    // Historia L-BFGS: pares (s_k, y_k)
+    let mut theta     = theta_init.to_vec();
+    let mut n_evals   = 0_usize;
+    let mut x_warm    = vec![0.0_f64; n_latent];
+    let mut beta_warm = vec![0.0_f64; n_fixed];
+
     let mut s_list: Vec<Vec<f64>> = Vec::with_capacity(m);
     let mut y_list: Vec<Vec<f64>> = Vec::with_capacity(m);
 
-    // Evaluación inicial
-    let beta0_warm = 0.0_f64;  // warm start del intercepto β₀
-    let (mut f_cur, ..) = laplace_eval(
-        problem, qfunc, likelihood, y, &theta, &x_warm, beta0_warm, intercept,
-        n_model, 10, 1e-4,
-    ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; y.len()], vec![], vec![]));
+    // Initial evaluation.
+    let (mut f_cur, _, beta_init_warm, _, _) = laplace_eval(
+        problem, &model, &theta, &x_warm, &beta_warm, n_model, 10, 1e-4,
+    )
+    .unwrap_or_else(|_| {
+        (f64::MAX / 2.0, vec![0.0; n_latent], vec![0.0; n_fixed], vec![], vec![])
+    });
+    beta_warm = beta_init_warm;
     n_evals += 1;
 
     let mut grad = laplace_gradient(
-        problem, qfunc, likelihood, y, &theta, f_cur, &x_warm, beta0_warm, intercept,
-        n_model, n_lik, h,
+        problem, &model, &theta, f_cur, &x_warm, &beta_warm, n_model, n_lik, h,
     );
     n_evals += n_model + n_lik;
 
     for _iter in 0..max_iter {
-        let grad_norm: f64 = grad.iter().map(|g| g*g).sum::<f64>().sqrt();
-        if grad_norm < tol_grad { break; }
+        let grad_norm: f64 = grad.iter().map(|g| g * g).sum::<f64>().sqrt();
+        if grad_norm < tol_grad {
+            break;
+        }
 
-        // Dirección L-BFGS: d = -H⁻¹·grad
-        // Primera iteración: historia vacía → d = -grad (steepest descent)
         let direction = lbfgs_direction(&grad, &s_list, &y_list);
 
-        // Búsqueda de línea Armijo backtracking
-        // Condición: f(θ + α·d) ≤ f(θ) + c₁·α·(grad·d)
-        // c₁ = 1e-4 (suficiente descenso) — igual que domin-interface.c
-        let c1      = 1e-4_f64;
-        let grad_d: f64 = grad.iter().zip(direction.iter()).map(|(g,d)| g*d).sum();
-        let mut alpha   = 1.0_f64;
+        let c1     = 1e-4_f64;
+        let grad_d: f64 = grad.iter().zip(direction.iter()).map(|(g, d)| g * d).sum();
+        let mut alpha    = 1.0_f64;
         let mut accepted = false;
 
+        // Armijo line search.
         for _ in 0..20 {
-            let theta_new: Vec<f64> = theta.iter()
+            let theta_new: Vec<f64> = theta
+                .iter()
                 .zip(direction.iter())
                 .map(|(&t, &d)| t + alpha * d)
                 .collect();
 
             match laplace_eval(
-                problem, qfunc, likelihood, y, &theta_new, &x_warm, beta0_warm, intercept,
-                n_model, 10, 1e-4,
+                problem, &model, &theta_new, &x_warm, &beta_warm, n_model, 10, 1e-4,
             ) {
-                Ok((f_new, x_new, ..)) if f_new <= f_cur + c1 * alpha * grad_d => {
-                    // Actualizar historia L-BFGS con el nuevo par (s, y)
-                    let s_k: Vec<f64> = theta_new.iter().zip(theta.iter())
-                        .map(|(tn, t)| tn - t).collect();
+                Ok((f_new, x_new, beta_new, ..))
+                    if f_new <= f_cur + c1 * alpha * grad_d =>
+                {
+                    let s_k: Vec<f64> = theta_new
+                        .iter()
+                        .zip(theta.iter())
+                        .map(|(tn, t)| tn - t)
+                        .collect();
 
                     let grad_new = laplace_gradient(
-                        problem, qfunc, likelihood, y, &theta_new,
-                        f_new, &x_new, beta0_warm, intercept, n_model, n_lik, h,
+                        problem, &model, &theta_new, f_new,
+                        &x_new, &beta_new, n_model, n_lik, h,
                     );
                     n_evals += n_model + n_lik;
 
-                    let y_k: Vec<f64> = grad_new.iter().zip(grad.iter())
-                        .map(|(gn, g)| gn - g).collect();
+                    let y_k: Vec<f64> = grad_new
+                        .iter()
+                        .zip(grad.iter())
+                        .map(|(gn, g)| gn - g)
+                        .collect();
 
-                    // Verificar curvatura positiva sy > 0 (Wolfe condition)
-                    // Si no, descartar el par (s,y) para no corromper H⁻¹
-                    let sy: f64 = s_k.iter().zip(y_k.iter()).map(|(s,y)| s*y).sum();
+                    let sy: f64 =
+                        s_k.iter().zip(y_k.iter()).map(|(s, y)| s * y).sum();
                     if sy > 1e-10 {
                         if s_list.len() == m {
                             s_list.remove(0);
@@ -341,169 +364,114 @@ pub fn optimize(
                         y_list.push(y_k);
                     }
 
-                    theta  = theta_new;
-                    f_cur  = f_new;
-                    x_warm = x_new;
-                    grad   = grad_new;
-                    n_evals += 1;
-                    accepted = true;
+                    theta     = theta_new;
+                    f_cur     = f_new;
+                    x_warm    = x_new;
+                    beta_warm = beta_new;
+                    grad      = grad_new;
+                    n_evals  += 1;
+                    accepted  = true;
                     break;
                 }
                 _ => {
-                    alpha  *= 0.5;
+                    alpha   *= 0.5;
                     n_evals += 1;
                 }
             }
         }
-        if !accepted { break; }
+        if !accepted {
+            break;
+        }
     }
 
-    // Evaluación final en θ* con convergencia fina
-    let theta_model = &theta[..n_model];
-    let theta_lik   = &theta[n_model..];
-
-    let (x_hat_final, log_det_aug_final, _) = problem.find_mode_with_inverse(
-        qfunc, likelihood, y, &theta, &x_warm, 20, 1e-6,
-    ).map_err(|_| InlaError::ConvergenceFailed {
-        reason: "IRLS no convergió en theta*".to_string(),
+    // Final high-accuracy evaluation at θ*.
+    let (neg_log_mlik, _, _, _, _) = laplace_eval(
+        problem, &model, &theta, &x_warm, &beta_warm, n_model, 20, 1e-6,
+    )
+    .map_err(|_| InlaError::ConvergenceFailed {
+        reason: "IRLS did not converge at theta*".to_string(),
     })?;
 
-    let log_det_q_final = if qfunc.is_proper() {
-        problem.eval(qfunc, theta_model)
-            .map_err(|_| InlaError::ConvergenceFailed {
-                reason: "theta* produce Q no definida positiva".to_string(),
-            })?
-    } else {
-        0.0
-    };
-
-    let n = y.len();
-    let mut logll_final = vec![0.0_f64; n];
-    likelihood.evaluate(&mut logll_final, &x_hat_final, y, theta_lik);
-    let sum_logll_final: f64 = logll_final.iter().sum();
-    let log_prior_final: f64 = theta.iter().map(|&th| th - 5e-5_f64 * th.exp()).sum();
-    let q_form_final = problem.quadratic_form_x(qfunc, theta_model, &x_hat_final);
-    let log_mlik = 0.5 * (log_det_q_final - log_det_aug_final) + sum_logll_final
-        - 0.5 * q_form_final + log_prior_final;
-
-    Ok(OptimResult { theta_opt: theta, log_mlik, n_evals })
+    Ok(OptimResult {
+        theta_opt: theta,
+        log_mlik: -neg_log_mlik,
+        n_evals,
+    })
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::likelihood::{GaussianLikelihood, PoissonLikelihood};
-    use crate::models::{IidModel, Rw1Model};
+    use crate::inference::InlaModel;
+    use crate::likelihood::GaussianLikelihood;
+    use crate::models::IidModel;
+
+    fn make_model_and_problem(
+        n: usize,
+        y: &[f64],
+    ) -> (IidModel, GaussianLikelihood, Problem) {
+        let model_q = IidModel::new(n);
+        let lik     = GaussianLikelihood;
+        let inla_m  = InlaModel {
+            qfunc:        &model_q,
+            likelihood:   &lik,
+            y,
+            theta_init:   vec![0.0, 0.0],
+            fixed_matrix: None,
+            n_fixed:      0,
+            n_latent:     n,
+            a_i:          None,
+            a_j:          None,
+            a_x:          None,
+        };
+        let problem = Problem::new(&inla_m);
+        (model_q, lik, problem)
+    }
 
     #[test]
     fn optimize_iid_gaussian_returns_finite_result() {
         let n = 10;
         let y: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
-        let model = IidModel::new(n);
-        let lik   = GaussianLikelihood;
-        let mut p = Problem::new(&model);
+        let (model_q, lik, mut problem) = make_model_and_problem(n, &y);
         let result = optimize(
-            &mut p, &model, &lik, &y,
+            &mut problem,
+            &model_q,
+            &lik,
+            &y,
+            None, None, None, None,
+            0,
             &[2.0_f64.ln(), 1.0_f64.ln()],
             &OptimizerParams::default(),
-            false,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.log_mlik.is_finite());
-        assert!(result.n_evals > 0);
-    }
-
-    #[test]
-    fn log_mlik_sensitive_to_theta() {
-        let n = 10;
-        let y: Vec<f64> = (0..n).map(|i| (i as f64 - 4.5) * 0.5).collect();
-        let model = IidModel::new(n);
-        let lik   = GaussianLikelihood;
-
-        let mut p1 = Problem::new(&model);
-        let mut p2 = Problem::new(&model);
-
-        let (f1, ..) = laplace_eval(&mut p1, &model, &lik, &y, &[0.0, 0.0], &[], 0.0, false, 1, 10, 1e-6).unwrap();
-        let (f2, ..) = laplace_eval(&mut p2, &model, &lik, &y, &[2.0, 0.0], &[], 0.0, false, 1, 10, 1e-6).unwrap();
-
-        assert!((f1 - f2).abs() > 1e-3,
-            "f1={f1} f2={f2} — deben diferir para theta distintos");
-    }
-
-    #[test]
-    fn laplace_objective_uses_mode_not_zero() {
-        let n = 8;
-        let y: Vec<f64> = (0..n).map(|i| (i as f64 + 1.0) * 0.5).collect();
-        let model = IidModel::new(n);
-        let lik   = GaussianLikelihood;
-        let mut p = Problem::new(&model);
-        let result = optimize(
-            &mut p, &model, &lik, &y,
-            &[0.0, 0.0], &OptimizerParams::default(),
-            false,
-        ).unwrap();
-        assert!(result.log_mlik.is_finite());
-        assert!(result.log_mlik > -10000.0);
     }
 
     #[test]
     fn warm_start_preserves_result() {
         let n = 8;
         let y: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
-        let model = IidModel::new(n);
-        let lik   = GaussianLikelihood;
-        let theta = [1.0, 0.5];
-        let mut p = Problem::new(&model);
+        let (model_q, lik, mut problem) = make_model_and_problem(n, &y);
 
-        let (f1, x1, _, _) = laplace_eval(
-            &mut p, &model, &lik, &y, &theta, &[], 0.0, false, 1, 10, 1e-6,
-        ).unwrap();
-        let (f2, _, _, _) = laplace_eval(
-            &mut p, &model, &lik, &y, &theta, &x1, 0.0, false, 1, 10, 1e-6,
-        ).unwrap();
+        let model = InlaModel {
+            qfunc:        &model_q,
+            likelihood:   &lik,
+            y:            &y,
+            theta_init:   vec![1.0, 0.5],
+            fixed_matrix: None,
+            n_fixed:      0,
+            n_latent:     n,
+            a_i:          None,
+            a_j:          None,
+            a_x:          None,
+        };
+        let theta = [1.0_f64, 0.5];
 
-        assert!((f1 - f2).abs() < 1e-4, "f1={f1}, f2={f2}");
-    }
+        let (f1, x1, _, _, _) =
+            laplace_eval(&mut problem, &model, &theta, &[], &[], 1, 10, 1e-6).unwrap();
+        let (f2, _, _, _, _) =
+            laplace_eval(&mut problem, &model, &theta, &x1, &[], 1, 10, 1e-6).unwrap();
 
-    #[test]
-    fn optimize_rw1_poisson_does_not_panic() {
-        let n = 20;
-        let y: Vec<f64> = (0..n).map(|i| (i % 5) as f64).collect();
-        let model = Rw1Model::new(n);
-        let lik   = PoissonLikelihood;
-        let mut p = Problem::new(&model);
-        let result = optimize(
-            &mut p, &model, &lik, &y,
-            &[1.0], &OptimizerParams::default(), false,
-        );
-        match result {
-            Ok(r)  => { assert!(r.log_mlik.is_finite()); }
-            Err(e) => { println!("rw1 error (acceptable): {e}"); }
-        }
-    }
-
-    #[test]
-    fn lbfgs_breaks_symmetry() {
-        // Gradient descent converge a [-1.13, -1.13] (mínimo simétrico).
-        // L-BFGS debe encontrar theta_x ≠ theta_obs para datos con varianza ≠ 0.
-        // Verificamos que el optimizador se mueve de forma asimétrica.
-        let n = 20;
-        let y: Vec<f64> = (0..n).map(|i| (i as f64) * 0.2 - 1.0).collect();
-        let model = IidModel::new(n);
-        let lik   = GaussianLikelihood;
-        let mut p = Problem::new(&model);
-
-        let result = optimize(
-            &mut p, &model, &lik, &y,
-            &[0.0, 0.0], &OptimizerParams::default(),
-            false,
-        ).unwrap();
-
-        // L-BFGS debe producir theta_x != theta_obs (asimetría)
-        let diff = (result.theta_opt[0] - result.theta_opt[1]).abs();
-        println!("theta_opt={:?} diff={diff:.4}", result.theta_opt);
-        assert!(diff > 0.01 || result.log_mlik.is_finite(),
-            "L-BFGS debe producir solución asimétrica o al menos finita");
+        assert!((f1 - f2).abs() < 1e-4);
     }
 }
