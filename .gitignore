@@ -5,3 +5,5 @@
 # Cargo.lock SÍ se sube en aplicaciones binarias, pero en librerías es opcional.
 # Lo incluimos para reproducibilidad exacta en CI.
 # (no lo ignoramos)
+
+*.py
