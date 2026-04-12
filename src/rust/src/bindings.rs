@@ -106,9 +106,32 @@ fn rust_inla_run(
             // Unpack random marginals (just mean and var for now)
             let mut marg_means = Vec::with_capacity(n_latent);
             let mut marg_vars = Vec::with_capacity(n_latent);
+
+            let mut fitted_mean = Vec::with_capacity(n_latent);
+            let mut fitted_q025 = Vec::with_capacity(n_latent);
+            let mut fitted_q500 = Vec::with_capacity(n_latent);
+            let mut fitted_q975 = Vec::with_capacity(n_latent);
+            let mut fitted_mode = Vec::with_capacity(n_latent);
+
+            // Because the inverse link (exp/logit) is monotonically increasing, 
+            // quantiles pass through exactly mapping Quantile(eta) -> Quantile(mu)
+            let link_inv = |eta: f64| lik.link().inverse(eta);
+
             for m in &res.random {
                 marg_means.push(m.mean());
                 marg_vars.push(m.variance());
+                
+                fitted_mean.push(m.emarginal(&link_inv));
+                fitted_q025.push(link_inv(m.quantile(0.025)));
+                fitted_q500.push(link_inv(m.quantile(0.500)));
+                fitted_q975.push(link_inv(m.quantile(0.975)));
+                
+                // Provide a safe response-scale peak approximation
+                let mode = match lik.link() {
+                    crate::likelihood::LinkFunction::Log => (m.mean() - m.variance()).exp(),
+                    _ => m.quantile(0.50),
+                };
+                fitted_mode.push(mode);
             }
 
             list!(
@@ -118,6 +141,13 @@ fn rust_inla_run(
                 fixed_sds = res.fixed_sds,
                 marg_means = marg_means,
                 marg_vars = marg_vars,
+
+                // Predictions mapped to the Response (μ) Scale natively!
+                fitted_mean = fitted_mean,
+                fitted_mode = fitted_mode,
+                fitted_q025 = fitted_q025,
+                fitted_q500 = fitted_q500,
+                fitted_q975 = fitted_q975,
                 ccd_thetas = res.ccd_thetas,
                 ccd_weights = res.ccd_weights,
                 prior_W = res.w_opt,

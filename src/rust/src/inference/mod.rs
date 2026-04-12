@@ -90,7 +90,20 @@ impl InlaEngine {
             let weight = pt.weight;
 
             let x_warm = vec![0.0_f64; n];
-            let beta_warm = vec![0.0_f64; k];
+            let mut beta_warm = vec![0.0_f64; k];
+            
+            // Frequency Regime Log-Link Warm Start
+            // Bypasses the Newton-Raphson hurdle when the target frequency is extremely low (e.g. freMTPL2freq ~ 0.05).
+            if k > 0 && matches!(model.likelihood.link(), crate::likelihood::LinkFunction::Log) {
+                let valid_y: Vec<f64> = model.y.iter().copied().filter(|y| !y.is_nan()).collect();
+                if !valid_y.is_empty() {
+                    let avg_y = valid_y.iter().sum::<f64>() / valid_y.len() as f64;
+                    if avg_y > 0.0 && avg_y < 0.2 {
+                        beta_warm[0] = avg_y.ln();
+                    }
+                }
+            }
+
             let (fixed_k, mean_k, vars_k) = if k > 0 {
                 match problem.find_mode_with_fixed_effects(
                     model.qfunc, model.likelihood, model.y, model.a_i, model.a_j, model.a_x, model.offset, model.fixed_matrix, k, theta_k,
