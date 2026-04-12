@@ -94,6 +94,8 @@ rusty_inla <- function(formula, data, family) {
     fit <- list(
         call = match.call(),
         formula = formula,
+        data = data,
+        family = family,
         mlik = res$log_mlik,
         summary.fixed = data.frame(
             row.names = colnames(X_fixed),
@@ -105,6 +107,22 @@ rusty_inla <- function(formula, data, family) {
         ),
         summary.random = list()
     )
+    
+    # NEW: Extract Bayesian Marginal Fitted Values from the backend
+    if (!is.null(res$fitted_mean)) {
+        # INLA natively attaches structural marginals to the first latent indices
+        # In simple models without custom A matrix mapping, these match the data rows exactly.
+        n_fitted <- min(length(res$fitted_mean), nrow(data))
+        fit$summary.fitted.values <- data.frame(
+            mean = res$fitted_mean[1:n_fitted],
+            sd   = rep(NA, n_fitted), # SD on response scale is complex mathematically
+            `0.025quant` = res$fitted_q025[1:n_fitted],
+            `0.5quant`   = res$fitted_q500[1:n_fitted],
+            `0.975quant` = res$fitted_q975[1:n_fitted],
+            mode = res$fitted_mode[1:n_fitted],
+            check.names = FALSE
+        )
+    }
     
     # Format Hyperparameters securely if present
     if (length(res$theta_opt) > 0) {
@@ -172,4 +190,47 @@ summary.rusty_inla <- function(object, ...) {
     }
     
     invisible(object)
+}
+
+#' Bayesian Prediction bypass for rusty-INLA
+#'
+#' Automatically appends new data, generates NA targets, forces the NA-trick
+#' through the Rust backend, and extracts the posterior marginal quantiles.
+#' 
+#' @export
+predict.rusty_inla <- function(object, newdata, ...) {
+    if (missing(newdata)) stop("Please provide newdata for predictions.")
+    
+    tf <- terms(object$formula, specials = "f")
+    resp_idx <- attr(tf, "response")
+    y_var <- as.character(attr(tf, "variables")[[resp_idx + 1]])
+    
+    # 1. Structure the new data to match the training data
+    # Bind targets as NA explicitly so Rust invokes the NA-Trick (skip logll, zero gradients)
+    newdata[[y_var]] <- NA
+    
+    # Save lengths for extracting
+    n_train <- nrow(object$data)
+    n_test  <- nrow(newdata)
+    
+    # Concatenate Datasets
+    combined_data <- rbind(object$data, newdata)
+    
+    # 2. Re-run rusty_inla invisibly on the combined dataset
+    cat(sprintf("Running NA-Trick bypass for %d predictions...\n", n_test))
+    fit_pred <- suppressWarnings(suppressMessages(
+        rusty_inla(object$formula, data = combined_data, family = object$family)
+    ))
+    
+    # 3. Extract purely the predicted marginal quantiles!
+    # Because they were appended sequentially, the predictions lie at the end.
+    fitted_vals <- fit_pred$summary.fitted.values
+    if (is.null(fitted_vals) || nrow(fitted_vals) < (n_train + n_test)) {
+        stop("Backend did not return correctly formatted structural marginals for predictions.")
+    }
+    
+    predictions <- fitted_vals[(n_train + 1):(n_train + n_test), ]
+    rownames(predictions) <- 1:n_test
+    
+    return(predictions)
 }
