@@ -6,24 +6,26 @@
 \usage{
 rust_inla_run(
   data,
-  model_type,
+  model_types_arg,
   likelihood_type,
   fixed_matrix_arg,
   n_fixed_arg,
   n_latent_arg,
-  x_idx_arg
+  a_i_arg,
+  a_j_arg,
+  a_x_arg,
+  extr_constr_arg,
+  n_constr_arg
 )
 }
 \arguments{
 \item{data}{A numeric array of length N (the response y).}
 
-\item{model_type}{String identifier ("iid", "rw1", "ar1").}
-
 \item{likelihood_type}{String identifier ("gaussian", "poisson", "gamma").}
 
-\item{fixed_matrix_arg}{Optional flat vector of K columns combined}
+\item{model_type}{String identifier ("iid", "rw1", "ar1").}
 
-\item{n_fixed_arg}{Number of columns K}
+\item{intercept}{Boolean to estimate global beta0.}
 }
 \description{
 Execute rust-inla backend from R.

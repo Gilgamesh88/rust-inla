@@ -78,11 +78,14 @@ impl FaerSolver {
         self.triplets.reserve(n + graph.iter_upper_triangle().count());
 
         for i in 0..n {
-            self.triplets.push(Triplet::new(i, i, qfunc.eval(i, i, theta)));
+            let mut val = qfunc.eval(i, i, theta);
+            if val == 0.0 { val = 1e-14; }
+            self.triplets.push(Triplet::new(i, i, val));
         }
         for (i, j) in graph.iter_upper_triangle() {
-            // Solo upper triangle — la API simplicial accede solo a esa parte
-            self.triplets.push(Triplet::new(i, j, qfunc.eval(i, j, theta)));
+            let mut val = qfunc.eval(i, j, theta);
+            if val == 0.0 { val = 1e-14; }
+            self.triplets.push(Triplet::new(i, j, val));
         }
     }
 }
@@ -204,6 +207,13 @@ impl SparseSolver for FaerSolver {
         ) {
             Ok(_)                  => {}
             Err(_) => {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::File::create("last_failed_matrix.txt") {
+                    writeln!(f, "N: {}", n).ok();
+                    for t in &self.triplets {
+                        writeln!(f, "{} {} {}", t.row, t.col, t.val).ok();
+                    }
+                }
                 return Err(InlaError::NotPositiveDefinite);
             }
         }

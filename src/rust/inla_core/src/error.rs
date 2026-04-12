@@ -12,6 +12,8 @@ pub enum InlaError {
     /// o si hay una inconsistencia numérica en QFunc::eval.
     #[error("Cholesky failed: Q is not positive definite (theta may be out of range)")]
     NotPositiveDefinite,
+    #[error("Cholesky failed: {0}")]
+    NotPositiveDefiniteContext(String),
 
     /// Se llamó log_determinant / solve_llt / selected_inverse antes de
     /// factorize(). El solver requiere el orden: reorder → build → factorize.

@@ -29,7 +29,7 @@ impl Problem {
 
     pub fn eval(&mut self, qfunc: &dyn QFunc, theta: &[f64]) -> Result<f64, InlaError> {
         self.solver.build(&self.graph, qfunc, theta);
-        self.solver.factorize()?;
+        self.solver.factorize().map_err(|_| crate::error::InlaError::NotPositiveDefiniteContext("Problem::eval Q factorize failed".to_string()))?;
         self.log_det = self.solver.log_determinant();
         self.n_evals += 1;
         Ok(self.log_det)
@@ -41,7 +41,7 @@ impl Problem {
         theta: &[f64],
     ) -> Result<(f64, Vec<f64>), InlaError> {
         self.solver.build(&self.graph, qfunc, theta);
-        self.solver.factorize()?;
+        self.solver.factorize().map_err(|_| crate::error::InlaError::NotPositiveDefiniteContext("Q prior factorize failed".to_string()))?;
         let log_det  = self.solver.log_determinant();
         self.log_det  = log_det;
         self.n_evals += 1;
@@ -67,54 +67,79 @@ impl Problem {
 
     pub fn find_mode_with_inverse(
         &mut self,
-        qfunc:      &dyn QFunc,
-        likelihood: &dyn crate::likelihood::LogLikelihood,
-        y:          &[f64],
-        a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>, offset: Option<&[f64]>,
+        model:      &crate::inference::InlaModel<'_>,
         theta:      &[f64],
         x_init:     &[f64],
         max_iter:   usize,
         tol:        f64,
     ) -> Result<(Vec<f64>, f64, Vec<f64>), InlaError> {
         let n_latent    = self.n();
-        let n_data      = y.len();
-        let n_model     = qfunc.n_hyperparams();
+        let n_data      = model.y.len();
+        let n_model     = model.qfunc.n_hyperparams();
         let theta_model = &theta[..n_model];
         let theta_lik   = &theta[n_model..];
         
         let mut x = if x_init.len() == n_latent { x_init.to_vec() } else { vec![0.0_f64; n_latent] };
         let mut log_det_aug = 0.0_f64;
 
+        let mut a_rows = vec![vec![]; n_data];
+        if let (Some(a_i), Some(a_j), Some(a_x)) = (model.a_i, model.a_j, model.a_x) {
+            for k in 0..a_i.len() { a_rows[a_i[k]].push((a_j[k], a_x[k])); }
+        } else {
+            for i in 0..n_data.min(n_latent) { a_rows[i].push((i, 1.0)); }
+        }
+
         for _iter in 0..max_iter {
             let x_old = x.clone();
 
             let mut eta_data = vec![0.0_f64; n_data];
             for i in 0..n_data {
-                let lat_i = a_i.map_or(i, |idx| idx[i]);
-                eta_data[i] = x[lat_i];
+                for &(j, ax) in &a_rows[i] { eta_data[i] += ax * x[j]; }
+            }
+            if let Some(offset) = model.offset {
+                for i in 0..n_data { eta_data[i] += offset[i]; }
             }
 
             let mut grad_data = vec![0.0_f64; n_data];
             let mut curv_data = vec![0.0_f64; n_data];
-            likelihood.gradient_and_curvature(&mut grad_data, &mut curv_data, &eta_data, y, theta_lik);
+            model.likelihood.gradient_and_curvature(&mut grad_data, &mut curv_data, &eta_data, model.y, theta_lik);
             
             for i in 0..n_data { curv_data[i] = curv_data[i].max(1e-6); }
 
             let mut grad_latent = vec![0.0_f64; n_latent];
-            let mut curv_latent = vec![0.0_f64; n_latent];
             for i in 0..n_data {
-                let lat_i = a_i.map_or(i, |idx| idx[i]);
-                grad_latent[lat_i] += grad_data[i];
-                curv_latent[lat_i] += curv_data[i];
+                for &(j, ax) in &a_rows[i] { grad_latent[j] += ax * grad_data[i]; }
             }
-            for k in 0..n_latent { curv_latent[k] = curv_latent[k].max(1e-6); }
 
-            let z_latent: Vec<f64> = (0..n_latent).map(|k| x[k] + grad_latent[k] / curv_latent[k]).collect();
-            let mut rhs: Vec<f64>  = (0..n_latent).map(|k| curv_latent[k] * z_latent[k]).collect();
+            let mut atwa = std::collections::HashMap::new();
+            for i in 0..n_data {
+                let w = curv_data[i];
+                let row = &a_rows[i];
+                for &(j1, ax1) in row {
+                    for &(j2, ax2) in row {
+                        let (min_j, max_j) = if j1 < j2 { (j1, j2) } else { (j2, j1) };
+                        *atwa.entry((min_j, max_j)).or_insert(0.0) += ax1 * w * ax2;
+                    }
+                }
+            }
 
-            let aug = AugmentedQFunc { inner: qfunc, diag_add: &curv_latent };
+            // z = x + Q_aug^-1 grad => Q_aug x + grad
+            let mut rhs = vec![0.0_f64; n_latent];
+            for k in 0..n_latent {
+                rhs[k] = grad_latent[k] + model.qfunc.eval(k, k, theta_model) * x[k] + atwa.get(&(k, k)).copied().unwrap_or(0.0) * x[k];
+                for &neighbor in self.graph.neighbors_of(k) {
+                    if neighbor != k {
+                        let q_ij = model.qfunc.eval(k, neighbor, theta_model);
+                        let (min_j, max_j) = if k < neighbor { (k, neighbor) } else { (neighbor, k) };
+                        let atwa_ij = atwa.get(&(min_j, max_j)).copied().unwrap_or(0.0);
+                        rhs[k] += (q_ij + atwa_ij) * x[neighbor];
+                    }
+                }
+            }
+
+            let aug = AugmentedQFunc { inner: model.qfunc, atwa: &atwa };
             self.solver.build(&self.graph, &aug, theta_model);
-            self.solver.factorize()?;
+            self.solver.factorize().map_err(|_| crate::error::InlaError::NotPositiveDefiniteContext("Sparse Q_aug block 1 singular".to_string()))?;
             log_det_aug = self.solver.log_determinant();
             self.solver.solve_llt(&mut rhs);
             x = rhs;
@@ -140,27 +165,23 @@ impl Problem {
     /// Replaces beta0 with a K-dimensional vector beta.
     pub fn find_mode_with_fixed_effects(
         &mut self,
-        qfunc:      &dyn QFunc,
-        likelihood: &dyn crate::likelihood::LogLikelihood,
-        y:          &[f64],
-        a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>, offset: Option<&[f64]>,
-        x_mat:      Option<&[f64]>,
-        n_fixed:    usize,
+        model:      &crate::inference::InlaModel<'_>,
         theta:      &[f64],
         x_init:     &[f64],
         beta_init:  &[f64],
         max_iter:   usize,
         tol:        f64,
     ) -> Result<(Vec<f64>, Vec<f64>, f64, Vec<f64>, f64), InlaError> {
-        if n_fixed == 0 || x_mat.is_none() {
-            let (x, ld, di) = self.find_mode_with_inverse(qfunc, likelihood, y, a_i, theta, x_init, max_iter, tol)?;
+        if model.n_fixed == 0 || model.fixed_matrix.is_none() {
+            let (x, ld, di) = self.find_mode_with_inverse(model, theta, x_init, max_iter, tol)?;
             return Ok((vec![], x, ld, di, 0.0));
         }
         
-        let x_m = x_mat.unwrap();
+        let x_m = model.fixed_matrix.unwrap();
+        let n_fixed = model.n_fixed;
         let n_latent    = self.n();
-        let n_data      = y.len();
-        let n_model     = qfunc.n_hyperparams();
+        let n_data      = model.y.len();
+        let n_model     = model.qfunc.n_hyperparams();
         let theta_model = &theta[..n_model];
         let theta_lik   = &theta[n_model..];
 
@@ -171,69 +192,138 @@ impl Problem {
         let mut final_w_cross = vec![0.0_f64; n_latent * n_fixed];
         let mut final_w_data  = vec![0.0_f64; n_data];
 
+        let mut a_rows = vec![vec![]; n_data];
+        if let (Some(a_i), Some(a_j), Some(a_x)) = (model.a_i, model.a_j, model.a_x) {
+            for k in 0..a_i.len() { a_rows[a_i[k]].push((a_j[k], a_x[k])); }
+        } else {
+            for i in 0..n_data.min(n_latent) { a_rows[i].push((i, 1.0)); }
+        }
+
         for _iter in 0..max_iter {
             let x_old     = x.clone();
             let beta_old  = beta.clone();
 
             let mut eta_data = vec![0.0_f64; n_data];
             for i in 0..n_data {
+                for &(j, ax) in &a_rows[i] { eta_data[i] += ax * x[j]; }
                 let mut xb = 0.0;
                 for j in 0..n_fixed { xb += x_m[i + j * n_data] * beta[j]; }
-                let lat_i = a_i.map_or(i, |idx| idx[i]);
-                eta_data[i] = xb + x[lat_i] + offset.map_or(0.0, |offs| offs[i]);
+                eta_data[i] += xb;
+            }
+            if let Some(offset) = model.offset {
+                for i in 0..n_data { eta_data[i] += offset[i]; }
             }
 
             let mut grad_data = vec![0.0_f64; n_data];
             let mut curv_data = vec![0.0_f64; n_data];
-            likelihood.gradient_and_curvature(&mut grad_data, &mut curv_data, &eta_data, y, theta_lik);
+            model.likelihood.gradient_and_curvature(&mut grad_data, &mut curv_data, &eta_data, model.y, theta_lik);
             
             for i in 0..n_data { curv_data[i] = curv_data[i].max(1e-6); }
             final_w_data = curv_data.clone();
 
             let mut grad_latent = vec![0.0_f64; n_latent];
-            let mut curv_latent = vec![0.0_f64; n_latent];
             for i in 0..n_data {
-                let lat_i = a_i.map_or(i, |idx| idx[i]);
-                grad_latent[lat_i] += grad_data[i];
-                curv_latent[lat_i] += curv_data[i];
+                for &(j, ax) in &a_rows[i] { grad_latent[j] += ax * grad_data[i]; }
             }
-            for k in 0..n_latent { curv_latent[k] = curv_latent[k].max(1e-6); }
 
-            // W_cross = A^T W_data X
+            let mut atwa = std::collections::HashMap::new();
+            for i in 0..n_data {
+                let w = curv_data[i];
+                let row = &a_rows[i];
+                for &(j1, ax1) in row {
+                    for &(j2, ax2) in row {
+                        if j1 <= j2 {
+                            *atwa.entry((j1, j2)).or_insert(0.0) += ax1 * w * ax2;
+                        }
+                    }
+                }
+            }
+
             let mut w_cross = vec![0.0_f64; n_latent * n_fixed];
-            for j in 0..n_fixed {
-                for i in 0..n_data {
-                    let lat_i = a_i.map_or(i, |idx| idx[i]);
-                    w_cross[lat_i + j * n_latent] += curv_data[i] * x_m[i + j * n_data];
+            for i in 0..n_data {
+                for j in 0..n_fixed {
+                    let w_x_m = curv_data[i] * x_m[i + j * n_data];
+                    for &(k, ax) in &a_rows[i] {
+                        w_cross[k + j * n_latent] += ax * w_x_m;
+                    }
                 }
             }
             final_w_cross = w_cross.clone();
 
-            // z_data = eta + grad/curv => b_beta = X^T W z_data, b_x = A^T W z_data
             let mut b_beta = vec![0.0_f64; n_fixed];
             let mut b_x    = vec![0.0_f64; n_latent];
+            
+            let mut wz_data = vec![0.0_f64; n_data];
             for i in 0..n_data {
                 let z_i = eta_data[i] + grad_data[i] / curv_data[i];
-                let wz  = curv_data[i] * z_i;
-                for j in 0..n_fixed { b_beta[j] += x_m[i + j * n_data] * wz; }
-                let lat_i = a_i.map_or(i, |idx| idx[i]);
-                b_x[lat_i] += wz;
+                wz_data[i] = curv_data[i] * z_i;
+                for j in 0..n_fixed { b_beta[j] += x_m[i + j * n_data] * wz_data[i]; }
+                for &(k, ax) in &a_rows[i] { b_x[k] += ax * wz_data[i]; }
             }
 
-            self.solver.build(&self.graph, &AugmentedQFunc { inner: qfunc, diag_add: &curv_latent }, theta_model);
-            self.solver.factorize()?;
+            let aug = AugmentedQFunc { inner: model.qfunc, atwa: &atwa };
+            self.solver.build(&self.graph, &aug, theta_model);
+            
+            self.solver.factorize().map_err(|_| crate::error::InlaError::NotPositiveDefiniteContext(format!("Sparse Q_aug block 2 singular at iter {}", _iter)))?;
+
             log_det_aug = self.solver.log_determinant();
             
-            // Generate u = (Q+W)^-1 b_x
             let mut u = b_x.clone();
             self.solver.solve_llt(&mut u);
 
-            // Generate dense V = (Q+W)^-1 W_cross
             let mut v = vec![0.0_f64; n_latent * n_fixed];
             for j in 0..n_fixed {
                 let mut v_col = w_cross[j * n_latent .. (j+1) * n_latent].to_vec();
                 self.solver.solve_llt(&mut v_col);
                 for k in 0..n_latent { v[k + j * n_latent] = v_col[k]; }
+            }
+            
+            // KKT Kriging Core
+            if let Some(constr) = model.extr_constr {
+                let n_c = model.n_constr;
+                if n_c > 0 {
+                    let mut v_c = vec![0.0_f64; n_latent * n_c];
+                    for c in 0..n_c {
+                        let mut vc_col = constr[c * n_latent .. (c+1) * n_latent].to_vec();
+                        self.solver.solve_llt(&mut vc_col);
+                        for k in 0..n_latent { v_c[c * n_latent + k] = vc_col[k]; }
+                    }
+                    
+                    let mut c_vc = vec![0.0_f64; n_c * n_c];
+                    for c1 in 0..n_c {
+                        for c2 in 0..n_c {
+                            for k in 0..n_latent {
+                                c_vc[c1 * n_c + c2] += constr[c1 * n_latent + k] * v_c[c2 * n_latent + k];
+                            }
+                        }
+                    }
+                    
+                    let mut c_vc_inv = c_vc.clone();
+                    let mut dummy_b = vec![0.0_f64; n_c]; 
+                    if let Err(_) = dense_cholesky_solve(&mut c_vc_inv, &mut dummy_b, n_c) {
+                        return Err(crate::error::InlaError::NotPositiveDefiniteContext("Kriging C V_c block singular".to_string()));
+                    } else {
+                        // We must compute matrix inverse from the packed cholesky representation.
+                        // Actually dense_cholesky_solve returns L in lower triangle.
+                        // For simplicity, let's just do a poor-man's dense inverse by solving identity vectors.
+                        let mut real_inv = vec![0.0_f64; n_c * n_c];
+                        for c in 0..n_c {
+                            let mut e = vec![0.0_f64; n_c];
+                            e[c] = 1.0;
+                            let mut cvc_tmp = c_vc.clone();
+                            let _ = dense_cholesky_solve(&mut cvc_tmp, &mut e, n_c);
+                            for c2 in 0..n_c { real_inv[c * n_c + c2] = e[c2]; }
+                        }
+                        
+                        apply_kriging_correction(&mut u, &v_c, &real_inv, constr, n_latent, n_c);
+                        
+                        for j in 0..n_fixed {
+                            let mut vj = v[j * n_latent .. (j+1)*n_latent].to_vec();
+                            apply_kriging_correction(&mut vj, &v_c, &real_inv, constr, n_latent, n_c);
+                            for k in 0..n_latent { v[k + j * n_latent] = vj[k]; }
+                        }
+                    }
+                }
             }
 
             let mut s_mat = vec![0.0_f64; n_fixed * n_fixed];
@@ -253,7 +343,6 @@ impl Problem {
                 }
             }
 
-            // RHS vector b_s = b_beta - W_cross^T u
             let mut b_s = vec![0.0_f64; n_fixed];
             for j in 0..n_fixed {
                 let mut wcu = 0.0;
@@ -261,11 +350,12 @@ impl Problem {
                 b_s[j] = b_beta[j] - wcu;
             }
 
-            // Solve dense Schur system natively (O(K^3))
-            dense_cholesky_solve(&mut s_mat, &mut b_s, n_fixed)?;
+            let s_mat_bkp = s_mat.clone();
+            if let Err(_) = dense_cholesky_solve(&mut s_mat, &mut b_s, n_fixed) {
+                return Err(crate::error::InlaError::NotPositiveDefiniteContext(format!("Schur S_mat loop singular, diag: {:?}", s_mat_bkp[0])));
+            }
             for j in 0..n_fixed { beta[j] = b_s[j]; }
 
-            // x = u - V beta
             for k in 0..n_latent {
                 let mut vb = 0.0;
                 for j in 0..n_fixed { vb += v[k + j * n_latent] * beta[j]; }
@@ -289,7 +379,6 @@ impl Problem {
             all_vals[col_ptr[j] + pos]
         }).collect();
 
-        // Compute log det of final Schur matrix S for penalizing marginal likelihood
         let mut v = vec![0.0_f64; n_latent * n_fixed];
         for j in 0..n_fixed {
             let mut v_col = final_w_cross[j * n_latent .. (j+1) * n_latent].to_vec();
@@ -314,18 +403,18 @@ impl Problem {
         }
         
         let mut dummy_b = vec![0.0_f64; n_fixed];
-        let schur_log_det = dense_cholesky_solve(&mut s_mat, &mut dummy_b, n_fixed)?;
+        let schur_log_det = dense_cholesky_solve(&mut s_mat, &mut dummy_b, n_fixed).map_err(|_| crate::error::InlaError::NotPositiveDefiniteContext("Schur S_mat final singular".to_string()))?;
 
         Ok((beta, x, log_det_aug, diag_aug_inv, schur_log_det))
     }
 
-    pub fn find_mode_with_logdet(&mut self, qfunc: &dyn QFunc, likelihood: &dyn crate::likelihood::LogLikelihood, y: &[f64], a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>, offset: Option<&[f64]>, theta: &[f64], max_iter: usize, tol: f64) -> Result<(Vec<f64>, f64), InlaError> {
-        let (x, ld, _) = self.find_mode_with_inverse(qfunc, likelihood, y, a_i, theta, &[], max_iter, tol)?;
+    pub fn find_mode_with_logdet(&mut self, model: &crate::inference::InlaModel<'_>, theta: &[f64], max_iter: usize, tol: f64) -> Result<(Vec<f64>, f64), InlaError> {
+        let (x, ld, _) = self.find_mode_with_inverse(model, theta, &[], max_iter, tol)?;
         Ok((x, ld))
     }
 
-    pub fn find_mode(&mut self, qfunc: &dyn QFunc, likelihood: &dyn crate::likelihood::LogLikelihood, y: &[f64], a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>, offset: Option<&[f64]>, theta: &[f64], max_iter: usize, tol: f64) -> Result<Vec<f64>, InlaError> {
-        let (x, _) = self.find_mode_with_logdet(qfunc, likelihood, y, a_i, theta, max_iter, tol)?;
+    pub fn find_mode(&mut self, model: &crate::inference::InlaModel<'_>, theta: &[f64], max_iter: usize, tol: f64) -> Result<Vec<f64>, InlaError> {
+        let (x, _) = self.find_mode_with_logdet(model, theta, max_iter, tol)?;
         Ok(x)
     }
 
@@ -336,7 +425,7 @@ impl Problem {
     pub fn quadratic_form_x(&self, qfunc: &dyn QFunc, theta_model: &[f64], x: &[f64]) -> f64 {
         let n = self.n();
         let diag: f64 = (0..n).map(|i| qfunc.eval(i, i, theta_model) * x[i] * x[i]).sum();
-        let offdiag: f64 = self.graph.iter_upper_triangle().map(|(i, j)| 2.0 * qfunc.eval(i, j, theta_model) * x[i] * x[j]).sum();
+        let offdiag: f64 = qfunc.graph().iter_upper_triangle().map(|(i, j)| 2.0 * qfunc.eval(i, j, theta_model) * x[i] * x[j]).sum();
         diag + offdiag
     }
 }
@@ -344,12 +433,16 @@ impl Problem {
 // Native dense Cholesky implementation for tiny exact K x K matrices.
 fn dense_cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> Result<f64, InlaError> {
     let mut log_det = 0.0;
+    
+    let mut a_bkp = a.to_vec();
+    let mut success = true;
+
     for i in 0..n {
         for j in 0..=i {
             let mut sum = a[i * n + j];
             for k in 0..j { sum -= a[i * n + k] * a[j * n + k]; }
             if i == j {
-                if sum <= 0.0 { return Err(InlaError::NotPositiveDefinite); }
+                if sum <= 1e-12 { success = false; break; }
                 let l_ii = sum.sqrt();
                 a[i * n + j] = l_ii;
                 log_det += 2.0 * l_ii.ln();
@@ -357,7 +450,30 @@ fn dense_cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> Result<f64, I
                 a[i * n + j] = sum / a[j * n + j];
             }
         }
+        if !success { break; }
     }
+    
+    if !success {
+        // Ridge fallback for unidentifiable singular overlaps
+        log_det = 0.0;
+        for i in 0..n { a_bkp[i * n + i] += 1.0; } // Heavy regularization Prior
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a_bkp[i * n + j];
+                for k in 0..j { sum -= a_bkp[i * n + k] * a_bkp[j * n + k]; }
+                if i == j {
+                    if sum <= 1e-12 { return Err(InlaError::NotPositiveDefinite); }
+                    let l_ii = sum.sqrt();
+                    a_bkp[i * n + j] = l_ii;
+                    log_det += 2.0 * l_ii.ln();
+                } else {
+                    a_bkp[i * n + j] = sum / a_bkp[j * n + j];
+                }
+            }
+        }
+        a.copy_from_slice(&a_bkp);
+    }
+    
     for i in 0..n {
         let mut sum = b[i];
         for k in 0..i { sum -= a[i * n + k] * b[k]; }
@@ -372,15 +488,48 @@ fn dense_cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> Result<f64, I
 }
 
 struct AugmentedQFunc<'a> {
-    inner:    &'a dyn QFunc,
-    diag_add: &'a [f64],
+    inner: &'a dyn QFunc,
+    atwa:  &'a std::collections::HashMap<(usize, usize), f64>,
 }
 
 impl QFunc for AugmentedQFunc<'_> {
     fn graph(&self) -> &Graph { self.inner.graph() }
     fn eval(&self, i: usize, j: usize, theta: &[f64]) -> f64 {
-        let base = self.inner.eval(i, j, theta);
-        if i == j { base + self.diag_add[i] } else { base }
+        let mut base = self.inner.eval(i, j, theta);
+        if i == j && !self.inner.is_proper() {
+            base += 1e-6; // Intrinsic regularization
+        }
+        let (min_j, max_j) = if i < j { (i, j) } else { (j, i) };
+        base + self.atwa.get(&(min_j, max_j)).copied().unwrap_or(0.0)
     }
     fn n_hyperparams(&self) -> usize { self.inner.n_hyperparams() }
+}
+
+
+// Kriging solver: u_new = u_old - V_c (C V_c)^-1 C u_old
+fn apply_kriging_correction(
+    u: &mut [f64],
+    v_c: &[f64], // n_latent x n_constr
+    c_vc_inv: &[f64], // n_constr x n_constr
+    constr: &[f64], // n_constr x n_latent
+    n_latent: usize,
+    n_constr: usize,
+) {
+    let mut cu = vec![0.0_f64; n_constr];
+    for c in 0..n_constr {
+        for i in 0..n_latent {
+            cu[c] += constr[c * n_latent + i] * u[i];
+        }
+    }
+    let mut lambda = vec![0.0_f64; n_constr];
+    for c1 in 0..n_constr {
+        for c2 in 0..n_constr {
+            lambda[c1] += c_vc_inv[c1 * n_constr + c2] * cu[c2];
+        }
+    }
+    for i in 0..n_latent {
+        for c in 0..n_constr {
+            u[i] -= v_c[c * n_latent + i] * lambda[c];
+        }
+    }
 }

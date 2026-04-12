@@ -1,8 +1,7 @@
 use crate::error::InlaError;
-use crate::likelihood::LogLikelihood;
-use crate::models::QFunc;
-use crate::problem::Problem;
 use crate::optimizer::laplace_eval;
+use crate::problem::Problem;
+use crate::inference::InlaModel;
 
 pub struct CcdPoint {
     pub theta: Vec<f64>,
@@ -13,27 +12,21 @@ pub struct CcdIntegration {
     pub points: Vec<CcdPoint>,
 }
 
-fn compute_hessian(
+fn approx_hessian(
     problem: &mut Problem,
-    qfunc: &dyn QFunc,
-    likelihood: &dyn LogLikelihood,
-    y: &[f64],
-    a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>,
-    x_mat: Option<&[f64]>,
-    n_fixed: usize,
+    model: &InlaModel<'_>,
     theta_opt: &[f64],
-    h: f64,
 ) -> Result<Vec<f64>, InlaError> {
-    let n_model = qfunc.n_hyperparams();
-    let n_lik = likelihood.n_hyperparams();
-    let d = n_model + n_lik;
+    let n_model = model.qfunc.n_hyperparams();
+    let d = theta_opt.len();
+    let h = 0.1;
     let mut hessian = vec![0.0_f64; d * d];
 
-    let x_warm = vec![0.0_f64; y.len()];
-    let beta_warm = vec![0.0_f64; n_fixed];
+    let x_warm = vec![0.0_f64; model.y.len()];
+    let beta_warm = vec![0.0_f64; model.n_fixed];
 
     let (neg_log_mlik_opt, _, _, _, _) = laplace_eval(
-        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, theta_opt, &x_warm, &beta_warm, n_model, 20, 1e-6,
+        problem, model, theta_opt, &x_warm, &beta_warm, n_model, 20, 1e-6,
     )?;
 
     for i in 0..d {
@@ -43,11 +36,11 @@ fn compute_hessian(
         t_minus[i] -= h;
 
         let (f_plus, ..) = laplace_eval(
-            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_plus, &x_warm, &beta_warm, n_model, 20, 1e-6,
+            problem, model, &t_plus, &x_warm, &beta_warm, n_model, 20, 1e-6,
         ).unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
 
         let (f_minus, ..) = laplace_eval(
-            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_minus, &x_warm, &beta_warm, n_model, 20, 1e-6,
+            problem, model, &t_minus, &x_warm, &beta_warm, n_model, 20, 1e-6,
         ).unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
 
         let d2 = (f_plus - 2.0 * neg_log_mlik_opt + f_minus) / (h * h);
@@ -61,13 +54,13 @@ fn compute_hessian(
             let mut t_pm = theta_opt.to_vec(); t_pm[i] += h; t_pm[j] -= h;
             let mut t_mp = theta_opt.to_vec(); t_mp[i] -= h; t_mp[j] += h;
 
-            let (f_pp, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_pp, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_pp, ..) = laplace_eval(problem, model, &t_pp, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
-            let (f_mm, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_mm, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_mm, ..) = laplace_eval(problem, model, &t_mm, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
-            let (f_pm, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_pm, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_pm, ..) = laplace_eval(problem, model, &t_pm, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
-            let (f_mp, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_mp, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_mp, ..) = laplace_eval(problem, model, &t_mp, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
 
             let d2 = (f_pp - f_pm - f_mp + f_mm) / (4.0 * h * h);
@@ -81,12 +74,7 @@ fn compute_hessian(
 
 pub fn build_ccd_grid(
     problem: &mut Problem,
-    qfunc: &dyn QFunc,
-    likelihood: &dyn LogLikelihood,
-    y: &[f64],
-    a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>,
-    x_mat: Option<&[f64]>,
-    n_fixed: usize,
+    model: &InlaModel<'_>,
     theta_opt: &[f64],
 ) -> Result<CcdIntegration, InlaError> {
     let d = theta_opt.len();
@@ -97,7 +85,7 @@ pub fn build_ccd_grid(
         });
     }
 
-    let hessian = compute_hessian(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, theta_opt, 1e-4)?;
+    let hessian = approx_hessian(problem, model, theta_opt)?;
     let (v, s) = simple_jacobi_eigenvalue(&hessian, d);
 
     let mut points = Vec::new();
@@ -125,7 +113,7 @@ pub fn build_ccd_grid(
 
     if d > 1 && d <= 5 {
         let n_fac = 1 << d;
-        let fac_z = if d <= 2 { 1.0 } else { 1.0 }; 
+        let fac_z = 1.0; 
         for mut i in 0..n_fac {
             let mut th = theta_opt.to_vec();
             for idx in 0..d {
@@ -139,15 +127,15 @@ pub fn build_ccd_grid(
         }
     }
 
-    let x_warm = vec![0.0_f64; y.len()];
-    let beta_warm = vec![0.0_f64; n_fixed];
+    let x_warm = vec![0.0_f64; model.y.len()];
+    let beta_warm = vec![0.0_f64; model.n_fixed];
     
     let mut log_weights = Vec::with_capacity(points.len());
     let mut max_log_w = -f64::MAX;
 
-    for pt in &points {
+    for pt in &mut points {
         let (neg_log_mlik, _, _, _, _) = laplace_eval(
-            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &pt.theta, &x_warm, &beta_warm, qfunc.n_hyperparams(), 10, 1e-4,
+            problem, model, &pt.theta, &x_warm, &beta_warm, model.qfunc.n_hyperparams(), 10, 1e-4,
         ).unwrap_or((f64::MAX / 2.0, vec![], vec![], vec![], vec![]));
         
         let log_w = -neg_log_mlik; 

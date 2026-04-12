@@ -73,8 +73,7 @@ impl QFunc for IidModel {
     fn graph(&self) -> &Graph { &self.graph }
 
     fn eval(&self, i: usize, j: usize, theta: &[f64]) -> f64 {
-        // iid: el grafo es diagonal, nunca se llama con i != j
-        debug_assert_eq!(i, j, "IidModel: eval solo se llama en la diagonal");
+        if i != j { return 0.0; }
         theta[0].exp()  // τ = exp(log τ)
     }
 

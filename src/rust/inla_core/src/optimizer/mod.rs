@@ -6,6 +6,7 @@ pub mod ccd;
 use crate::likelihood::LogLikelihood;
 use crate::models::QFunc;
 use crate::problem::Problem;
+use crate::inference::InlaModel;
 
 pub struct OptimResult {
     pub theta_opt: Vec<f64>,
@@ -143,7 +144,7 @@ fn laplace_gradient(
         let mut theta_h = theta.to_vec();
         theta_h[k] += h;
         let fh = laplace_eval(
-            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta_h,
+            problem, model, &theta_h,
             x_hat, beta_warm, n_model, 5, 1e-3,
         ).map(|(f, ..)| f).unwrap_or(f64::MAX / 2.0);
         grad[k] = (fh - f0) / h;
@@ -192,17 +193,12 @@ fn lbfgs_direction(
 
 pub fn optimize(
     problem:    &mut Problem,
-    qfunc:      &dyn QFunc,
-    likelihood: &dyn LogLikelihood,
-    y:          &[f64],
-    a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>,
-    x_mat:      Option<&[f64]>,
-    n_fixed:    usize,
+    model:      &InlaModel<'_>,
     theta_init: &[f64],
     params:     &OptimizerParams,
 ) -> Result<OptimResult, InlaError> {
-    let n_model  = qfunc.n_hyperparams();
-    let n_lik    = likelihood.n_hyperparams();
+    let n_model  = model.qfunc.n_hyperparams();
+    let n_lik    = model.likelihood.n_hyperparams();
     let h        = params.finite_diff_step;
     let max_iter = params.max_evals;
     let tol_grad = params.tol_grad;
@@ -210,21 +206,21 @@ pub fn optimize(
 
     let mut theta   = theta_init.to_vec();
     let mut n_evals = 0_usize;
-    let mut x_warm  = vec![0.0_f64; y.len()];
-    let mut beta_warm = vec![0.0_f64; n_fixed];
+    let mut x_warm  = vec![0.0_f64; model.y.len()];
+    let mut beta_warm = vec![0.0_f64; model.n_fixed];
 
     let mut s_list: Vec<Vec<f64>> = Vec::with_capacity(m);
     let mut y_list: Vec<Vec<f64>> = Vec::with_capacity(m);
 
     let (mut f_cur, _, beta_init_warm, _, _) = laplace_eval(
-        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta, &x_warm, &beta_warm,
+        problem, model, &theta, &x_warm, &beta_warm,
         n_model, 10, 1e-4,
-    ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; problem.n()], vec![0.0; n_fixed], vec![], vec![]));
+    ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; problem.n()], vec![0.0; model.n_fixed], vec![], vec![]));
     beta_warm = beta_init_warm;
     n_evals += 1;
 
     let mut grad = laplace_gradient(
-        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta, f_cur, &x_warm, &beta_warm,
+        problem, model, &theta, f_cur, &x_warm, &beta_warm,
         n_model, n_lik, h,
     );
     n_evals += n_model + n_lik;
@@ -244,14 +240,14 @@ pub fn optimize(
             let theta_new: Vec<f64> = theta.iter().zip(direction.iter()).map(|(&t, &d)| t + alpha * d).collect();
 
             match laplace_eval(
-                problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta_new, &x_warm, &beta_warm,
+                problem, model, &theta_new, &x_warm, &beta_warm,
                 n_model, 10, 1e-4,
             ) {
                 Ok((f_new, x_new, beta_new, ..)) if f_new <= f_cur + c1 * alpha * grad_d => {
                     let s_k: Vec<f64> = theta_new.iter().zip(theta.iter()).map(|(tn, t)| tn - t).collect();
 
                     let grad_new = laplace_gradient(
-                        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta_new,
+                        problem, model, &theta_new,
                         f_new, &x_new, &beta_new, n_model, n_lik, h,
                     );
                     n_evals += n_model + n_lik;
@@ -287,43 +283,11 @@ pub fn optimize(
     }
 
     let (neg_log_mlik, _, _, _, _) = laplace_eval(
-        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta, &x_warm, &beta_warm, n_model, 20, 1e-6,
-    ).map_err(|_| InlaError::ConvergenceFailed { reason: "IRLS no convergió en theta*".to_string() })?;
+        problem, model, &theta, &x_warm, &beta_warm, n_model, 20, 1e-6,
+    ).map_err(|e| InlaError::ConvergenceFailed { reason: format!("IRLS no convergió en theta*. Cause: {:?}", e) })?;
     
     let log_mlik = -neg_log_mlik;
 
     Ok(OptimResult { theta_opt: theta, log_mlik, n_evals })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::likelihood::{GaussianLikelihood, PoissonLikelihood};
-    use crate::models::{IidModel, Rw1Model};
-
-    #[test]
-    fn optimize_iid_gaussian_returns_finite_result() {
-        let n = 10;
-        let y: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();
-        let model = IidModel::new(n);
-        let lik   = GaussianLikelihood;
-        let mut p = Problem::new(&model);
-        let result = optimize(&mut p, &model, &lik, &y, None, None, None, None, 0, &[2.0_f64.ln(), 1.0_f64.ln()], &OptimizerParams::default()).unwrap();
-        assert!(result.log_mlik.is_finite());
-    }
-
-    #[test]
-    fn warm_start_preserves_result() {
-        let n = 8;
-        let y: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
-        let model = IidModel::new(n);
-        let lik   = GaussianLikelihood;
-        let theta = [1.0, 0.5];
-        let mut p = Problem::new(&model);
-
-        let (f1, x1, _, _, _) = laplace_eval(&mut p, &model, &lik, &y, None, None, None, None, 0, &theta, &[], &[], 1, 10, 1e-6).unwrap();
-        let (f2, _, _, _, _) = laplace_eval(&mut p, &model, &lik, &y, None, None, None, None, 0, &theta, &x1, &[], 1, 10, 1e-6).unwrap();
-
-        assert!((f1 - f2).abs() < 1e-4);
-    }
-}

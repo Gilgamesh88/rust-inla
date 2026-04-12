@@ -38,6 +38,8 @@ rusty_inla <- function(formula, data, family) {
     
     f_idx <- attr(tf, "specials")$f
     
+    C_rows <- list()
+    
     if (!is.null(f_idx)) {
         eval_env <- new.env(parent = emptyenv())
         eval_env$f <- f
@@ -64,6 +66,8 @@ rusty_inla <- function(formula, data, family) {
             A_j <- c(A_j, (c_idx[valid_rows] - 1) + n_latent_total)
             A_x <- c(A_x, rep(1.0, length(valid_rows)))
             
+            C_rows[[length(C_rows) + 1]] <- list(start = n_latent_total, len = n_latent_cov)
+            
             n_latent_total <- n_latent_total + n_latent_cov
             model_types <- c(model_types, m_type)
             cov_names <- c(cov_names, c_name)
@@ -74,6 +78,18 @@ rusty_inla <- function(formula, data, family) {
     # Join models safely into a CSV string to bypass Extendr vec string overhead for now
     model_types_str <- paste(model_types, collapse = ",")
     
+    n_constr <- length(C_rows)
+    C_matrix_flat <- numeric()
+    if (n_constr > 0) {
+        C_matrix <- matrix(0.0, nrow = n_constr, ncol = n_latent_total)
+        for (k in seq_along(C_rows)) {
+            start <- C_rows[[k]]$start + 1
+            len <- C_rows[[k]]$len
+            C_matrix[k, start:(start + len - 1)] <- 1.0
+        }
+        C_matrix_flat <- as.numeric(t(C_matrix)) # Flatten row-major
+    }
+
     # 4. Invoke the Rust Core
     res <- rust_inla_run(
         data = y,
@@ -84,7 +100,9 @@ rusty_inla <- function(formula, data, family) {
         n_latent_arg = as.integer(n_latent_total),
         a_i_arg = as.integer(A_i),
         a_j_arg = as.integer(A_j),
-        a_x_arg = as.numeric(A_x)
+        a_x_arg = as.numeric(A_x),
+        extr_constr_arg = as.numeric(C_matrix_flat),
+        n_constr_arg = as.integer(n_constr)
     )
     
     # Error handling from backend

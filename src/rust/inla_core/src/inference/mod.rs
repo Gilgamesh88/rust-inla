@@ -17,6 +17,8 @@ pub struct InlaModel<'a> {
     pub a_j:     Option<&'a [usize]>,
     pub a_x:     Option<&'a [f64]>,
     pub offset:  Option<&'a [f64]>,
+    pub extr_constr: Option<&'a [f64]>,
+    pub n_constr: usize,
 }
 
 pub struct InlaParams {
@@ -52,12 +54,7 @@ impl InlaEngine {
 
         let opt = optimizer::optimize(
             &mut problem,
-            model.qfunc,
-            model.likelihood,
-            model.y,
-            model.a_i, model.a_j, model.a_x, model.offset,
-            model.fixed_matrix,
-            model.n_fixed,
+            model,
             &model.theta_init,
             &params.optimizer,
         )?;
@@ -69,12 +66,7 @@ impl InlaEngine {
 
         let ccd_grid = crate::optimizer::ccd::build_ccd_grid(
             &mut problem,
-            model.qfunc,
-            model.likelihood,
-            model.y,
-            model.a_i, model.a_j, model.a_x, model.offset,
-            model.fixed_matrix,
-            k,
+            model,
             &theta_opt,
         )?;
 
@@ -106,7 +98,7 @@ impl InlaEngine {
 
             let (fixed_k, mean_k, vars_k) = if k > 0 {
                 match problem.find_mode_with_fixed_effects(
-                    model.qfunc, model.likelihood, model.y, model.a_i, model.a_j, model.a_x, model.offset, model.fixed_matrix, k, theta_k,
+                    model, theta_k,
                     &x_warm, &beta_warm, 20, 1e-6,
                 ) {
                     Ok((beta, x_hat, _, diag_aug_inv, _)) => {
@@ -117,7 +109,7 @@ impl InlaEngine {
                 }
             } else {
                 match problem.find_mode_with_inverse(
-                    model.qfunc, model.likelihood, model.y, model.a_i, model.a_j, model.a_x, model.offset, theta_k,
+                    model, theta_k,
                     &x_warm, 20, 1e-6,
                 ) {
                     Ok((x_hat, _, diag_aug_inv)) => {
@@ -170,15 +162,23 @@ impl InlaEngine {
             mixed_fixed_mean[0] += mean_x;
         }
 
+        let mut a_rows = vec![vec![]; model.y.len()];
+        if let (Some(a_i), Some(a_j), Some(a_x)) = (model.a_i, model.a_j, model.a_x) {
+            for k in 0..a_i.len() { a_rows[a_i[k]].push((a_j[k], a_x[k])); }
+        } else {
+            for i in 0..model.y.len().min(n) { a_rows[i].push((i, 1.0)); }
+        }
+
         let theta_lik = &theta_opt[n_model..];
         let mut eta_data = vec![0.0_f64; model.y.len()];
         for i in 0..model.y.len() {
-            let lat_idx = model.a_i.map_or(i, |x| x[i]);
+            let mut ax_sum = 0.0;
+            for &(j, ax) in &a_rows[i] { ax_sum += ax * posterior_mean[j]; }
             let mut xb = 0.0;
             if k > 0 {
                 for j in 0..k { xb += model.fixed_matrix.unwrap()[i + j * model.y.len()] * mixed_fixed_mean[j]; }
             }
-            eta_data[i] = posterior_mean[lat_idx] + xb;
+            eta_data[i] = ax_sum + xb;
         }
         
         let mut grad_data = vec![0.0_f64; model.y.len()];
@@ -187,8 +187,10 @@ impl InlaEngine {
         
         let mut w_opt = vec![0.0_f64; n];
         for i in 0..model.y.len() {
-            let lat_idx = model.a_i.map_or(i, |x| x[i]);
-            w_opt[lat_idx] += curv_data[i];
+            for &(j, _) in &a_rows[i] {
+                // Just assign curvature to the involved latent nodes
+                w_opt[j] += curv_data[i];
+            }
         }
         for i in 0..n { w_opt[i] = w_opt[i].max(1e-6); }
 
