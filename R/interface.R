@@ -13,13 +13,7 @@ rusty_inla <- function(formula, data, family) {
     y_var <- as.character(attr(tf, "variables")[[resp_idx + 1]])
     y <- as.numeric(data[[y_var]])
     
-
-    # 2. Extract f() term
-    f_idx <- attr(tf, "specials")$f
-    if (is.null(f_idx)) {
-        stop("Formula must contain exactly one f(covariate, model=...) term for the current RustyINLA prototype.")
-    }
-    # Extract fixed terms design matrix
+    # 2. Extract fixed terms design matrix
     t_labels <- attr(tf, "term.labels")
     f_term_idx <- grep("^f\\(", t_labels)
     if (length(f_term_idx) > 0) {
@@ -32,34 +26,65 @@ rusty_inla <- function(formula, data, family) {
     n_fixed <- ncol(X_fixed)
     x_matrix_flat <- as.numeric(X_fixed)
     
-    # Parse the f() term securely. We use a local environment providing our f() function.
-    f_call <- attr(tf, "variables")[[f_idx + 1]]
-    eval_env <- new.env(parent = emptyenv())
-    eval_env$f <- f
-    f_res <- eval(f_call, envir = eval_env)
-    cov_name <- f_res$covariate_name
-    model_type <- f_res$model
+    # 3. Setup A Matrix Triplets for Random Effects
+    A_i <- integer()
+    A_j <- integer()
+    A_x <- numeric()
     
-    # 3. Handle Covariate Indexing Automatically
-    cov_data <- data[[cov_name]]
-    if (is.factor(cov_data)) {
-        idx <- as.numeric(cov_data)
-    } else {
-        # Force categorical/idx logic for R-INLA parity
-        idx <- as.numeric(as.factor(cov_data))
+    n_latent_total <- 0
+    model_types <- character()
+    cov_names <- character()
+    n_levels <- integer()
+    
+    f_idx <- attr(tf, "specials")$f
+    
+    if (!is.null(f_idx)) {
+        eval_env <- new.env(parent = emptyenv())
+        eval_env$f <- f
+        for (idx_f in f_idx) {
+            f_call <- attr(tf, "variables")[[idx_f + 1]]
+            f_res <- eval(f_call, envir = eval_env)
+            c_name <- f_res$covariate_name
+            m_type <- f_res$model
+            
+            cov_data <- data[[c_name]]
+            
+            if (is.factor(cov_data)) {
+                c_idx <- as.numeric(cov_data)
+            } else {
+                c_idx <- as.numeric(as.factor(cov_data))
+            }
+            
+            n_latent_cov <- max(c_idx, na.rm=TRUE)
+            
+            # Map into Trips (N_A rows)
+            # R arrays are 1-based. A_i, A_j must be 0-based for Rust!
+            valid_rows <- which(!is.na(c_idx))
+            A_i <- c(A_i, valid_rows - 1)
+            A_j <- c(A_j, (c_idx[valid_rows] - 1) + n_latent_total)
+            A_x <- c(A_x, rep(1.0, length(valid_rows)))
+            
+            n_latent_total <- n_latent_total + n_latent_cov
+            model_types <- c(model_types, m_type)
+            cov_names <- c(cov_names, c_name)
+            n_levels <- c(n_levels, n_latent_cov)
+        }
     }
     
-    n_latent <- max(idx, na.rm = TRUE)
+    # Join models safely into a CSV string to bypass Extendr vec string overhead for now
+    model_types_str <- paste(model_types, collapse = ",")
     
     # 4. Invoke the Rust Core
     res <- rust_inla_run(
         data = y,
-        model_type = model_type,
+        model_types_arg = model_types_str,
         likelihood_type = family,
         fixed_matrix_arg = x_matrix_flat,
         n_fixed_arg = as.integer(n_fixed),
-        n_latent_arg = as.integer(n_latent),
-        x_idx_arg = as.integer(idx - 1)
+        n_latent_arg = as.integer(n_latent_total),
+        a_i_arg = as.integer(A_i),
+        a_j_arg = as.integer(A_j),
+        a_x_arg = as.numeric(A_x)
     )
     
     # Error handling from backend
@@ -73,7 +98,10 @@ rusty_inla <- function(formula, data, family) {
         summary.fixed = data.frame(
             row.names = colnames(X_fixed),
             mean = res$fixed_means,
-            sd = res$fixed_sds
+            sd = res$fixed_sds,
+            `0.025quant` = res$fixed_means - 1.96 * res$fixed_sds,
+            `0.975quant` = res$fixed_means + 1.96 * res$fixed_sds,
+            check.names = FALSE
         ),
         summary.random = list()
     )
@@ -89,12 +117,29 @@ rusty_inla <- function(formula, data, family) {
     }
     
     # Populate Random Effects (Latent margins)
-    rnd_df <- data.frame(
-        ID = 1:n_latent,
-        mean = res$marg_means,
-        sd = sqrt(res$marg_vars)
-    )
-    fit$summary.random[[cov_name]] <- rnd_df
+    if (length(cov_names) > 0) {
+        start_idx <- 1
+        for (k in seq_along(cov_names)) {
+            c_name <- cov_names[k]
+            nl <- n_levels[k]
+            end_idx <- start_idx + nl - 1
+            
+            rnd_mean <- res$marg_means[start_idx:end_idx]
+            rnd_var <- res$marg_vars[start_idx:end_idx]
+            rnd_sd <- sqrt(rnd_var)
+            
+            rnd_df <- data.frame(
+                ID = 1:nl,
+                mean = rnd_mean,
+                sd = rnd_sd,
+                `0.025quant` = rnd_mean - 1.96 * rnd_sd,
+                `0.975quant` = rnd_mean + 1.96 * rnd_sd,
+                check.names = FALSE
+            )
+            fit$summary.random[[c_name]] <- rnd_df
+            start_idx <- end_idx + 1
+        }
+    }
     
     class(fit) <- "rusty_inla"
     return(fit)
@@ -114,9 +159,12 @@ print.rusty_inla <- function(x, ...) {
 summary.rusty_inla <- function(object, ...) {
     print(object)
     
-    cat("\nRandom effects:\n")
-    rnd_name <- names(object$summary.random)[1]
-    cat(sprintf("  Name '%s' with %d levels\n", rnd_name, nrow(object$summary.random[[rnd_name]])))
+    if (length(object$summary.random) > 0) {
+        cat("\nRandom effects:\n")
+        for (rnd_name in names(object$summary.random)) {
+            cat(sprintf("  Name '%s' with %d levels\n", rnd_name, nrow(object$summary.random[[rnd_name]])))
+        }
+    }
     
     if (nrow(object$summary.hyperpar) > 0) {
         cat("\nModel hyperparameters:\n")

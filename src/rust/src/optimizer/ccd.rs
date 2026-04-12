@@ -18,7 +18,7 @@ fn compute_hessian(
     qfunc: &dyn QFunc,
     likelihood: &dyn LogLikelihood,
     y: &[f64],
-    x_idx: Option<&[usize]>,
+    a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>,
     x_mat: Option<&[f64]>,
     n_fixed: usize,
     theta_opt: &[f64],
@@ -33,7 +33,7 @@ fn compute_hessian(
     let beta_warm = vec![0.0_f64; n_fixed];
 
     let (neg_log_mlik_opt, _, _, _, _) = laplace_eval(
-        problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, theta_opt, &x_warm, &beta_warm, n_model, 20, 1e-6,
+        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, theta_opt, &x_warm, &beta_warm, n_model, 20, 1e-6,
     )?;
 
     for i in 0..d {
@@ -43,11 +43,11 @@ fn compute_hessian(
         t_minus[i] -= h;
 
         let (f_plus, ..) = laplace_eval(
-            problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &t_plus, &x_warm, &beta_warm, n_model, 20, 1e-6,
+            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_plus, &x_warm, &beta_warm, n_model, 20, 1e-6,
         ).unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
 
         let (f_minus, ..) = laplace_eval(
-            problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &t_minus, &x_warm, &beta_warm, n_model, 20, 1e-6,
+            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_minus, &x_warm, &beta_warm, n_model, 20, 1e-6,
         ).unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
 
         let d2 = (f_plus - 2.0 * neg_log_mlik_opt + f_minus) / (h * h);
@@ -61,13 +61,13 @@ fn compute_hessian(
             let mut t_pm = theta_opt.to_vec(); t_pm[i] += h; t_pm[j] -= h;
             let mut t_mp = theta_opt.to_vec(); t_mp[i] -= h; t_mp[j] += h;
 
-            let (f_pp, ..) = laplace_eval(problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &t_pp, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_pp, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_pp, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
-            let (f_mm, ..) = laplace_eval(problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &t_mm, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_mm, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_mm, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
-            let (f_pm, ..) = laplace_eval(problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &t_pm, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_pm, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_pm, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
-            let (f_mp, ..) = laplace_eval(problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &t_mp, &x_warm, &beta_warm, n_model, 20, 1e-6)
+            let (f_mp, ..) = laplace_eval(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &t_mp, &x_warm, &beta_warm, n_model, 20, 1e-6)
                 .unwrap_or((neg_log_mlik_opt + 1e3, vec![], vec![], vec![], vec![]));
 
             let d2 = (f_pp - f_pm - f_mp + f_mm) / (4.0 * h * h);
@@ -84,7 +84,7 @@ pub fn build_ccd_grid(
     qfunc: &dyn QFunc,
     likelihood: &dyn LogLikelihood,
     y: &[f64],
-    x_idx: Option<&[usize]>,
+    a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>,
     x_mat: Option<&[f64]>,
     n_fixed: usize,
     theta_opt: &[f64],
@@ -97,7 +97,7 @@ pub fn build_ccd_grid(
         });
     }
 
-    let hessian = compute_hessian(problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, theta_opt, 1e-4)?;
+    let hessian = compute_hessian(problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, theta_opt, 1e-4)?;
     let (v, s) = simple_jacobi_eigenvalue(&hessian, d);
 
     let mut points = Vec::new();
@@ -147,7 +147,7 @@ pub fn build_ccd_grid(
 
     for pt in &points {
         let (neg_log_mlik, _, _, _, _) = laplace_eval(
-            problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &pt.theta, &x_warm, &beta_warm, qfunc.n_hyperparams(), 10, 1e-4,
+            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &pt.theta, &x_warm, &beta_warm, qfunc.n_hyperparams(), 10, 1e-4,
         ).unwrap_or((f64::MAX / 2.0, vec![], vec![], vec![], vec![]));
         
         let log_w = -neg_log_mlik; 

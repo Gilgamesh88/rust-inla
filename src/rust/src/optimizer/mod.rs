@@ -55,12 +55,7 @@ impl Default for OptimizerParams {
 
 pub(crate) fn laplace_eval(
     problem:    &mut Problem,
-    qfunc:      &dyn QFunc,
-    likelihood: &dyn LogLikelihood,
-    y:          &[f64],
-    x_idx:      Option<&[usize]>,
-    x_mat:      Option<&[f64]>,
-    n_fixed:    usize,
+    model:      &InlaModel<'_>,
     theta:      &[f64],
     x_warm:     &[f64],
     beta_warm:  &[f64],
@@ -71,46 +66,51 @@ pub(crate) fn laplace_eval(
     let theta_model = &theta[..n_model];
     let theta_lik   = &theta[n_model..];
 
-    let (x_hat, log_det_aug, diag_aug_inv, eta_for_lik, beta_out, schur_s) = if n_fixed > 0 {
+    let (x_hat, log_det_aug, diag_aug_inv, eta_for_lik, beta_out, schur_s) = if model.n_fixed > 0 {
         let (beta, x, ld, d, s) = problem.find_mode_with_fixed_effects(
-            qfunc, likelihood, y, x_idx, x_mat, n_fixed, theta, x_warm, beta_warm, n_irls, tol_irls,
+            model, theta, x_warm, beta_warm, n_irls, tol_irls,
         )?;
-        let mut eta = vec![0.0_f64; y.len()];
-        for i in 0..y.len() {
+        let mut eta = vec![0.0_f64; model.y.len()];
+        for i in 0..model.y.len() {
             let mut xb = 0.0;
-            for j in 0..n_fixed { xb += x_mat.unwrap()[i + j * y.len()] * beta[j]; }
-            let lat_idx = x_idx.map_or(i, |x| x[i]);
-            eta[i] = xb + x[lat_idx];
+            for j in 0..model.n_fixed { xb += model.fixed_matrix.unwrap()[i + j * model.y.len()] * beta[j]; }
+            eta[i] = xb;
+        }
+        if let (Some(a_i), Some(a_j), Some(a_x)) = (model.a_i, model.a_j, model.a_x) {
+            for k in 0..a_i.len() {
+                eta[a_i[k]] += a_x[k] * x[a_j[k]];
+            }
         }
         (x, ld, d, eta, beta, s)
     } else {
         let (x, ld, d) = problem.find_mode_with_inverse(
-            qfunc, likelihood, y, x_idx, theta, x_warm, n_irls, tol_irls,
+            model, theta, x_warm, n_irls, tol_irls,
         )?;
-        let mut eta = vec![0.0_f64; y.len()];
-        for i in 0..y.len() {
-            let lat_idx = x_idx.map_or(i, |x| x[i]);
-            eta[i] = x[lat_idx];
+        let mut eta = vec![0.0_f64; model.y.len()];
+        if let (Some(a_i), Some(a_j), Some(a_x)) = (model.a_i, model.a_j, model.a_x) {
+            for k in 0..a_i.len() {
+                eta[a_i[k]] += a_x[k] * x[a_j[k]];
+            }
         }
         (x, ld, d, eta, vec![], 0.0_f64)
     };
 
-    let (log_det_q, diag_q_inv) = if qfunc.is_proper() {
-        problem.eval_with_inverse(qfunc, theta_model)?
+    let (log_det_q, diag_q_inv) = if model.qfunc.is_proper() {
+        problem.eval_with_inverse(model.qfunc, theta_model)?
     } else {
-        (0.0_f64, vec![0.0; y.len()])
+        (0.0_f64, vec![0.0; model.y.len()])
     };
 
-    let n = y.len();
+    let n = model.y.len();
     let mut logll = vec![0.0_f64; n];
-    likelihood.evaluate(&mut logll, &eta_for_lik, y, theta_lik);
+    model.likelihood.evaluate(&mut logll, &eta_for_lik, model.y, theta_lik);
     let sum_logll: f64 = logll.iter().sum();
 
     let log_prior: f64 = theta.iter().map(|&th| th - 5e-5_f64 * th.exp()).sum();
-    let q_form = problem.quadratic_form_x(qfunc, theta_model, &x_hat);
+    let q_form = problem.quadratic_form_x(model.qfunc, theta_model, &x_hat);
 
-    let (final_log_det_q, final_log_det_aug, final_q_form) = if n_fixed > 0 {
-        let penalty = crate::problem::PRIOR_PREC_BETA.ln() * (n_fixed as f64);
+    let (final_log_det_q, final_log_det_aug, final_q_form) = if model.n_fixed > 0 {
+        let penalty = crate::problem::PRIOR_PREC_BETA.ln() * (model.n_fixed as f64);
         let beta_qf: f64 = beta_out.iter().map(|b| b * b).sum();
         (
             log_det_q + penalty,
@@ -128,12 +128,7 @@ pub(crate) fn laplace_eval(
 
 fn laplace_gradient(
     problem:    &mut Problem,
-    qfunc:      &dyn QFunc,
-    likelihood: &dyn LogLikelihood,
-    y:          &[f64],
-    x_idx:      Option<&[usize]>,
-    x_mat:      Option<&[f64]>,
-    n_fixed:    usize,
+    model:      &InlaModel<'_>,
     theta:      &[f64],
     f0:         f64,
     x_hat:      &[f64],
@@ -148,7 +143,7 @@ fn laplace_gradient(
         let mut theta_h = theta.to_vec();
         theta_h[k] += h;
         let fh = laplace_eval(
-            problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &theta_h,
+            problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta_h,
             x_hat, beta_warm, n_model, 5, 1e-3,
         ).map(|(f, ..)| f).unwrap_or(f64::MAX / 2.0);
         grad[k] = (fh - f0) / h;
@@ -200,7 +195,7 @@ pub fn optimize(
     qfunc:      &dyn QFunc,
     likelihood: &dyn LogLikelihood,
     y:          &[f64],
-    x_idx:      Option<&[usize]>,
+    a_i: Option<&[usize]>, a_j: Option<&[usize]>, a_x: Option<&[f64]>,
     x_mat:      Option<&[f64]>,
     n_fixed:    usize,
     theta_init: &[f64],
@@ -222,14 +217,14 @@ pub fn optimize(
     let mut y_list: Vec<Vec<f64>> = Vec::with_capacity(m);
 
     let (mut f_cur, _, beta_init_warm, _, _) = laplace_eval(
-        problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &theta, &x_warm, &beta_warm,
+        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta, &x_warm, &beta_warm,
         n_model, 10, 1e-4,
     ).unwrap_or_else(|_| (f64::MAX / 2.0, vec![0.0; problem.n()], vec![0.0; n_fixed], vec![], vec![]));
     beta_warm = beta_init_warm;
     n_evals += 1;
 
     let mut grad = laplace_gradient(
-        problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &theta, f_cur, &x_warm, &beta_warm,
+        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta, f_cur, &x_warm, &beta_warm,
         n_model, n_lik, h,
     );
     n_evals += n_model + n_lik;
@@ -249,14 +244,14 @@ pub fn optimize(
             let theta_new: Vec<f64> = theta.iter().zip(direction.iter()).map(|(&t, &d)| t + alpha * d).collect();
 
             match laplace_eval(
-                problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &theta_new, &x_warm, &beta_warm,
+                problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta_new, &x_warm, &beta_warm,
                 n_model, 10, 1e-4,
             ) {
                 Ok((f_new, x_new, beta_new, ..)) if f_new <= f_cur + c1 * alpha * grad_d => {
                     let s_k: Vec<f64> = theta_new.iter().zip(theta.iter()).map(|(tn, t)| tn - t).collect();
 
                     let grad_new = laplace_gradient(
-                        problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &theta_new,
+                        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta_new,
                         f_new, &x_new, &beta_new, n_model, n_lik, h,
                     );
                     n_evals += n_model + n_lik;
@@ -292,7 +287,7 @@ pub fn optimize(
     }
 
     let (neg_log_mlik, _, _, _, _) = laplace_eval(
-        problem, qfunc, likelihood, y, x_idx, x_mat, n_fixed, &theta, &x_warm, &beta_warm, n_model, 20, 1e-6,
+        problem, qfunc, likelihood, y, a_i, a_j, a_x, x_mat, n_fixed, &theta, &x_warm, &beta_warm, n_model, 20, 1e-6,
     ).map_err(|_| InlaError::ConvergenceFailed { reason: "IRLS no convergió en theta*".to_string() })?;
     
     let log_mlik = -neg_log_mlik;
@@ -313,7 +308,7 @@ mod tests {
         let model = IidModel::new(n);
         let lik   = GaussianLikelihood;
         let mut p = Problem::new(&model);
-        let result = optimize(&mut p, &model, &lik, &y, None, None, 0, &[2.0_f64.ln(), 1.0_f64.ln()], &OptimizerParams::default()).unwrap();
+        let result = optimize(&mut p, &model, &lik, &y, None, None, None, None, 0, &[2.0_f64.ln(), 1.0_f64.ln()], &OptimizerParams::default()).unwrap();
         assert!(result.log_mlik.is_finite());
     }
 
@@ -326,8 +321,8 @@ mod tests {
         let theta = [1.0, 0.5];
         let mut p = Problem::new(&model);
 
-        let (f1, x1, _, _, _) = laplace_eval(&mut p, &model, &lik, &y, None, None, 0, &theta, &[], &[], 1, 10, 1e-6).unwrap();
-        let (f2, _, _, _, _) = laplace_eval(&mut p, &model, &lik, &y, None, None, 0, &theta, &x1, &[], 1, 10, 1e-6).unwrap();
+        let (f1, x1, _, _, _) = laplace_eval(&mut p, &model, &lik, &y, None, None, None, None, 0, &theta, &[], &[], 1, 10, 1e-6).unwrap();
+        let (f2, _, _, _, _) = laplace_eval(&mut p, &model, &lik, &y, None, None, None, None, 0, &theta, &x1, &[], 1, 10, 1e-6).unwrap();
 
         assert!((f1 - f2).abs() < 1e-4);
     }

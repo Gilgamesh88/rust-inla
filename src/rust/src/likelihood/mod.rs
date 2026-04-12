@@ -1,25 +1,25 @@
-//! Familias de verosimilitud p(y | η, θ).
+//! Familias de verosimilitud p(y | Î·, Î¸).
 //!
-//! Equivalente Rust de la sección likelihood de `models.R` e `inla.c`.
+//! Equivalente Rust de la secciÃ³n likelihood de `models.R` e `inla.c`.
 //!
-//! ## Contrato matemático
+//! ## Contrato matemÃ¡tico
 //!
 //! Cada familia implementa `LogLikelihood::evaluate()` que calcula:
 //!
-//!   logll[i] = log p(yᵢ | ηᵢ, θ)
+//!   logll[i] = log p(yáµ¢ | Î·áµ¢, Î¸)
 //!
-//! donde ηᵢ es el predictor lineal (efecto latente + efectos fijos).
+//! donde Î·áµ¢ es el predictor lineal (efecto latente + efectos fijos).
 //!
 //! ## Familias implementadas
 //!
-//! | Familia   | Link     | θ extra        | Uso típico            |
+//! | Familia   | Link     | Î¸ extra        | Uso tÃ­pico            |
 //! |-----------|----------|----------------|-----------------------|
-//! | Gaussian  | identity | [log τ]        | respuesta continua    |
+//! | Gaussian  | identity | [log Ï„]        | respuesta continua    |
 //! | Poisson   | log      | ninguno        | frecuencia siniestros |
 //! | Gamma     | log      | [log shape]    | severidad siniestros  |
 
 
-/// Función de enlace η → μ.
+/// FunciÃ³n de enlace Î· â†’ Î¼.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkFunction {
     Identity,
@@ -28,7 +28,7 @@ pub enum LinkFunction {
 }
 
 impl LinkFunction {
-    /// Aplica la función inversa: η → μ
+    /// Aplica la funciÃ³n inversa: Î· â†’ Î¼
     #[inline]
     pub fn inverse(&self, eta: f64) -> f64 {
         match self {
@@ -41,41 +41,42 @@ impl LinkFunction {
 
 /// Contrato de cada familia de verosimilitud.
 pub trait LogLikelihood: Send + Sync {
-    /// Evalúa log p(yᵢ | ηᵢ, θ) para cada observación.
+    /// EvalÃºa log p(yáµ¢ | Î·áµ¢, Î¸) para cada observaciÃ³n.
     ///
     /// - `logll`: slice de salida, mismo largo que `eta` e `y`
-    /// - `eta`:   predictores lineales ηᵢ
+    /// - `eta`:   predictores lineales Î·áµ¢
     /// - `y`:     observaciones
-    /// - `theta`: hiperparámetros de la likelihood (puede ser vacío)
+    /// - `theta`: hiperparÃ¡metros de la likelihood (puede ser vacÃ­o)
     fn evaluate(&self, logll: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]);
 
-    /// Función de enlace de esta familia.
+    /// FunciÃ³n de enlace de esta familia.
     fn link(&self) -> LinkFunction;
 
-    /// Número de hiperparámetros propios de la likelihood.
+    /// NÃºmero de hiperparÃ¡metros propios de la likelihood.
     fn n_hyperparams(&self) -> usize;
 
-    /// Evalúa analíticamente la primera derivada (gradiente) y 
-    /// el negativo de la segunda derivada (curvatura observada) respecto a ηᵢ.
+    /// EvalÃºa analÃ­ticamente la primera derivada (gradiente) y 
+    /// el negativo de la segunda derivada (curvatura observada) respecto a Î·áµ¢.
     fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]);
 }
 
-// ── Gaussian ──────────────────────────────────────────────────────────────────
+// â”€â”€ Gaussian â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// y ~ N(η, 1/τ)
+/// y ~ N(Î·, 1/Ï„)
 ///
-/// log p(y|η,τ) = 0.5·log(τ) - 0.5·τ·(y-η)² - 0.5·log(2π)
+/// log p(y|Î·,Ï„) = 0.5Â·log(Ï„) - 0.5Â·Ï„Â·(y-Î·)Â² - 0.5Â·log(2Ï€)
 ///
-/// θ[0] = log τ  (log-precisión del ruido)
+/// Î¸[0] = log Ï„  (log-precisiÃ³n del ruido)
 pub struct GaussianLikelihood;
 
 impl LogLikelihood for GaussianLikelihood {
     fn evaluate(&self, logll: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
         let tau     = theta[0].exp();
         let log_tau = theta[0];
-        let log2pi  = std::f64::consts::TAU.ln(); // ln(2π)
+        let log2pi  = std::f64::consts::TAU.ln(); // ln(2Ï€)
 
         for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            if yi.is_nan() { *ll = 0.0; continue; }
             let resid = yi - ei;
             *ll = 0.5 * log_tau - 0.5 * tau * resid * resid - 0.5 * log2pi;
         }
@@ -87,25 +88,31 @@ impl LogLikelihood for GaussianLikelihood {
     fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
         let tau = theta[0].exp();
         for i in 0..eta.len() {
+            if y[i].is_nan() {
+                grad[i] = 0.0;
+                curv[i] = 0.0;
+                continue;
+            }
             grad[i] = tau * (y[i] - eta[i]);
             curv[i] = tau;
         }
     }
 }
 
-// ── Poisson ───────────────────────────────────────────────────────────────────
+// â”€â”€ Poisson â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// y ~ Poisson(exp(η))
+/// y ~ Poisson(exp(Î·))
 ///
-/// log p(y|η) = y·η - exp(η) - log(y!)
+/// log p(y|Î·) = yÂ·Î· - exp(Î·) - log(y!)
 ///
-/// Sin hiperparámetros propios (θ vacío).
+/// Sin hiperparÃ¡metros propios (Î¸ vacÃ­o).
 pub struct PoissonLikelihood;
 
 impl LogLikelihood for PoissonLikelihood {
     fn evaluate(&self, logll: &mut [f64], eta: &[f64], y: &[f64], _theta: &[f64]) {
         for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
-            // log(y!) usando la aproximación exacta por lgamma
+            if yi.is_nan() { *ll = 0.0; continue; }
+            // log(y!) usando la aproximaciÃ³n exacta por lgamma
             // lgamma(y+1) = log(y!) para y entero
             let safe_eta = ei.clamp(-50.0, 50.0);
             let log_y_factorial = statrs::function::gamma::ln_gamma(yi + 1.0);
@@ -118,6 +125,11 @@ impl LogLikelihood for PoissonLikelihood {
 
     fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], _theta: &[f64]) {
         for i in 0..eta.len() {
+            if y[i].is_nan() {
+                grad[i] = 0.0;
+                curv[i] = 0.0;
+                continue;
+            }
             // Clamp eta to prevent Inf/NaN in exp() during wild Newton steps
             let safe_eta = eta[i].clamp(-50.0, 50.0);
             let lambda = safe_eta.exp();
@@ -127,17 +139,17 @@ impl LogLikelihood for PoissonLikelihood {
     }
 }
 
-// ── Gamma ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Gamma â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// y ~ Gamma(shape=φ, rate=φ/exp(η))
+/// y ~ Gamma(shape=Ï†, rate=Ï†/exp(Î·))
 ///
-/// E[y] = exp(η),  Var[y] = exp(η)²/φ
+/// E[y] = exp(Î·),  Var[y] = exp(Î·)Â²/Ï†
 ///
-/// log p(y|η,φ) = φ·log(φ) - φ·log(μ) + (φ-1)·log(y) - φ·y/μ - log Γ(φ)
+/// log p(y|Î·,Ï†) = Ï†Â·log(Ï†) - Ï†Â·log(Î¼) + (Ï†-1)Â·log(y) - Ï†Â·y/Î¼ - log Î“(Ï†)
 ///
-/// donde μ = exp(η).
+/// donde Î¼ = exp(Î·).
 ///
-/// θ[0] = log φ  (log-shape)
+/// Î¸[0] = log Ï†  (log-shape)
 pub struct GammaLikelihood;
 
 impl LogLikelihood for GammaLikelihood {
@@ -147,8 +159,9 @@ impl LogLikelihood for GammaLikelihood {
         let log_gamma_phi = statrs::function::gamma::ln_gamma(phi);
 
         for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            if yi.is_nan() { *ll = 0.0; continue; }
             let safe_eta = ei.clamp(-50.0, 50.0);
-            let mu = safe_eta.exp(); // link log: μ = exp(η)
+            let mu = safe_eta.exp(); // link log: Î¼ = exp(Î·)
             *ll = phi * log_phi
                 - phi * mu.ln()
                 + (phi - 1.0) * yi.ln()
@@ -163,6 +176,11 @@ impl LogLikelihood for GammaLikelihood {
     fn gradient_and_curvature(&self, grad: &mut [f64], curv: &mut [f64], eta: &[f64], y: &[f64], theta: &[f64]) {
         let phi = theta[0].clamp(-50.0, 50.0).exp();
         for i in 0..eta.len() {
+            if y[i].is_nan() {
+                grad[i] = 0.0;
+                curv[i] = 0.0;
+                continue;
+            }
             let safe_eta = eta[i].clamp(-50.0, 50.0);
             let mu = safe_eta.exp();
             grad[i] = phi * (y[i] / mu - 1.0);
@@ -171,16 +189,16 @@ impl LogLikelihood for GammaLikelihood {
     }
 }
 
-// ── Zero-Inflated Poisson (ZIP) Type-1 ─────────────────────────────────────────
+// â”€â”€ Zero-Inflated Poisson (ZIP) Type-1 â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// y ~ ZIP(p, μ)
+/// y ~ ZIP(p, Î¼)
 /// 
-/// p = logit^{-1}(θ_0) (probabilidad de exceso de ceros)
-/// μ = exp(η) (media de Poisson)
+/// p = logit^{-1}(Î¸_0) (probabilidad de exceso de ceros)
+/// Î¼ = exp(Î·) (media de Poisson)
 ///
-/// log p(y|η,p) = 
-///   y=0: log(p + (1-p)e^{-μ})
-///   y>0: log(1-p) + y·log(μ) - μ - log(y!)
+/// log p(y|Î·,p) = 
+///   y=0: log(p + (1-p)e^{-Î¼})
+///   y>0: log(1-p) + yÂ·log(Î¼) - Î¼ - log(y!)
 pub struct ZipLikelihood;
 
 impl LogLikelihood for ZipLikelihood {
@@ -188,6 +206,7 @@ impl LogLikelihood for ZipLikelihood {
         let p = 1.0 / (1.0 + (-theta[0]).exp());
         
         for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            if yi.is_nan() { *ll = 0.0; continue; }
             let safe_eta = ei.clamp(-50.0, 50.0);
             let mu = safe_eta.exp();
             
@@ -208,6 +227,11 @@ impl LogLikelihood for ZipLikelihood {
         let p = 1.0 / (1.0 + (-theta[0]).exp());
         
         for i in 0..eta.len() {
+            if y[i].is_nan() {
+                grad[i] = 0.0;
+                curv[i] = 0.0;
+                continue;
+            }
             let safe_eta = eta[i].clamp(-50.0, 50.0);
             let mu = safe_eta.exp();
             
@@ -227,13 +251,13 @@ impl LogLikelihood for ZipLikelihood {
     }
 }
 
-// ── Tweedie (Saddlepoint Approximation) ───────────────────────────────────────
+// â”€â”€ Tweedie (Saddlepoint Approximation) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// y ~ Tweedie(μ, φ, p)
+/// y ~ Tweedie(Î¼, Ï†, p)
 /// 
-/// φ = exp(θ_0) (dispersion)
-/// p = 1.0 + logit^{-1}(θ_1) (power, bounded between 1 and 2)
-/// μ = exp(η)
+/// Ï† = exp(Î¸_0) (dispersion)
+/// p = 1.0 + logit^{-1}(Î¸_1) (power, bounded between 1 and 2)
+/// Î¼ = exp(Î·)
 pub struct TweedieLikelihood;
 
 impl LogLikelihood for TweedieLikelihood {
@@ -242,6 +266,7 @@ impl LogLikelihood for TweedieLikelihood {
         let p_power = 1.0 + 1.0 / (1.0 + (-theta[1]).exp()); // maps to (1,2)
         
         for ((ll, &ei), &yi) in logll.iter_mut().zip(eta).zip(y) {
+            if yi.is_nan() { *ll = 0.0; continue; }
             let safe_eta = ei.clamp(-50.0, 50.0);
             let mu = safe_eta.exp();
             
@@ -268,6 +293,11 @@ impl LogLikelihood for TweedieLikelihood {
         let p_power = 1.0 + 1.0 / (1.0 + (-theta[1]).exp());
         
         for i in 0..eta.len() {
+            if y[i].is_nan() {
+                grad[i] = 0.0;
+                curv[i] = 0.0;
+                continue;
+            }
             let safe_eta = eta[i].clamp(-50.0, 50.0);
             let mu = safe_eta.exp();
             
@@ -292,7 +322,7 @@ impl LogLikelihood for TweedieLikelihood {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[cfg(test)]
 mod tests {
@@ -300,19 +330,19 @@ mod tests {
     use approx::assert_abs_diff_eq;
     use std::f64::consts::PI;
 
-    // ── Gaussian ──────────────────────────────────────────────────────────────
+    // â”€â”€ Gaussian â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn gaussian_at_mean_is_maximum() {
-        // Cuando y = η, el residuo es 0 → log-lik máximo para ese τ
+        // Cuando y = Î·, el residuo es 0 â†’ log-lik mÃ¡ximo para ese Ï„
         let lik = GaussianLikelihood;
         let tau = 2.0_f64;
         let eta = vec![3.0];
-        let y   = vec![3.0]; // y = η → residuo cero
+        let y   = vec![3.0]; // y = Î· â†’ residuo cero
         let mut ll1 = vec![0.0];
         lik.evaluate(&mut ll1, &eta, &y, &[tau.ln()]);
 
-        let y2   = vec![3.5]; // y ≠ η → menor log-lik
+        let y2   = vec![3.5]; // y â‰  Î· â†’ menor log-lik
         let mut ll2 = vec![0.0];
         lik.evaluate(&mut ll2, &eta, &y2, &[tau.ln()]);
 
@@ -321,7 +351,7 @@ mod tests {
 
     #[test]
     fn gaussian_formula_manual() {
-        // log p(y|η,τ) = 0.5·log(τ) - 0.5·τ·(y-η)² - 0.5·log(2π)
+        // log p(y|Î·,Ï„) = 0.5Â·log(Ï„) - 0.5Â·Ï„Â·(y-Î·)Â² - 0.5Â·log(2Ï€)
         let lik = GaussianLikelihood;
         let tau = 1.0_f64;
         let eta = vec![0.0];
@@ -329,7 +359,7 @@ mod tests {
         let mut ll = vec![0.0];
         lik.evaluate(&mut ll, &eta, &y, &[tau.ln()]);
 
-        // Manual: 0.5·log(1) - 0.5·1·1² - 0.5·log(2π) = -0.5·log(2π) - 0.5
+        // Manual: 0.5Â·log(1) - 0.5Â·1Â·1Â² - 0.5Â·log(2Ï€) = -0.5Â·log(2Ï€) - 0.5
         let expected = -0.5 * (2.0 * PI).ln() - 0.5;
         assert_abs_diff_eq!(ll[0], expected, epsilon = 1e-12);
     }
@@ -343,17 +373,17 @@ mod tests {
         let mut ll_low  = vec![0.0];
         let mut ll_high = vec![0.0];
         lik.evaluate(&mut ll_low,  &eta, &y, &[0.0]); // tau = 1
-        lik.evaluate(&mut ll_high, &eta, &y, &[2.0]); // tau = e² ≈ 7.4
+        lik.evaluate(&mut ll_high, &eta, &y, &[2.0]); // tau = eÂ² â‰ˆ 7.4
 
-        // Mayor tau → mayor penalización por residuo
+        // Mayor tau â†’ mayor penalizaciÃ³n por residuo
         assert!(ll_low[0] > ll_high[0]);
     }
 
-    // ── Poisson ───────────────────────────────────────────────────────────────
+    // â”€â”€ Poisson â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn poisson_y0_formula() {
-        // y=0: log p(0|η) = -exp(η)  (log(0!) = 0, 0·η = 0)
+        // y=0: log p(0|Î·) = -exp(Î·)  (log(0!) = 0, 0Â·Î· = 0)
         let lik = PoissonLikelihood;
         let eta = vec![1.0];
         let y   = vec![0.0];
@@ -365,7 +395,7 @@ mod tests {
 
     #[test]
     fn poisson_y1_formula() {
-        // y=1, η=0 (μ=1): log p(1|η=0) = 1·0 - 1 - log(1!) = -1
+        // y=1, Î·=0 (Î¼=1): log p(1|Î·=0) = 1Â·0 - 1 - log(1!) = -1
         let lik = PoissonLikelihood;
         let eta = vec![0.0];
         let y   = vec![1.0];
@@ -377,12 +407,12 @@ mod tests {
 
     #[test]
     fn poisson_mode_at_y_equals_mu() {
-        // Para μ = exp(η) = y, la log-lik es máxima
+        // Para Î¼ = exp(Î·) = y, la log-lik es mÃ¡xima
         let lik = PoissonLikelihood;
         let mu  = 5.0_f64;
-        let eta = vec![mu.ln()]; // η = log(μ)
+        let eta = vec![mu.ln()]; // Î· = log(Î¼)
 
-        let y_mode  = vec![5.0]; // y = μ (modo)
+        let y_mode  = vec![5.0]; // y = Î¼ (modo)
         let y_other = vec![3.0];
 
         let mut ll_mode  = vec![0.0];
@@ -393,7 +423,7 @@ mod tests {
         assert!(ll_mode[0] > ll_other[0]);
     }
 
-    // ── Gamma ─────────────────────────────────────────────────────────────────
+    // â”€â”€ Gamma â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn gamma_link_is_log() {
@@ -407,7 +437,7 @@ mod tests {
 
     #[test]
     fn gamma_higher_shape_less_variance() {
-        // Mayor φ → distribución más concentrada → mayor log-lik en la media
+        // Mayor Ï† â†’ distribuciÃ³n mÃ¡s concentrada â†’ mayor log-lik en la media
         let lik = GammaLikelihood;
         let mu  = 2.0_f64;
         let eta = vec![mu.ln()];
@@ -415,29 +445,29 @@ mod tests {
 
         let mut ll_low  = vec![0.0];
         let mut ll_high = vec![0.0];
-        lik.evaluate(&mut ll_low,  &eta, &y, &[1.0_f64.ln()]); // φ=1 (exp)
-        lik.evaluate(&mut ll_high, &eta, &y, &[5.0_f64.ln()]); // φ=5
+        lik.evaluate(&mut ll_low,  &eta, &y, &[1.0_f64.ln()]); // Ï†=1 (exp)
+        lik.evaluate(&mut ll_high, &eta, &y, &[5.0_f64.ln()]); // Ï†=5
 
-        // φ=5 → más concentrada → mayor log-lik en la media
+        // Ï†=5 â†’ mÃ¡s concentrada â†’ mayor log-lik en la media
         assert!(ll_high[0] > ll_low[0]);
     }
 
     #[test]
     fn gamma_phi1_is_exponential() {
-        // Con φ=1, Gamma = Exponencial con media μ
-        // log p(y|η,φ=1) = -log(μ) - y/μ = -η - y·exp(-η)
+        // Con Ï†=1, Gamma = Exponencial con media Î¼
+        // log p(y|Î·,Ï†=1) = -log(Î¼) - y/Î¼ = -Î· - yÂ·exp(-Î·)
         let lik = GammaLikelihood;
         let mu  = 3.0_f64;
         let eta = vec![mu.ln()];
         let y   = vec![2.0_f64];
         let mut ll = vec![0.0];
-        lik.evaluate(&mut ll, &eta, &y, &[0.0]); // log(φ=1) = 0
+        lik.evaluate(&mut ll, &eta, &y, &[0.0]); // log(Ï†=1) = 0
 
         let expected = -mu.ln() - y[0] / mu;
         assert_abs_diff_eq!(ll[0], expected, epsilon = 1e-10);
     }
 
-    // ── Link functions ────────────────────────────────────────────────────────
+    // â”€â”€ Link functions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn link_identity_roundtrip() {

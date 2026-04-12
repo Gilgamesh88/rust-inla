@@ -13,12 +13,14 @@ use crate::inference::{InlaParams, InlaModel, InlaEngine};
 #[extendr]
 fn rust_inla_run(
     data: Robj, 
-    model_type: &str, 
+    model_types_arg: &str, 
     likelihood_type: &str, 
     fixed_matrix_arg: Robj,
     n_fixed_arg: i32,
     n_latent_arg: Robj,
-    x_idx_arg: Robj
+    a_i_arg: Robj,
+    a_j_arg: Robj,
+    a_x_arg: Robj
 ) -> Robj {
     // Attempt to slice directly into R's memory without allocating if REAL
     let y_slice = match data.as_real_slice() {
@@ -31,25 +33,43 @@ fn rust_inla_run(
     let x_mat_slice = fixed_matrix_arg.as_real_slice();
     let n_fixed = n_fixed_arg as usize;
 
-    let (n_latent, x_idx_vec) = if x_idx_arg.is_null() {
-        (n_data, None)
+    let (n_latent, a_i, a_j, a_x) = if a_i_arg.is_null() {
+        (n_data, None, None, None)
     } else {
-        match x_idx_arg.as_integer_slice() {
-            Some(s) => {
-                let n_lat: i32 = n_latent_arg.as_integer().unwrap_or(s.len() as i32);
-                let vec_u: Vec<usize> = s.iter().map(|&v| v as usize).collect();
-                (n_lat as usize, Some(vec_u))
-            },
-            None => return r!(format!("Error: x_idx must be an integer vector")),
-        }
+        let n_lat: i32 = n_latent_arg.as_integer().unwrap_or(a_i_arg.len() as i32);
+        
+        let a_i_slice = match a_i_arg.as_integer_slice() {
+            Some(s) => s,
+            None => return r!(format!("Error: a_i must be an integer vector")),
+        };
+        let a_i_vec: Vec<usize> = a_i_slice.iter().map(|&v| v as usize).collect();
+        
+        let a_j_slice = match a_j_arg.as_integer_slice() {
+            Some(s) => s,
+            None => return r!(format!("Error: a_j must be an integer vector")),
+        };
+        let a_j_vec: Vec<usize> = a_j_slice.iter().map(|&v| v as usize).collect();
+
+        // Avoid cloning heavy numeric arrays, just map them
+        let a_x_slice = match a_x_arg.as_real_slice() {
+            Some(s) => s,
+            None => return r!(format!("Error: a_x must be a real vector")),
+        };
+        let a_x_vec: Vec<f64> = a_x_slice.to_vec();
+        
+        (n_lat as usize, Some(a_i_vec), Some(a_j_vec), Some(a_x_vec))
     };
 
+    // Temporarily, we will just use the FIRST model_types_arg separated by comma until CompoundQFunc is built!
+    let mut model_type_parts = model_types_arg.split(',');
+    let primary_model = model_type_parts.next().unwrap_or("iid");
+
     // Box the dispatch to avoid lifetime complexity in dynamic trait objects
-    let qfunc: Box<dyn QFunc> = match model_type {
+    let qfunc: Box<dyn QFunc> = match primary_model {
         "iid" => Box::new(IidModel::new(n_latent)),
         "rw1" => Box::new(Rw1Model::new(n_latent)),
         "ar1" => Box::new(Ar1Model::new(n_latent)),
-        _ => return r!(format!("Unknown model_type: {}", model_type)),
+        _ => return r!(format!("Unknown model_type: {}", primary_model)),
     };
 
     let lik: Box<dyn LogLikelihood> = match likelihood_type {
@@ -72,7 +92,10 @@ fn rust_inla_run(
         fixed_matrix: x_mat_slice,
         n_fixed,
         n_latent,
-        x_idx: x_idx_vec.as_deref(),
+        a_i: a_i.as_deref(),
+        a_j: a_j.as_deref(),
+        a_x: a_x.as_deref(),
+        offset: None,
     };
 
     let params = InlaParams::default();

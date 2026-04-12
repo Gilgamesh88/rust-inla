@@ -12,13 +12,9 @@ NULL
 
 #' Execute rust-inla backend from R.
 #'
-#' @param data A numeric array of length N (the response y).
-#' @param model_type String identifier ("iid", "rw1", "ar1").
-#' @param likelihood_type String identifier ("gaussian", "poisson", "gamma").
-#' @param fixed_matrix_arg Optional flat vector of K columns combined
-#' @param n_fixed_arg Number of columns K
+#' @param a_i_arg Array of obs integers
 #' @export
-rust_inla_run <- function(data, model_type, likelihood_type, fixed_matrix_arg, n_fixed_arg, n_latent_arg, x_idx_arg) .Call(wrap__rust_inla_run, data, model_type, likelihood_type, fixed_matrix_arg, n_fixed_arg, n_latent_arg, x_idx_arg)
+rust_inla_run <- function(data, model_types_arg, likelihood_type, fixed_matrix_arg, n_fixed_arg, n_latent_arg, a_i_arg, a_j_arg, a_x_arg) .Call(wrap__rust_inla_run, data, model_types_arg, likelihood_type, fixed_matrix_arg, n_fixed_arg, n_latent_arg, a_i_arg, a_j_arg, a_x_arg)
 
 
 # nolint end
