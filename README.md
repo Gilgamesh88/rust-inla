@@ -4,7 +4,7 @@
 
 ## Current Benchmark Snapshot
 
-The latest local parity sweep was run on April 18, 2026 against the `freMTPL2` data from `CASdatasets` using [benchmark.R](benchmark.R). The active benchmark suite currently excludes Tweedie because that path remains unstable and is not yet a reliable parity target.
+The latest local parity sweep was run on April 19, 2026 against the `freMTPL2` data from `CASdatasets` using [benchmark.R](benchmark.R). The active benchmark suite currently excludes Tweedie because that path remains unstable and is not yet a reliable parity target.
 
 Headline result on the active stable suite:
 
@@ -19,13 +19,15 @@ Headline result on the active stable suite:
 
 | Likelihood Model | Latent Component | Rusty-INLA | R-INLA | Status |
 | --- | --- | --- | --- | --- |
-| **Poisson** (Freq) | `IID` (VehBrand) | `58.61 sec`, `359.3 MB` | `22.81 sec`, `1112.0 MB` | PASS |
-| **Poisson** (Freq) | `IID` (VehBrand) + `IID` (Region) | `52.22 sec`, `845.6 MB` | `39.17 sec`, `1339.2 MB` | PASS |
-| **Gamma** (Severity) | `RW1` (AgeGroup) | `3.95 sec`, `825.4 MB` | `2.42 sec`, `970.5 MB` | PASS |
-| **Poisson** (Freq) | `AR1` (AgeIndex) | `55.83 sec`, `1012.1 MB` | `36.50 sec`, `1590.9 MB` | PASS |
-| **Zero-Infl. Poisson** | `IID` (VehBrand) | `102.97 sec`, `1195.6 MB` | `98.02 sec`, `1849.7 MB` | PASS |
+| **Poisson** (Freq) | `IID` (VehBrand) | `33.51 sec`, `393.4 MB` | `22.11 sec`, `1112.2 MB` | PASS |
+| **Poisson** (Freq) | `IID` (VehBrand) + `IID` (Region) | `32.41 sec`, `871.7 MB` | `39.03 sec`, `1339.5 MB` | PASS |
+| **Gamma** (Severity) | `RW1` (AgeGroup) | `2.52 sec`, `826.7 MB` | `2.30 sec`, `970.8 MB` | PASS |
+| **Poisson** (Freq) | `AR1` (AgeIndex) | `41.67 sec`, `1038.3 MB` | `37.41 sec`, `1591.1 MB` | PASS |
+| **Zero-Infl. Poisson** | `IID` (VehBrand) | `73.95 sec`, `1221.9 MB` | `98.45 sec`, `1850.1 MB` | PASS |
 
-The detailed comparison note is tracked in [scratch/BENCHMARK_SUMMARY_2026-04-18.md](scratch/BENCHMARK_SUMMARY_2026-04-18.md).
+The detailed comparison note is tracked in [scratch/BENCHMARK_SUMMARY_2026-04-19.md](scratch/BENCHMARK_SUMMARY_2026-04-19.md).
+
+For the current implemented subset, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the posterior-state update RFC, the directory-level intervention map, and the recommended path for adding new families or latent models, see [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
 
 ## Implementation Roadmap (75% Complete)
 
