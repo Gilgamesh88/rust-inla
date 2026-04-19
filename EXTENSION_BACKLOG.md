@@ -63,6 +63,29 @@ Expected work:
 - register its string name and defaults in the bridge
 - add unit tests, end-to-end tests, and reference comparisons
 
+### If we add exactly one extension before the first public release
+
+Recommended choice:
+
+- `rw2`
+
+Why:
+
+- it is the lowest-risk extension that still proves the architecture can grow
+- it reuses the existing chain-graph and latent-model machinery
+- it expands the smoothing subset naturally
+- it is easier to validate cleanly than a new family with richer observation semantics
+- it gives us a stronger "the engine generalizes beyond the initial three latent models" story
+
+Best second choice after that:
+
+- one additional GLM-like family, with `nbinomial` the strongest candidate if count overdispersion is the most valuable next actuarial case
+
+Practical interpretation:
+
+- if we choose one thing for architectural credibility, choose `rw2`
+- if we choose one thing for immediate actuarial model breadth after that, choose a GLM-like family
+
 ## Priority 2: modest API expansion with strong payoff
 
 These features likely need some widening of the backend spec, but not a core-engine rewrite.
