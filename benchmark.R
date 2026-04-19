@@ -15,6 +15,13 @@ suppressPackageStartupMessages({
     library(rustyINLA)
 })
 
+rusty_output_profile <- Sys.getenv("RUSTYINLA_OUTPUT_PROFILE", "thin")
+if (!(rusty_output_profile %in% c("thin", "benchmark"))) {
+    stop("RUSTYINLA_OUTPUT_PROFILE must be 'thin' or 'benchmark'.")
+}
+
+benchmark_output_path <- Sys.getenv("RUSTYINLA_BENCHMARK_OUT", "")
+
 `%||%` <- function(x, y) {
     if (is.null(x)) y else x
 }
@@ -236,6 +243,7 @@ evaluate_case <- function(case) {
             fitted = NULL,
             summary = data.frame(
                 case_id = case$id,
+                output_profile = rusty_output_profile,
                 passed = FALSE,
                 rusty_ok = rusty_perf$ok,
                 inla_ok = rinla_perf$ok && inherits(rinla_perf$res, "inla"),
@@ -294,6 +302,7 @@ evaluate_case <- function(case) {
         fitted = fitted,
         summary = data.frame(
             case_id = case$id,
+            output_profile = rusty_output_profile,
             passed = passed,
             rusty_ok = TRUE,
             inla_ok = TRUE,
@@ -319,7 +328,8 @@ print_case_report <- function(result) {
         toupper(result$label)
     ))
     cat(sprintf(
-        "Rusty-INLA: %6.2f sec | %6.2f MB\nR-INLA    : %6.2f sec | %6.2f MB\n",
+        "Rusty-INLA (%s): %6.2f sec | %6.2f MB\nR-INLA        : %6.2f sec | %6.2f MB\n",
+        rusty_output_profile,
         result$rusty_perf$time,
         result$rusty_perf$mem,
         result$rinla_perf$time,
@@ -406,6 +416,7 @@ cat(sprintf(
     sev_cutoff
 ))
 cat("Tweedie benchmark excluded from the active parity sweep due to instability.\n")
+cat(sprintf("Rusty-INLA output profile: %s\n", rusty_output_profile))
 
 cases <- list(
     list(
@@ -415,7 +426,8 @@ cases <- list(
             rusty_inla(
                 ClaimNb ~ 1 + offset(log(Exposure)) + f(VehBrand, model = "iid"),
                 data = df_freq,
-                family = "poisson"
+                family = "poisson",
+                output_profile = rusty_output_profile
             )
         ),
         inla_expr = quote(
@@ -440,7 +452,8 @@ cases <- list(
                     f(VehBrand, model = "iid") +
                     f(Region, model = "iid"),
                 data = df_freq,
-                family = "poisson"
+                family = "poisson",
+                output_profile = rusty_output_profile
             )
         ),
         inla_expr = quote(
@@ -470,7 +483,8 @@ cases <- list(
             rusty_inla(
                 ClaimAmount ~ 1 + f(AgeGroup, model = "rw1"),
                 data = df_sev,
-                family = "gamma"
+                family = "gamma",
+                output_profile = rusty_output_profile
             )
         ),
         inla_expr = quote(
@@ -496,7 +510,8 @@ cases <- list(
             rusty_inla(
                 ClaimNb ~ 1 + offset(log(Exposure)) + f(AgeIndex, model = "ar1"),
                 data = df_freq,
-                family = "poisson"
+                family = "poisson",
+                output_profile = rusty_output_profile
             )
         ),
         inla_expr = quote(
@@ -524,7 +539,8 @@ cases <- list(
             rusty_inla(
                 ClaimNb ~ 1 + offset(log(Exposure)) + f(VehBrand, model = "iid"),
                 data = df_freq,
-                family = "zeroinflatedpoisson1"
+                family = "zeroinflatedpoisson1",
+                output_profile = rusty_output_profile
             )
         ),
         inla_expr = quote(
@@ -558,6 +574,11 @@ summary_table <- do.call(
 
 cat("\n====================\nPARITY SUMMARY TABLE\n====================\n")
 print(summary_table, row.names = FALSE)
+
+if (nzchar(benchmark_output_path)) {
+    utils::write.csv(summary_table, benchmark_output_path, row.names = FALSE)
+    cat(sprintf("\nWrote summary table to %s\n", benchmark_output_path))
+}
 
 cat(sprintf(
     "\nOverall: %d/%d cases passed.\n",

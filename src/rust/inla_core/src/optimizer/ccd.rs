@@ -1,10 +1,9 @@
 use std::f64::consts::PI;
 use std::time::Instant;
 
-use crate::diagnostics::LaplacePhase;
 use crate::error::InlaError;
 use crate::inference::InlaModel;
-use crate::optimizer::laplace_eval;
+use crate::optimizer::{laplace_eval, LaplaceEvalConfig};
 use crate::problem::Problem;
 
 pub struct CcdPoint {
@@ -19,6 +18,8 @@ pub struct CcdIntegration {
     pub points: Vec<CcdPoint>,
     pub hessian_eigenvalues: Vec<f64>,
 }
+
+type HessianApprox = (Vec<f64>, Vec<f64>, Vec<f64>);
 
 impl CcdIntegration {
     pub fn theta_laplace_correction(&self) -> f64 {
@@ -62,7 +63,7 @@ fn approx_hessian(
     problem: &mut Problem,
     model: &InlaModel<'_>,
     theta_opt: &[f64],
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), InlaError> {
+) -> Result<HessianApprox, InlaError> {
     let d = theta_opt.len();
     let h = 0.1;
     let mut hessian = vec![0.0_f64; d * d];
@@ -73,12 +74,14 @@ fn approx_hessian(
     let opt_eval = laplace_eval(
         problem,
         model,
-        LaplacePhase::Ccd,
         theta_opt,
         &x_warm,
         &beta_warm,
-        20,
-        1e-6,
+        LaplaceEvalConfig {
+            phase: crate::diagnostics::LaplacePhase::Ccd,
+            n_irls: 20,
+            tol_irls: 1e-6,
+        },
     )?;
     let neg_log_mlik_opt = opt_eval.neg_log_mlik;
     let x_mode_opt = opt_eval.x_hat;
@@ -93,23 +96,27 @@ fn approx_hessian(
         let f_plus = laplace_eval(
             problem,
             model,
-            LaplacePhase::Ccd,
             &t_plus,
             &x_mode_opt,
             &beta_mode_opt,
-            20,
-            1e-6,
+            LaplaceEvalConfig {
+                phase: crate::diagnostics::LaplacePhase::Ccd,
+                n_irls: 20,
+                tol_irls: 1e-6,
+            },
         )?
         .neg_log_mlik;
         let f_minus = laplace_eval(
             problem,
             model,
-            LaplacePhase::Ccd,
             &t_minus,
             &x_mode_opt,
             &beta_mode_opt,
-            20,
-            1e-6,
+            LaplaceEvalConfig {
+                phase: crate::diagnostics::LaplacePhase::Ccd,
+                n_irls: 20,
+                tol_irls: 1e-6,
+            },
         )?
         .neg_log_mlik;
 
@@ -135,45 +142,53 @@ fn approx_hessian(
             let f_pp = laplace_eval(
                 problem,
                 model,
-                LaplacePhase::Ccd,
                 &t_pp,
                 &x_mode_opt,
                 &beta_mode_opt,
-                20,
-                1e-6,
+                LaplaceEvalConfig {
+                    phase: crate::diagnostics::LaplacePhase::Ccd,
+                    n_irls: 20,
+                    tol_irls: 1e-6,
+                },
             )?
             .neg_log_mlik;
             let f_mm = laplace_eval(
                 problem,
                 model,
-                LaplacePhase::Ccd,
                 &t_mm,
                 &x_mode_opt,
                 &beta_mode_opt,
-                20,
-                1e-6,
+                LaplaceEvalConfig {
+                    phase: crate::diagnostics::LaplacePhase::Ccd,
+                    n_irls: 20,
+                    tol_irls: 1e-6,
+                },
             )?
             .neg_log_mlik;
             let f_pm = laplace_eval(
                 problem,
                 model,
-                LaplacePhase::Ccd,
                 &t_pm,
                 &x_mode_opt,
                 &beta_mode_opt,
-                20,
-                1e-6,
+                LaplaceEvalConfig {
+                    phase: crate::diagnostics::LaplacePhase::Ccd,
+                    n_irls: 20,
+                    tol_irls: 1e-6,
+                },
             )?
             .neg_log_mlik;
             let f_mp = laplace_eval(
                 problem,
                 model,
-                LaplacePhase::Ccd,
                 &t_mp,
                 &x_mode_opt,
                 &beta_mode_opt,
-                20,
-                1e-6,
+                LaplaceEvalConfig {
+                    phase: crate::diagnostics::LaplacePhase::Ccd,
+                    n_irls: 20,
+                    tol_irls: 1e-6,
+                },
             )?
             .neg_log_mlik;
 
@@ -276,12 +291,14 @@ pub fn build_ccd_grid(
         let eval = laplace_eval(
             problem,
             model,
-            LaplacePhase::Ccd,
             &pt.theta,
             &x_warm,
             &beta_warm,
-            CCD_EVAL_IRLS_MAX_ITER,
-            CCD_EVAL_IRLS_TOL,
+            LaplaceEvalConfig {
+                phase: crate::diagnostics::LaplacePhase::Ccd,
+                n_irls: CCD_EVAL_IRLS_MAX_ITER,
+                tol_irls: CCD_EVAL_IRLS_TOL,
+            },
         )?;
         let log_mlik = -eval.neg_log_mlik;
         let log_w = pt.base_weight.max(1e-300).ln() + log_mlik;

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use crate::diagnostics::{LaplacePhase, RunDiagnostics, RunDiagnosticsSummary};
 use crate::error::InlaError;
@@ -7,11 +7,22 @@ use crate::models::QFunc;
 use crate::solver::{FaerSolver, SpMat, SparseSolver};
 
 pub const PRIOR_PREC_BETA: f64 = 0.001;
+type ModeCoreResult = (Vec<f64>, f64, Option<Vec<f64>>);
 type FixedEffectsModeResult = (Vec<f64>, Vec<f64>, f64, Vec<f64>, f64);
 type FixedEffectsModeCoreResult = (Vec<f64>, Vec<f64>, f64, Option<Vec<f64>>, f64);
 
+#[derive(Clone, Copy)]
+struct ModeControl {
+    max_iter: usize,
+    tol: f64,
+    need_diag_aug_inv: bool,
+}
+
 pub struct Problem {
     graph: Graph,
+    a_rows: Vec<Vec<(usize, f64)>>,
+    a_single_j: Option<Vec<usize>>,
+    a_single_x: Option<Vec<f64>>,
     pub(crate) solver: FaerSolver,
     log_det: f64,
     pub n_evals: usize,
@@ -44,6 +55,19 @@ fn add_offset(eta_data: &mut [f64], offset: Option<&[f64]>) {
     }
 }
 
+fn extract_singleton_a_rows(a_rows: &[Vec<(usize, f64)>]) -> Option<(Vec<usize>, Vec<f64>)> {
+    let mut a_j = Vec::with_capacity(a_rows.len());
+    let mut a_x = Vec::with_capacity(a_rows.len());
+    for row in a_rows {
+        if row.len() != 1 {
+            return None;
+        }
+        a_j.push(row[0].0);
+        a_x.push(row[0].1);
+    }
+    Some((a_j, a_x))
+}
+
 fn clamp_curvature(curv_data: &mut [f64]) {
     for curv_i in curv_data.iter_mut() {
         *curv_i = (*curv_i).max(1e-6);
@@ -63,6 +87,39 @@ where
         sum = t;
     }
     sum
+}
+
+enum AtwaStorage {
+    Diagonal(Vec<f64>),
+    Split {
+        diag: Vec<f64>,
+        offdiag: HashMap<(usize, usize), f64>,
+    },
+}
+
+impl AtwaStorage {
+    fn diag(&self, i: usize) -> f64 {
+        match self {
+            Self::Diagonal(diag) => diag[i],
+            Self::Split { diag, .. } => diag[i],
+        }
+    }
+
+    fn offdiag(&self, i: usize, j: usize) -> f64 {
+        match self {
+            Self::Diagonal(_) => 0.0,
+            Self::Split { offdiag, .. } => offdiag.get(&(i, j)).copied().unwrap_or(0.0),
+        }
+    }
+
+    fn value(&self, i: usize, j: usize) -> f64 {
+        if i == j {
+            self.diag(i)
+        } else {
+            let (min_j, max_j) = if i < j { (i, j) } else { (j, i) };
+            self.offdiag(min_j, max_j)
+        }
+    }
 }
 
 fn schur_stabilization_jitter(
@@ -231,8 +288,15 @@ impl Problem {
 
         let mut solver = FaerSolver::new();
         solver.reorder(&mut graph);
+        let a_rows = build_a_rows(model, model.y.len(), model.n_latent);
+        let (a_single_j, a_single_x) = extract_singleton_a_rows(&a_rows)
+            .map(|(j, x)| (Some(j), Some(x)))
+            .unwrap_or((None, None));
         Self {
             graph,
+            a_rows,
+            a_single_j,
+            a_single_x,
             solver,
             log_det: 0.0,
             n_evals: 0,
@@ -303,10 +367,8 @@ impl Problem {
         model: &crate::inference::InlaModel<'_>,
         theta: &[f64],
         x_init: &[f64],
-        max_iter: usize,
-        tol: f64,
-        need_diag_aug_inv: bool,
-    ) -> Result<(Vec<f64>, f64, Option<Vec<f64>>), InlaError> {
+        control: ModeControl,
+    ) -> Result<ModeCoreResult, InlaError> {
         self.diagnostics.latent_mode_solve_calls += 1;
         let solve_started = Instant::now();
         let result = (|| {
@@ -325,17 +387,21 @@ impl Problem {
             let mut iterations = 0_usize;
             let mut converged = false;
 
-            let a_rows = build_a_rows(model, n_data, n_latent);
-
-            for _iter in 0..max_iter {
+            for _iter in 0..control.max_iter {
                 iterations += 1;
                 let x_old = x.clone();
                 let assembly_started = Instant::now();
 
                 let mut eta_data = vec![0.0_f64; n_data];
-                for i in 0..n_data {
-                    for &(j, ax) in &a_rows[i] {
-                        eta_data[i] += ax * x[j];
+                if let (Some(a_single_j), Some(a_single_x)) = (&self.a_single_j, &self.a_single_x) {
+                    for (i, eta_i) in eta_data.iter_mut().enumerate().take(n_data) {
+                        *eta_i = a_single_x[i] * x[a_single_j[i]];
+                    }
+                } else {
+                    for (i, eta_i) in eta_data.iter_mut().enumerate().take(n_data) {
+                        for &(j, ax) in &self.a_rows[i] {
+                            *eta_i += ax * x[j];
+                        }
                     }
                 }
                 add_offset(&mut eta_data, model.offset);
@@ -352,31 +418,48 @@ impl Problem {
 
                 clamp_curvature(&mut curv_data);
 
-                let mut grad_latent = vec![0.0_f64; n_latent];
-                for i in 0..n_data {
-                    for &(j, ax) in &a_rows[i] {
-                        grad_latent[j] += ax * grad_data[i];
+                let (grad_latent, atwa) = if let (Some(a_single_j), Some(a_single_x)) =
+                    (&self.a_single_j, &self.a_single_x)
+                {
+                    let mut grad_latent = vec![0.0_f64; n_latent];
+                    let mut atwa_diag = vec![0.0_f64; n_latent];
+                    for i in 0..n_data {
+                        grad_latent[a_single_j[i]] += a_single_x[i] * grad_data[i];
+                        atwa_diag[a_single_j[i]] += a_single_x[i] * curv_data[i] * a_single_x[i];
                     }
-                }
-
-                let mut atwa = std::collections::HashMap::new();
-                for i in 0..n_data {
-                    let w = curv_data[i];
-                    let row = &a_rows[i];
-                    for &(j1, ax1) in row {
-                        for &(j2, ax2) in row {
-                            let (min_j, max_j) = if j1 < j2 { (j1, j2) } else { (j2, j1) };
-                            *atwa.entry((min_j, max_j)).or_insert(0.0) += ax1 * w * ax2;
+                    (grad_latent, AtwaStorage::Diagonal(atwa_diag))
+                } else {
+                    let mut grad_latent = vec![0.0_f64; n_latent];
+                    let mut atwa_diag = vec![0.0_f64; n_latent];
+                    let mut atwa_offdiag = HashMap::new();
+                    for i in 0..n_data {
+                        let grad = grad_data[i];
+                        let w = curv_data[i];
+                        let row = &self.a_rows[i];
+                        for (idx, &(j1, ax1)) in row.iter().enumerate() {
+                            grad_latent[j1] += ax1 * grad;
+                            atwa_diag[j1] += ax1 * w * ax1;
+                            for &(j2, ax2) in &row[(idx + 1)..] {
+                                let (min_j, max_j) = if j1 < j2 { (j1, j2) } else { (j2, j1) };
+                                *atwa_offdiag.entry((min_j, max_j)).or_insert(0.0) += ax1 * w * ax2;
+                            }
                         }
                     }
-                }
+                    (
+                        grad_latent,
+                        AtwaStorage::Split {
+                            diag: atwa_diag,
+                            offdiag: atwa_offdiag,
+                        },
+                    )
+                };
 
                 // z = x + Q_aug^-1 grad => Q_aug x + grad
                 let mut rhs = vec![0.0_f64; n_latent];
                 for k in 0..n_latent {
                     rhs[k] = grad_latent[k]
                         + model.qfunc.eval(k, k, theta_model) * x[k]
-                        + atwa.get(&(k, k)).copied().unwrap_or(0.0) * x[k];
+                        + atwa.diag(k) * x[k];
                     for &neighbor in self.graph.neighbors_of(k) {
                         if neighbor != k {
                             let q_ij = model.qfunc.eval(k, neighbor, theta_model);
@@ -385,7 +468,7 @@ impl Problem {
                             } else {
                                 (neighbor, k)
                             };
-                            let atwa_ij = atwa.get(&(min_j, max_j)).copied().unwrap_or(0.0);
+                            let atwa_ij = atwa.offdiag(min_j, max_j);
                             rhs[k] += (q_ij + atwa_ij) * x[neighbor];
                         }
                     }
@@ -419,7 +502,7 @@ impl Problem {
                     .zip(x_old.iter())
                     .map(|(a, b)| (a - b).abs())
                     .fold(0.0_f64, f64::max);
-                if delta < tol {
+                if delta < control.tol {
                     converged = true;
                     break;
                 }
@@ -429,7 +512,7 @@ impl Problem {
                 self.diagnostics.latent_mode_max_iter_hits += 1;
             }
 
-            let diag_aug_inv = if need_diag_aug_inv {
+            let diag_aug_inv = if control.need_diag_aug_inv {
                 let mut diag = extract_sparse_diagonal(&self.solver.selected_inverse()?, n_latent);
                 if let Some(constr) = model.extr_constr {
                     let n_c = model.n_constr;
@@ -460,8 +543,16 @@ impl Problem {
         max_iter: usize,
         tol: f64,
     ) -> Result<(Vec<f64>, f64, Vec<f64>), InlaError> {
-        let (x, log_det_aug, diag_aug_inv) =
-            self.find_mode_core(model, theta, x_init, max_iter, tol, true)?;
+        let (x, log_det_aug, diag_aug_inv) = self.find_mode_core(
+            model,
+            theta,
+            x_init,
+            ModeControl {
+                max_iter,
+                tol,
+                need_diag_aug_inv: true,
+            },
+        )?;
         Ok((x, log_det_aug, diag_aug_inv.unwrap_or_default()))
     }
 
@@ -473,8 +564,16 @@ impl Problem {
         max_iter: usize,
         tol: f64,
     ) -> Result<(Vec<f64>, f64), InlaError> {
-        let (x, log_det_aug, _) =
-            self.find_mode_core(model, theta, x_init, max_iter, tol, false)?;
+        let (x, log_det_aug, _) = self.find_mode_core(
+            model,
+            theta,
+            x_init,
+            ModeControl {
+                max_iter,
+                tol,
+                need_diag_aug_inv: false,
+            },
+        )?;
         Ok((x, log_det_aug))
     }
 
@@ -486,13 +585,10 @@ impl Problem {
         theta: &[f64],
         x_init: &[f64],
         beta_init: &[f64],
-        max_iter: usize,
-        tol: f64,
-        need_diag_aug_inv: bool,
+        control: ModeControl,
     ) -> Result<FixedEffectsModeCoreResult, InlaError> {
         if model.n_fixed == 0 || model.fixed_matrix.is_none() {
-            let (x, ld, di) =
-                self.find_mode_core(model, theta, x_init, max_iter, tol, need_diag_aug_inv)?;
+            let (x, ld, di) = self.find_mode_core(model, theta, x_init, control)?;
             return Ok((vec![], x, ld, di, 0.0));
         }
         self.diagnostics.latent_mode_solve_calls += 1;
@@ -523,24 +619,33 @@ impl Problem {
             let mut iterations = 0_usize;
             let mut converged = false;
 
-            let a_rows = build_a_rows(model, n_data, n_latent);
-
-            for _iter in 0..max_iter {
+            for _iter in 0..control.max_iter {
                 iterations += 1;
                 let x_old = x.clone();
                 let beta_old = beta.clone();
                 let assembly_started = Instant::now();
 
                 let mut eta_data = vec![0.0_f64; n_data];
-                for i in 0..n_data {
-                    for &(j, ax) in &a_rows[i] {
-                        eta_data[i] += ax * x[j];
+                if let (Some(a_single_j), Some(a_single_x)) = (&self.a_single_j, &self.a_single_x) {
+                    for (i, eta_i) in eta_data.iter_mut().enumerate().take(n_data) {
+                        *eta_i = a_single_x[i] * x[a_single_j[i]];
+                        let mut xb = 0.0;
+                        for j in 0..n_fixed {
+                            xb += x_m[i + j * n_data] * beta[j];
+                        }
+                        *eta_i += xb;
                     }
-                    let mut xb = 0.0;
-                    for j in 0..n_fixed {
-                        xb += x_m[i + j * n_data] * beta[j];
+                } else {
+                    for (i, eta_i) in eta_data.iter_mut().enumerate().take(n_data) {
+                        for &(j, ax) in &self.a_rows[i] {
+                            *eta_i += ax * x[j];
+                        }
+                        let mut xb = 0.0;
+                        for j in 0..n_fixed {
+                            xb += x_m[i + j * n_data] * beta[j];
+                        }
+                        *eta_i += xb;
                     }
-                    eta_data[i] += xb;
                 }
                 add_offset(&mut eta_data, model.offset);
 
@@ -557,55 +662,75 @@ impl Problem {
                 clamp_curvature(&mut curv_data);
                 final_w_data = curv_data.clone();
 
-                let mut grad_latent = vec![0.0_f64; n_latent];
-                for i in 0..n_data {
-                    for &(j, ax) in &a_rows[i] {
-                        grad_latent[j] += ax * grad_data[i];
-                    }
-                }
+                let (atwa, w_cross, b_beta, b_x) = if let (Some(a_single_j), Some(a_single_x)) =
+                    (&self.a_single_j, &self.a_single_x)
+                {
+                    let mut atwa_diag = vec![0.0_f64; n_latent];
+                    let mut w_cross = vec![0.0_f64; n_latent * n_fixed];
+                    let mut b_beta = vec![0.0_f64; n_fixed];
+                    let mut b_x = vec![0.0_f64; n_latent];
+                    for i in 0..n_data {
+                        let k = a_single_j[i];
+                        let ax = a_single_x[i];
+                        let grad = grad_data[i];
+                        let curv = curv_data[i];
+                        atwa_diag[k] += ax * curv * ax;
 
-                let mut atwa = std::collections::HashMap::new();
-                for i in 0..n_data {
-                    let w = curv_data[i];
-                    let row = &a_rows[i];
-                    for &(j1, ax1) in row {
-                        for &(j2, ax2) in row {
-                            if j1 <= j2 {
-                                *atwa.entry((j1, j2)).or_insert(0.0) += ax1 * w * ax2;
+                        let z_i = eta_data[i] + grad / curv;
+                        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+                        let wz = curv * (z_i - offset_i);
+                        b_x[k] += ax * wz;
+                        for j in 0..n_fixed {
+                            let x_ij = x_m[i + j * n_data];
+                            w_cross[k + j * n_latent] += ax * curv * x_ij;
+                            b_beta[j] += x_ij * wz;
+                        }
+                    }
+                    (AtwaStorage::Diagonal(atwa_diag), w_cross, b_beta, b_x)
+                } else {
+                    let mut atwa_diag = vec![0.0_f64; n_latent];
+                    let mut atwa_offdiag = HashMap::new();
+                    let mut w_cross = vec![0.0_f64; n_latent * n_fixed];
+                    let mut b_beta = vec![0.0_f64; n_fixed];
+                    let mut b_x = vec![0.0_f64; n_latent];
+                    for i in 0..n_data {
+                        let grad = grad_data[i];
+                        let curv = curv_data[i];
+                        let row = &self.a_rows[i];
+                        let z_i = eta_data[i] + grad / curv;
+                        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+                        let wz = curv * (z_i - offset_i);
+
+                        for j in 0..n_fixed {
+                            let x_ij = x_m[i + j * n_data];
+                            b_beta[j] += x_ij * wz;
+                            let w_x_ij = curv * x_ij;
+                            for &(k, ax) in row {
+                                w_cross[k + j * n_latent] += ax * w_x_ij;
+                            }
+                        }
+
+                        for (idx, &(j1, ax1)) in row.iter().enumerate() {
+                            atwa_diag[j1] += ax1 * curv * ax1;
+                            b_x[j1] += ax1 * wz;
+                            for &(j2, ax2) in &row[(idx + 1)..] {
+                                let (min_j, max_j) = if j1 < j2 { (j1, j2) } else { (j2, j1) };
+                                *atwa_offdiag.entry((min_j, max_j)).or_insert(0.0) +=
+                                    ax1 * curv * ax2;
                             }
                         }
                     }
-                }
-
-                let mut w_cross = vec![0.0_f64; n_latent * n_fixed];
-                for i in 0..n_data {
-                    for j in 0..n_fixed {
-                        let w_x_m = curv_data[i] * x_m[i + j * n_data];
-                        for &(k, ax) in &a_rows[i] {
-                            w_cross[k + j * n_latent] += ax * w_x_m;
-                        }
-                    }
-                }
+                    (
+                        AtwaStorage::Split {
+                            diag: atwa_diag,
+                            offdiag: atwa_offdiag,
+                        },
+                        w_cross,
+                        b_beta,
+                        b_x,
+                    )
+                };
                 final_w_cross = w_cross.clone();
-
-                let mut b_beta = vec![0.0_f64; n_fixed];
-                let mut b_x = vec![0.0_f64; n_latent];
-
-                let mut wz_data = vec![0.0_f64; n_data];
-                for i in 0..n_data {
-                    let z_i = eta_data[i] + grad_data[i] / curv_data[i];
-                    let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
-                    // The offset is a known additive term in eta, so the
-                    // pseudo-response RHS must target only the unknown linear
-                    // predictor part A x + X beta.
-                    wz_data[i] = curv_data[i] * (z_i - offset_i);
-                    for j in 0..n_fixed {
-                        b_beta[j] += x_m[i + j * n_data] * wz_data[i];
-                    }
-                    for &(k, ax) in &a_rows[i] {
-                        b_x[k] += ax * wz_data[i];
-                    }
-                }
                 self.diagnostics.likelihood_assembly_time += assembly_started.elapsed();
 
                 let aug = AugmentedQFunc {
@@ -705,8 +830,8 @@ impl Problem {
                         format!(
                             "Schur S_mat loop singular, diag0: {:?}, xtwx0: {:?}, wcv0: {:?}, w_min: {:?}, w_max: {:?}, theta: {:?}",
                             s_mat_bkp[0],
-                            s_xtwx_diag.get(0).copied().unwrap_or(0.0),
-                            s_wcv_diag.get(0).copied().unwrap_or(0.0),
+                            s_xtwx_diag.first().copied().unwrap_or(0.0),
+                            s_wcv_diag.first().copied().unwrap_or(0.0),
                             w_min,
                             w_max,
                             theta,
@@ -732,7 +857,7 @@ impl Problem {
                     delta_max = delta_max.max((a - b_val).abs());
                 }
 
-                if delta_max < tol {
+                if delta_max < control.tol {
                     converged = true;
                     break;
                 }
@@ -742,7 +867,7 @@ impl Problem {
                 self.diagnostics.latent_mode_max_iter_hits += 1;
             }
 
-            let mut diag_aug_inv = if need_diag_aug_inv {
+            let mut diag_aug_inv = if control.need_diag_aug_inv {
                 Some(extract_sparse_diagonal(
                     &self.solver.selected_inverse()?,
                     n_latent,
@@ -877,7 +1002,15 @@ impl Problem {
     ) -> Result<FixedEffectsModeResult, InlaError> {
         let (beta, x, log_det_aug, diag_aug_inv, schur_log_det) = self
             .find_mode_with_fixed_effects_core(
-                model, theta, x_init, beta_init, max_iter, tol, true,
+                model,
+                theta,
+                x_init,
+                beta_init,
+                ModeControl {
+                    max_iter,
+                    tol,
+                    need_diag_aug_inv: true,
+                },
             )?;
         Ok((
             beta,
@@ -898,7 +1031,15 @@ impl Problem {
         tol: f64,
     ) -> Result<(Vec<f64>, Vec<f64>, f64, f64), InlaError> {
         let (beta, x, log_det_aug, _, schur_log_det) = self.find_mode_with_fixed_effects_core(
-            model, theta, x_init, beta_init, max_iter, tol, false,
+            model,
+            theta,
+            x_init,
+            beta_init,
+            ModeControl {
+                max_iter,
+                tol,
+                need_diag_aug_inv: false,
+            },
         )?;
         Ok((beta, x, log_det_aug, schur_log_det))
     }
@@ -992,7 +1133,7 @@ fn dense_cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> Result<f64, I
 
 struct AugmentedQFunc<'a> {
     inner: &'a dyn QFunc,
-    atwa: &'a std::collections::HashMap<(usize, usize), f64>,
+    atwa: &'a AtwaStorage,
 }
 
 impl QFunc for AugmentedQFunc<'_> {
@@ -1004,8 +1145,7 @@ impl QFunc for AugmentedQFunc<'_> {
         if i == j && !self.inner.is_proper() {
             base += 1e-6; // Intrinsic regularization
         }
-        let (min_j, max_j) = if i < j { (i, j) } else { (j, i) };
-        base + self.atwa.get(&(min_j, max_j)).copied().unwrap_or(0.0)
+        base + self.atwa.value(i, j)
     }
     fn n_hyperparams(&self) -> usize {
         self.inner.n_hyperparams()

@@ -1,3 +1,8 @@
+#![allow(non_snake_case)]
+// The R package and extendr entrypoint intentionally keep the public
+// `rustyINLA` name so the compiled module matches the package-facing symbol
+// expected by the current R integration.
+
 use extendr_api::prelude::*;
 use inla_core::inference::{InlaEngine, InlaModel, InlaParams};
 use inla_core::likelihood::{
@@ -502,6 +507,11 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
             let mut fitted_q500 = Vec::with_capacity(spec.y.len());
             let mut fitted_q975 = Vec::with_capacity(spec.y.len());
             let mut fitted_mode = Vec::with_capacity(spec.y.len());
+            let mut eta_mean = Vec::with_capacity(spec.y.len());
+            let mut eta_var = Vec::with_capacity(spec.y.len());
+            let mut eta_q025 = Vec::with_capacity(spec.y.len());
+            let mut eta_q500 = Vec::with_capacity(spec.y.len());
+            let mut eta_q975 = Vec::with_capacity(spec.y.len());
 
             // Because the inverse link (exp/logit) is monotonically increasing,
             // quantiles pass through exactly mapping Quantile(eta) -> Quantile(mu)
@@ -513,7 +523,12 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
             }
 
             for m in &res.fitted {
-                fitted_mean.push(m.emarginal(&link_inv));
+                eta_mean.push(m.mean());
+                eta_var.push(m.variance());
+                eta_q025.push(m.quantile(0.025));
+                eta_q500.push(m.quantile(0.500));
+                eta_q975.push(m.quantile(0.975));
+                fitted_mean.push(m.emarginal(link_inv));
                 fitted_q025.push(link_inv(m.quantile(0.025)));
                 fitted_q500.push(link_inv(m.quantile(0.500)));
                 fitted_q975.push(link_inv(m.quantile(0.975)));
@@ -544,6 +559,11 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
                 fitted_q025 = fitted_q025,
                 fitted_q500 = fitted_q500,
                 fitted_q975 = fitted_q975,
+                eta_mean = eta_mean,
+                eta_var = eta_var,
+                eta_q025 = eta_q025,
+                eta_q500 = eta_q500,
+                eta_q975 = eta_q975,
                 ccd_thetas = res.ccd_thetas,
                 ccd_base_weights = res.ccd_base_weights,
                 ccd_weights = res.ccd_weights,

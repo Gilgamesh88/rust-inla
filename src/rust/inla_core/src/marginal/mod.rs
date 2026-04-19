@@ -7,7 +7,6 @@
 //! - `inla.emarginal` â†’ E[g(x)] para funciÃ³n g arbitraria
 //! - `inla.tmarginal` â†’ transforma la variable aleatoria
 
-
 /// Densidad marginal discreta â€” evaluada en una cuadrÃ­cula de puntos.
 ///
 /// `x` y `y` tienen el mismo largo. La densidad estÃ¡ normalizada:
@@ -43,7 +42,8 @@ impl Marginal {
 
     /// Integra f(x, p(x)) sobre la cuadrÃ­cula por regla del trapecio.
     fn integrate(&self, f: impl Fn(f64, f64) -> f64) -> f64 {
-        self.x.windows(2)
+        self.x
+            .windows(2)
             .zip(self.y.windows(2))
             .map(|(xs, ys)| {
                 let dx = xs[1] - xs[0];
@@ -82,7 +82,7 @@ impl Marginal {
 
         let mut cdf = 0.0;
         for i in 1..self.x.len() {
-            let dx    = self.x[i] - self.x[i - 1];
+            let dx = self.x[i] - self.x[i - 1];
             let piece = 0.5 * dx * (self.y[i - 1] + self.y[i]);
             if cdf + piece >= q {
                 // InterpolaciÃ³n lineal dentro del intervalo
@@ -97,12 +97,12 @@ impl Marginal {
     /// EstadÃ­sticos bÃ¡sicos â€” equivalente a `inla.zmarginal` en R.
     pub fn zmarginal(&self) -> ZMarginal {
         ZMarginal {
-            mean:  self.mean(),
-            sd:    self.sd(),
+            mean: self.mean(),
+            sd: self.sd(),
             q0_025: self.quantile(0.025),
-            q0_25:  self.quantile(0.25),
-            q0_5:   self.quantile(0.5),
-            q0_75:  self.quantile(0.75),
+            q0_25: self.quantile(0.25),
+            q0_5: self.quantile(0.5),
+            q0_75: self.quantile(0.75),
             q0_975: self.quantile(0.975),
         }
     }
@@ -111,12 +111,12 @@ impl Marginal {
 /// EstadÃ­sticos bÃ¡sicos de una marginal (salida de zmarginal).
 #[derive(Debug, Clone)]
 pub struct ZMarginal {
-    pub mean:   f64,
-    pub sd:     f64,
+    pub mean: f64,
+    pub sd: f64,
     pub q0_025: f64,
-    pub q0_25:  f64,
-    pub q0_5:   f64,
-    pub q0_75:  f64,
+    pub q0_25: f64,
+    pub q0_5: f64,
+    pub q0_75: f64,
     pub q0_975: f64,
 }
 
@@ -124,11 +124,15 @@ pub struct ZMarginal {
 pub fn build_build_gaussian_marginal(mean: f64, sd: f64, n: usize) -> Marginal {
     let lo = mean - 4.0 * sd;
     let hi = mean + 4.0 * sd;
-    let x: Vec<f64> = (0..n).map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64).collect();
-    let y: Vec<f64> = x.iter().map(|&xi| {
-        let z = (xi - mean) / sd;
-        (-0.5 * z * z).exp()
-    }).collect();
+    let x: Vec<f64> = (0..n)
+        .map(|i| lo + (hi - lo) * i as f64 / (n - 1) as f64)
+        .collect();
+    let y: Vec<f64> = x
+        .iter()
+        .map(|&xi| {
+            let z = (xi - mean) / sd;
+            (-0.5 * z * z).exp()
+        })
+        .collect();
     Marginal::new(x, y)
 }
-

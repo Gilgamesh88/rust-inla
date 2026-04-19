@@ -140,13 +140,23 @@ impl InlaEngine {
 
         let mut mixed_fixed_mean = vec![0.0_f64; k];
         let mut mixed_fixed_mean_sq = vec![0.0_f64; k];
+        let mut next_x_warm = opt.mode_x.clone();
+        let mut next_beta_warm = opt.mode_beta.clone();
 
         for (pt_idx, pt) in ccd_grid.points.iter().enumerate() {
             let theta_k = &pt.theta;
             let weight = pt.weight;
 
-            let x_warm = vec![0.0_f64; n];
-            let mut beta_warm = vec![0.0_f64; k];
+            let x_warm = if next_x_warm.len() == n {
+                next_x_warm.clone()
+            } else {
+                vec![0.0_f64; n]
+            };
+            let mut beta_warm = if next_beta_warm.len() == k {
+                next_beta_warm.clone()
+            } else {
+                vec![0.0_f64; k]
+            };
 
             // Frequency Regime Log-Link Warm Start
             // Bypasses the Newton-Raphson hurdle when the target frequency is extremely low (e.g. freMTPL2freq ~ 0.05).
@@ -167,7 +177,7 @@ impl InlaEngine {
 
             let (fixed_k, mean_k, vars_k) = if k > 0 {
                 let (beta, x_hat, _, diag_aug_inv, _) = problem
-                    .find_mode_with_fixed_effects(model, theta_k, &x_warm, &beta_warm, 20, 1e-6)
+                    .find_mode_with_fixed_effects(model, theta_k, &x_warm, &beta_warm, 20, 1e-8)
                     .map_err(|err| InlaError::ConvergenceFailed {
                         reason: format!(
                             "CCD point {pt_idx} failed while solving fixed effects: {err}"
@@ -177,7 +187,7 @@ impl InlaEngine {
                 (beta, x_hat, vs)
             } else {
                 let (x_hat, _, diag_aug_inv) = problem
-                    .find_mode_with_inverse(model, theta_k, &x_warm, 20, 1e-6)
+                    .find_mode_with_inverse(model, theta_k, &x_warm, 20, 1e-8)
                     .map_err(|err| InlaError::ConvergenceFailed {
                         reason: format!(
                             "CCD point {pt_idx} failed while solving latent mode: {err}"
@@ -186,6 +196,9 @@ impl InlaEngine {
                 let vs: Vec<f64> = diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect();
                 (vec![], x_hat, vs)
             };
+
+            next_x_warm = mean_k.clone();
+            next_beta_warm = fixed_k.clone();
 
             for (j, fixed_value) in fixed_k.iter().enumerate().take(k) {
                 mixed_fixed_mean[j] += weight * *fixed_value;

@@ -11,12 +11,13 @@
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt::factor::LltRegularization;
 use faer::sparse::linalg::cholesky::simplicial::{
-    self, EliminationTreeRef, SimplicialLltRef,
-    SymbolicSimplicialCholesky,
+    self, EliminationTreeRef, SimplicialLltRef, SymbolicSimplicialCholesky,
 };
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{Conj, Par};
+use std::time::Instant;
 
+use crate::diagnostics::SolverDiagnostics;
 use crate::error::InlaError;
 use crate::graph::Graph;
 use crate::models::QFunc;
@@ -31,8 +32,8 @@ enum State {
 }
 
 pub struct FaerSolver {
-    state:       State,
-    n:           usize,
+    state: State,
+    n: usize,
     cached_hash: [u8; 32],
 
     /// Triplets de Q (triangular superior) — rellenos en build().
@@ -51,19 +52,21 @@ pub struct FaerSolver {
 
     /// log|Q| = 2·Σlog(L_ii), cacheado tras factorize().
     log_det: Option<f64>,
+    diagnostics: SolverDiagnostics,
 }
 
 impl FaerSolver {
     pub fn new() -> Self {
         Self {
-            state:       State::Fresh,
-            n:           0,
+            state: State::Fresh,
+            n: 0,
             cached_hash: [0u8; 32],
-            triplets:    Vec::new(),
-            q_upper:     None,
-            symbolic:    None,
-            l_values:    Vec::new(),
-            log_det:     None,
+            triplets: Vec::new(),
+            q_upper: None,
+            symbolic: None,
+            l_values: Vec::new(),
+            log_det: None,
+            diagnostics: SolverDiagnostics::default(),
         }
     }
 
@@ -75,58 +78,72 @@ impl FaerSolver {
     fn fill_triplets(&mut self, graph: &Graph, qfunc: &dyn QFunc, theta: &[f64]) {
         let n = graph.n();
         self.triplets.clear();
-        self.triplets.reserve(n + graph.iter_upper_triangle().count());
+        self.triplets
+            .reserve(n + graph.iter_upper_triangle().count());
 
         for i in 0..n {
             let mut val = qfunc.eval(i, i, theta);
-            if val == 0.0 { val = 1e-14; }
+            if val == 0.0 {
+                val = 1e-14;
+            }
             self.triplets.push(Triplet::new(i, i, val));
         }
         for (i, j) in graph.iter_upper_triangle() {
             let mut val = qfunc.eval(i, j, theta);
-            if val == 0.0 { val = 1e-14; }
+            if val == 0.0 {
+                val = 1e-14;
+            }
             self.triplets.push(Triplet::new(i, j, val));
         }
+    }
+
+    pub fn diagnostics(&self) -> &SolverDiagnostics {
+        &self.diagnostics
     }
 }
 
 impl Default for FaerSolver {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SparseSolver for FaerSolver {
-
     // ── reorder: estructura simbólica de L ───────────────────────────────────
 
     fn reorder(&mut self, graph: &mut Graph) {
-        if !self.needs_reorder(graph) { return; }
+        if !self.needs_reorder(graph) {
+            return;
+        }
 
-        self.n           = graph.n();
+        self.n = graph.n();
         self.cached_hash = *graph.hash();
-        self.q_upper     = None;
-        self.l_values    = Vec::new();
-        self.log_det     = None;
+        self.q_upper = None;
+        self.l_values = Vec::new();
+        self.log_det = None;
 
         let n = self.n;
 
         // Patrón de Q (triangular superior, valores = 1.0, no importan)
         let pattern: Vec<Triplet<SpIdx, SpIdx, f64>> = (0..n)
             .map(|i| Triplet::new(i, i, 1.0))
-            .chain(graph.iter_upper_triangle().map(|(i,j)| Triplet::new(i, j, 1.0)))
+            .chain(
+                graph
+                    .iter_upper_triangle()
+                    .map(|(i, j)| Triplet::new(i, j, 1.0)),
+            )
             .collect();
 
         let q_pat = SparseColMat::<SpIdx, f64>::try_new_from_triplets(n, n, &pattern)
             .expect("reorder: patrón inválido");
 
         // ── Paso 1: árbol de eliminación y conteo de columnas ────────────────
-        let scratch1 = simplicial::prefactorize_symbolic_cholesky_scratch::<SpIdx>(
-            n, q_pat.compute_nnz(),
-        );
-        let mut mem1 = MemBuffer::try_new(scratch1)
-            .expect("reorder: no hay memoria para scratch1");
+        let scratch1 =
+            simplicial::prefactorize_symbolic_cholesky_scratch::<SpIdx>(n, q_pat.compute_nnz());
+        let mut mem1 = MemBuffer::try_new(scratch1).expect("reorder: no hay memoria para scratch1");
         let stack1 = MemStack::new(&mut mem1);
 
-        let mut etree:      Vec<isize> = vec![0; n];
+        let mut etree: Vec<isize> = vec![0; n];
         let mut col_counts: Vec<SpIdx> = vec![0; n];
 
         simplicial::prefactorize_symbolic_cholesky(
@@ -138,8 +155,7 @@ impl SparseSolver for FaerSolver {
 
         // ── Paso 2: Cholesky simbólico ────────────────────────────────────────
         let scratch2 = simplicial::factorize_simplicial_symbolic_cholesky_scratch::<SpIdx>(n);
-        let mut mem2 = MemBuffer::try_new(scratch2)
-            .expect("reorder: no hay memoria para scratch2");
+        let mut mem2 = MemBuffer::try_new(scratch2).expect("reorder: no hay memoria para scratch2");
         let stack2 = MemStack::new(&mut mem2);
 
         let symbolic = simplicial::factorize_simplicial_symbolic_cholesky(
@@ -148,10 +164,11 @@ impl SparseSolver for FaerSolver {
             unsafe { EliminationTreeRef::from_inner(&etree) },
             &col_counts,
             stack2,
-        ).expect("reorder: fallo en Cholesky simbólico");
+        )
+        .expect("reorder: fallo en Cholesky simbólico");
 
         self.symbolic = Some(symbolic);
-        self.state    = State::Reordered;
+        self.state = State::Reordered;
     }
 
     // ── build: evalúa QFunc y construye Q upper ───────────────────────────────
@@ -166,25 +183,23 @@ impl SparseSolver for FaerSolver {
 
         self.fill_triplets(graph, qfunc, theta);
 
-        let mat = SparseColMat::<SpIdx, f64>::try_new_from_triplets(
-            self.n, self.n, &self.triplets,
-        ).expect("build: triplets inválidos");
+        let mat = SparseColMat::<SpIdx, f64>::try_new_from_triplets(self.n, self.n, &self.triplets)
+            .expect("build: triplets inválidos");
 
         self.q_upper = Some(mat);
         self.l_values.clear();
         self.log_det = None;
-        self.state   = State::Built;
+        self.state = State::Built;
     }
 
     // ── factorize: Cholesky numérico + log-det ────────────────────────────────
 
     fn factorize(&mut self) -> Result<(), InlaError> {
         debug_assert_eq!(self.state, State::Built);
+        let factorize_started = Instant::now();
 
-        let symbolic = self.symbolic.as_ref()
-            .expect("llamar reorder() primero");
-        let q_upper = self.q_upper.as_ref()
-            .expect("llamar build() primero");
+        let symbolic = self.symbolic.as_ref().expect("llamar reorder() primero");
+        let q_upper = self.q_upper.as_ref().expect("llamar build() primero");
 
         let n = self.n;
 
@@ -194,18 +209,17 @@ impl SparseSolver for FaerSolver {
 
         // Scratch para la factorización numérica
         let scratch = simplicial::factorize_simplicial_numeric_llt_scratch::<SpIdx, f64>(n);
-        let mut mem = MemBuffer::try_new(scratch)
-            .map_err(|_| InlaError::NotPositiveDefinite)?;
+        let mut mem = MemBuffer::try_new(scratch).map_err(|_| InlaError::NotPositiveDefinite)?;
         let stack = MemStack::new(&mut mem);
 
-        match simplicial::factorize_simplicial_numeric_llt::<SpIdx, f64>(
+        let factorize_result = match simplicial::factorize_simplicial_numeric_llt::<SpIdx, f64>(
             &mut self.l_values,
             q_upper.as_ref(),
             LltRegularization::default(),
             symbolic,
             stack,
         ) {
-            Ok(_)                  => {}
+            Ok(_) => Ok(()),
             Err(_) => {
                 use std::io::Write;
                 if let Ok(mut f) = std::fs::File::create("last_failed_matrix.txt") {
@@ -214,9 +228,12 @@ impl SparseSolver for FaerSolver {
                         writeln!(f, "{} {} {}", t.row, t.col, t.val).ok();
                     }
                 }
-                return Err(InlaError::NotPositiveDefinite);
+                Err(InlaError::NotPositiveDefinite)
             }
-        }
+        };
+        self.diagnostics.factorization_count += 1;
+        self.diagnostics.factorization_time += factorize_started.elapsed();
+        factorize_result?;
 
         // ── log|Q| = 2·Σlog(L[j,j]) ──────────────────────────────────────────
         // En CSC lower triangular: el primer elemento de la columna j
@@ -231,7 +248,7 @@ impl SparseSolver for FaerSolver {
             * 2.0;
 
         self.log_det = Some(log_det);
-        self.state   = State::Factorized;
+        self.state = State::Factorized;
         Ok(())
     }
 
@@ -252,8 +269,7 @@ impl SparseSolver for FaerSolver {
 
         // Scratch para el solve
         let scratch = symbolic.solve_in_place_scratch::<f64>(1);
-        let mut mem = MemBuffer::try_new(scratch)
-            .expect("solve_llt: no hay memoria");
+        let mut mem = MemBuffer::try_new(scratch).expect("solve_llt: no hay memoria");
         let stack = MemStack::new(&mut mem);
 
         // Convertir rhs a Mat<f64> (copia in/out — correcto para n típico de INLA)
@@ -271,68 +287,85 @@ impl SparseSolver for FaerSolver {
 
     fn selected_inverse(&mut self) -> Result<SpMat, InlaError> {
         debug_assert_eq!(self.state, State::Factorized);
+        let inverse_started = Instant::now();
 
-        let symbolic  = self.symbolic.as_ref().expect("reorder primero");
-        let n         = self.n;
-        let col_ptr   = symbolic.col_ptr();
-        let row_idx   = symbolic.row_idx();
-        let nnz_l     = self.l_values.len();
+        let symbolic = self.symbolic.as_ref().expect("reorder primero");
+        let n = self.n;
+        let col_ptr = symbolic.col_ptr();
+        let row_idx = symbolic.row_idx();
+        let nnz_l = self.l_values.len();
         let mut q_inv = vec![0.0_f64; nnz_l];
 
         for j in (0..n).rev() {
             let col_start = col_ptr[j];
-            let col_end   = col_ptr[j + 1];
-            let l_jj      = self.l_values[col_start];
-
-            let mut s = 1.0 / (l_jj * l_jj);
-            for idx in (col_start + 1)..col_end {
-                s -= self.l_values[idx] * q_inv[idx];
-            }
-            q_inv[col_start] = s;
+            let col_end = col_ptr[j + 1];
+            let l_jj = self.l_values[col_start];
 
             for idx_i in (col_start + 1)..col_end {
                 let i = row_idx[idx_i];
                 let mut t = 0.0_f64;
-                for idx_k in idx_i..col_end {
-                    let k    = row_idx[idx_k];
+                for idx_k in (col_start + 1)..col_end {
+                    let k = row_idx[idx_k];
                     let l_kj = self.l_values[idx_k];
-                    if let Some(pos) = find_in_col(row_idx, col_ptr, i, k) {
+                    if let Some(pos) = find_in_lower_symmetric(row_idx, col_ptr, i, k) {
                         t += l_kj * q_inv[pos];
                     }
                 }
                 q_inv[idx_i] = -t / l_jj;
             }
+
+            let mut s = 1.0 / (l_jj * l_jj);
+            for (&l_val, &q_inv_val) in self.l_values[(col_start + 1)..col_end]
+                .iter()
+                .zip(q_inv[(col_start + 1)..col_end].iter())
+            {
+                s -= (l_val / l_jj) * q_inv_val;
+            }
+            q_inv[col_start] = s;
         }
 
         let mut triplets = Vec::with_capacity(nnz_l * 2);
         for j in 0..n {
             let col_start = col_ptr[j];
-            let col_end   = col_ptr[j + 1];
+            let col_end = col_ptr[j + 1];
             for idx in col_start..col_end {
                 let i = row_idx[idx];
                 let v = q_inv[idx];
                 triplets.push(Triplet::new(i, j, v));
-                if i != j { triplets.push(Triplet::new(j, i, v)); }
+                if i != j {
+                    triplets.push(Triplet::new(j, i, v));
+                }
             }
         }
 
-        SparseColMat::<SpIdx, f64>::try_new_from_triplets(n, n, &triplets)
-            .map_err(|_| InlaError::SolverNotInitialized)
+        let inverse_result = SparseColMat::<SpIdx, f64>::try_new_from_triplets(n, n, &triplets)
+            .map_err(|_| InlaError::SolverNotInitialized);
+        self.diagnostics.selected_inverse_count += 1;
+        self.diagnostics.selected_inverse_time += inverse_started.elapsed();
+        inverse_result
     }
 }
 
-fn find_in_col(
-    row_idx: &[usize],
-    col_ptr: &[usize],
-    col:     usize,
-    row:     usize,
-) -> Option<usize> {
+fn find_in_col(row_idx: &[usize], col_ptr: &[usize], col: usize, row: usize) -> Option<usize> {
     let start = col_ptr[col];
-    let end   = col_ptr[col + 1];
+    let end = col_ptr[col + 1];
     row_idx[start..end]
         .binary_search(&row)
         .ok()
         .map(|pos| start + pos)
+}
+
+fn find_in_lower_symmetric(
+    row_idx: &[usize],
+    col_ptr: &[usize],
+    i: usize,
+    j: usize,
+) -> Option<usize> {
+    if i >= j {
+        find_in_col(row_idx, col_ptr, j, i)
+    } else {
+        find_in_col(row_idx, col_ptr, i, j)
+    }
 }
 
 /// Busca el indice de la fila `row` dentro de la columna `col` de L.
@@ -390,7 +423,7 @@ mod tests {
     #[test]
     fn full_pipeline_iid_log_det() {
         // Q = tau * I  →  log|Q| = n * log(tau)
-        let n   = 4;
+        let n = 4;
         let tau = 3.0_f64;
         let mut solver = FaerSolver::new();
         let mut g = Graph::iid(n);
@@ -476,21 +509,42 @@ mod tests {
         let raw = std::fs::read_to_string("tests/fixtures/cholesky_rw1.json").unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
-        let n       = v["n"][0].as_u64().unwrap() as usize;
-        let rows: Vec<usize> = v["rows"].as_array().unwrap().iter()
-            .map(|x| x.as_u64().unwrap() as usize).collect();
-        let cols: Vec<usize> = v["cols"].as_array().unwrap().iter()
-            .map(|x| x.as_u64().unwrap() as usize).collect();
-        let vals: Vec<f64>   = v["vals"].as_array().unwrap().iter()
-            .map(|x| x.as_f64().unwrap()).collect();
-        let rhs_ref: Vec<f64> = v["rhs"].as_array().unwrap().iter()
-            .map(|x| x.as_f64().unwrap()).collect();
-        let sol_ref: Vec<f64> = v["sol"].as_array().unwrap().iter()
-            .map(|x| x.as_f64().unwrap()).collect();
+        let n = v["n"][0].as_u64().unwrap() as usize;
+        let rows: Vec<usize> = v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_u64().unwrap() as usize)
+            .collect();
+        let cols: Vec<usize> = v["cols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_u64().unwrap() as usize)
+            .collect();
+        let vals: Vec<f64> = v["vals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        let rhs_ref: Vec<f64> = v["rhs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        let sol_ref: Vec<f64> = v["sol"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
         let log_det_ref = v["log_det"][0].as_f64().unwrap();
 
         // Construir Q desde triplets del fixture (simetría: solo upper tri)
-        let triplets: Vec<Triplet<usize, usize, f64>> = rows.iter()
+        let triplets: Vec<Triplet<usize, usize, f64>> = rows
+            .iter()
             .zip(cols.iter())
             .zip(vals.iter())
             .filter(|((&r, &c), _)| r <= c)
@@ -500,12 +554,18 @@ mod tests {
         let q = SparseColMat::<usize, f64>::try_new_from_triplets(n, n, &triplets).unwrap();
 
         // Factorizar directamente con el solver low-level
-        let mut etree      = vec![0isize; n];
+        let mut etree = vec![0isize; n];
         let mut col_counts = vec![0usize; n];
         {
-            let sc = simplicial::prefactorize_symbolic_cholesky_scratch::<usize>(n, q.compute_nnz());
+            let sc =
+                simplicial::prefactorize_symbolic_cholesky_scratch::<usize>(n, q.compute_nnz());
             let mut mem = MemBuffer::try_new(sc).unwrap();
-            simplicial::prefactorize_symbolic_cholesky(&mut etree, &mut col_counts, q.symbolic(), MemStack::new(&mut mem));
+            simplicial::prefactorize_symbolic_cholesky(
+                &mut etree,
+                &mut col_counts,
+                q.symbolic(),
+                MemStack::new(&mut mem),
+            );
         }
         let symbolic = {
             let sc = simplicial::factorize_simplicial_symbolic_cholesky_scratch::<usize>(n);
@@ -515,13 +575,21 @@ mod tests {
                 unsafe { EliminationTreeRef::from_inner(&etree) },
                 &col_counts,
                 MemStack::new(&mut mem),
-            ).unwrap()
+            )
+            .unwrap()
         };
         let mut l_values = vec![0.0f64; symbolic.len_val()];
         {
             let sc = simplicial::factorize_simplicial_numeric_llt_scratch::<usize, f64>(n);
             let mut mem = MemBuffer::try_new(sc).unwrap();
-            simplicial::factorize_simplicial_numeric_llt(&mut l_values, q.as_ref(), LltRegularization::default(), &symbolic, MemStack::new(&mut mem)).unwrap();
+            simplicial::factorize_simplicial_numeric_llt(
+                &mut l_values,
+                q.as_ref(),
+                LltRegularization::default(),
+                &symbolic,
+                MemStack::new(&mut mem),
+            )
+            .unwrap();
         }
 
         // Verificar log-det
@@ -535,8 +603,15 @@ mod tests {
         let mut mem = MemBuffer::try_new(sc).unwrap();
         let llt_ref_obj = SimplicialLltRef::<usize, f64>::new(&symbolic, &l_values);
         let mut rhs_mat = faer::Mat::<f64>::from_fn(n, 1, |i, _| sol[i]);
-        llt_ref_obj.solve_in_place_with_conj(Conj::No, rhs_mat.as_mut(), Par::Seq, MemStack::new(&mut mem));
-        for i in 0..n { sol[i] = rhs_mat[(i, 0)]; }
+        llt_ref_obj.solve_in_place_with_conj(
+            Conj::No,
+            rhs_mat.as_mut(),
+            Par::Seq,
+            MemStack::new(&mut mem),
+        );
+        for i in 0..n {
+            sol[i] = rhs_mat[(i, 0)];
+        }
 
         for (s, r) in sol.iter().zip(sol_ref.iter()) {
             assert_abs_diff_eq!(s, r, epsilon = 1e-8);
@@ -545,7 +620,7 @@ mod tests {
     #[test]
     fn selected_inverse_iid_diagonal() {
         let tau = 3.0_f64;
-        let n   = 4;
+        let n = 4;
         let mut solver = FaerSolver::new();
         let mut g = Graph::iid(n);
         let model = IidModel::new(n);
@@ -572,5 +647,33 @@ mod tests {
             let diag = q_inv.val_of_col(i)[0];
             assert!(diag > 0.0, "varianza[{i}] fue {diag}");
         }
+    }
+
+    #[test]
+    fn selected_inverse_matches_dense_inverse_for_coupled_ar1_2x2() {
+        let mut solver = FaerSolver::new();
+        let mut g = Graph::ar1(2);
+        let model = Ar1Model::new(2);
+        let theta = [2.0_f64.ln(), 1.0_f64];
+
+        solver.reorder(&mut g);
+        solver.build(&g, &model, &theta);
+        solver.factorize().unwrap();
+
+        let q_inv = solver.selected_inverse().unwrap();
+
+        let q00 = model.eval(0, 0, &theta);
+        let q01 = model.eval(0, 1, &theta);
+        let q11 = model.eval(1, 1, &theta);
+        let det = q00 * q11 - q01 * q01;
+        let dense_inv = [q11 / det, -q01 / det, -q01 / det, q00 / det];
+
+        let qinv00 = q_inv.get(0, 0).copied().unwrap();
+        let qinv01 = q_inv.get(0, 1).copied().unwrap();
+        let qinv11 = q_inv.get(1, 1).copied().unwrap();
+
+        assert_abs_diff_eq!(qinv00, dense_inv[0], epsilon = 1e-8);
+        assert_abs_diff_eq!(qinv01, dense_inv[1], epsilon = 1e-8);
+        assert_abs_diff_eq!(qinv11, dense_inv[3], epsilon = 1e-8);
     }
 }
