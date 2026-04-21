@@ -84,6 +84,16 @@ pub trait LogLikelihood: Send + Sync {
             .map(|&th| loggamma_on_log_scale(th, 1.0, 5e-5))
             .sum()
     }
+
+    /// Returns the observation precision when the likelihood is exactly
+    /// Gaussian on the identity-link predictor scale.
+    ///
+    /// The optimizer uses this to evaluate the Gaussian marginal objective in
+    /// an integrated form that is numerically more stable than recombining
+    /// the mode log-likelihood and latent quadratic penalty separately.
+    fn gaussian_observation_precision(&self, _theta: &[f64]) -> Option<f64> {
+        None
+    }
 }
 
 //  Gaussiana
@@ -140,6 +150,10 @@ impl LogLikelihood for GaussianLikelihood {
 
     fn log_prior(&self, theta: &[f64]) -> f64 {
         loggamma_on_log_scale(theta[0], 1.0, 5e-5)
+    }
+
+    fn gaussian_observation_precision(&self, theta: &[f64]) -> Option<f64> {
+        Some(theta[0].exp())
     }
 }
 

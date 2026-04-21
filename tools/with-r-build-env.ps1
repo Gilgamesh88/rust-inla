@@ -2,6 +2,7 @@
 param(
     [string]$RHome,
     [string]$CacheRoot,
+    [switch]$NoInstructions,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Command
 )
@@ -175,6 +176,10 @@ if ($Command -and $Command.Length -gt 0) {
     exit $LASTEXITCODE
 }
 
+if ($NoInstructions) {
+    return
+}
+
 Write-Host ''
 Write-Host 'In the same PowerShell session, run:'
 Write-Host '  .\tools\with-r-build-env.ps1'
@@ -183,3 +188,6 @@ Write-Host '  cargo clippy --workspace -- -D warnings'
 Write-Host ''
 Write-Host 'For simple commands without a second `--`, one-shot forwarding also works:'
 Write-Host '  .\tools\with-r-build-env.ps1 cargo test --workspace'
+Write-Host ''
+Write-Host 'For the full Windows workspace validation wrapper, run:'
+Write-Host '  .\tools\check-rust-workspace-win.ps1'

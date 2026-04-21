@@ -1,8 +1,8 @@
 # External Examples for the Active Benchmark Models
 
-Date: 2026-04-18
+Date: 2026-04-19
 
-This note collects public INLA examples and book references that are close to the five active benchmark model combinations in `rustyINLA`.
+This note collects public INLA examples and book references that are close to the active benchmark and reference model combinations in `rustyINLA`.
 
 The goal is not exact dataset replication. It is to anchor each benchmark case to external references for:
 
@@ -19,6 +19,7 @@ Current active benchmark status in `rustyINLA`:
 | `poisson + iid + offset` | PASS |
 | `poisson + iid + iid + offset` | PASS |
 | `gamma + rw1` | PASS |
+| `gaussian + rw2` | implemented with public external reference coverage |
 | `poisson + ar1 + offset` | PASS |
 | `zeroinflatedpoisson1 + iid + offset` | PASS |
 
@@ -110,6 +111,31 @@ What to compare with our results:
 - latent means should vary smoothly across the ordered index
 - uncertainty should be finite and locally smooth, not explode across the whole field
 
+## 3.5 Gaussian + RW2
+
+Closest public references:
+
+- `Bayesian inference with INLA`, Chapter 9:
+  - <https://becarioprecario.bitbucket.io/inla-gitbook/ch-smoothing.html>
+  - The smoothing chapter fits the public LIDAR dataset with
+    `logratio ~ -1 + f(range, model = "rw2", constr = FALSE)`.
+- `SemiPar` package:
+  - <https://cran.r-project.org/package=SemiPar>
+  - Provides the public `lidar` dataset used in the chapter.
+
+Why this matches our case:
+
+- same Gaussian likelihood
+- same `rw2` latent smoother
+- same no-intercept specification and `constr = FALSE` setting
+
+What to compare with our results:
+
+- two hyperparameters overall: Gaussian observation precision and RW2 precision
+- fitted means should trace the smooth nonlinear LIDAR response
+- latent summaries should look smoother than `rw1`, with curvature penalized instead of first differences
+- random-effect summaries can be compared positionally when row labels differ between `rustyINLA` and `R-INLA`
+
 ## 4. Poisson + AR1 + Offset
 
 Closest public references:
@@ -195,6 +221,8 @@ For each active benchmark model, the most useful comparison questions are:
   - <https://becarioprecario.bitbucket.io/inla-gitbook/ch-temporal.html>
 - `Bayesian inference with INLA`, Chapter 9:
   - <https://becarioprecario.bitbucket.io/inla-gitbook/ch-smoothing.html>
+- `SemiPar` package:
+  - <https://cran.r-project.org/package=SemiPar>
 - Highstat two-volume INLA guide:
   - <https://www.highstat.com/index.php/books2?catid=18&id=25&view=article>
 - inlabru ZIP/ZAP vignette:

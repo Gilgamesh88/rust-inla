@@ -232,8 +232,8 @@ impl InlaEngine {
         // SUM-TO-ZERO identifiability adjustment for intrinsic latent fields.
         //
         // INLA devel defaults differ by latent model: intrinsic models like rw1
-        // use a sum-to-zero constraint by default, while proper models like iid
-        // and ar1 do not. Applying this projection to proper models shifts the
+        // and rw2 use constraints by default, while proper models like iid and
+        // ar1 do not. Applying this projection to proper models shifts the
         // latent mean into the intercept and creates an artificial intercept gap.
         //
         // This is still a coarse whole-field switch for compound models. When we

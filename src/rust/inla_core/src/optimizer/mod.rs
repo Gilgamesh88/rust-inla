@@ -120,6 +120,55 @@ fn build_linear_predictor(
     Ok(eta)
 }
 
+fn compensated_sum<I>(iter: I) -> f64
+where
+    I: IntoIterator<Item = f64>,
+{
+    let mut sum = 0.0_f64;
+    let mut c = 0.0_f64;
+    for x in iter {
+        let y = x - c;
+        let t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+    sum
+}
+
+fn gaussian_integrated_data_term(
+    model: &InlaModel<'_>,
+    theta_lik: &[f64],
+    eta_with_offset: &[f64],
+) -> Option<f64> {
+    let tau_obs = model.likelihood.gaussian_observation_precision(theta_lik)?;
+    let log_norm = 0.5 * ((tau_obs).ln() - std::f64::consts::TAU.ln());
+    let n_obs = model.y.iter().filter(|y_i| !y_i.is_nan()).count();
+    let centered_response_ss = compensated_sum((0..model.y.len()).filter_map(|i| {
+        let y_i = model.y[i];
+        if y_i.is_nan() {
+            return None;
+        }
+        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+        let centered_response = y_i - offset_i;
+        Some(centered_response * centered_response)
+    }));
+    let rhs_mode_quad = compensated_sum((0..model.y.len()).filter_map(|i| {
+        let y_i = model.y[i];
+        if y_i.is_nan() {
+            return None;
+        }
+        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+        let centered_response = y_i - offset_i;
+        let centered_mode = eta_with_offset[i] - offset_i;
+        Some(centered_response * centered_mode)
+    }));
+
+    Some(
+        (n_obs as f64) * log_norm - 0.5 * tau_obs * centered_response_ss
+            + 0.5 * tau_obs * rhs_mode_quad,
+    )
+}
+
 pub(crate) fn laplace_eval(
     problem: &mut Problem,
     model: &InlaModel<'_>,
@@ -159,7 +208,7 @@ pub(crate) fn laplace_eval(
     let log_det_q = if model.qfunc.is_proper() {
         problem.eval(model.qfunc, theta_model)?
     } else {
-        0.0_f64
+        model.qfunc.log_det_term(theta_model)
     };
 
     let n = model.y.len();
@@ -187,7 +236,11 @@ pub(crate) fn laplace_eval(
     let final_q_form = latent_q_form + fixed_q_form;
 
     let log_mlik =
-        0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form + log_prior;
+        if let Some(data_term) = gaussian_integrated_data_term(model, theta_lik, &eta_for_lik) {
+            0.5 * (final_log_det_q - final_log_det_aug) + data_term + log_prior
+        } else {
+            0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form + log_prior
+        };
 
     let decomposition = LaplaceDecomposition {
         sum_loglik: sum_logll,
@@ -648,11 +701,64 @@ pub fn optimize(
 
 #[cfg(test)]
 mod tests {
-    use super::build_linear_predictor;
+    use super::{build_linear_predictor, laplace_eval, LaplaceEvalConfig};
     use crate::inference::InlaModel;
-    use crate::likelihood::PoissonLikelihood;
-    use crate::models::IidModel;
+    use crate::likelihood::{GaussianLikelihood, LogLikelihood, PoissonLikelihood};
+    use crate::models::{IidModel, QFunc};
+    use crate::problem::{Problem, PRIOR_PREC_BETA};
     use approx::assert_abs_diff_eq;
+
+    fn dense_cholesky_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> (Vec<f64>, f64) {
+        let mut log_det = 0.0_f64;
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[i * n + j];
+                for k in 0..j {
+                    sum -= a[i * n + k] * a[j * n + k];
+                }
+                if i == j {
+                    assert!(sum > 1e-12, "dense test matrix must remain SPD");
+                    let l_ii = sum.sqrt();
+                    a[i * n + j] = l_ii;
+                    log_det += 2.0 * l_ii.ln();
+                } else {
+                    a[i * n + j] = sum / a[j * n + j];
+                }
+            }
+        }
+
+        for i in 0..n {
+            let mut sum = b[i];
+            for k in 0..i {
+                sum -= a[i * n + k] * b[k];
+            }
+            b[i] = sum / a[i * n + i];
+        }
+        for i in (0..n).rev() {
+            let mut sum = b[i];
+            for k in (i + 1)..n {
+                sum -= a[k * n + i] * b[k];
+            }
+            b[i] = sum / a[i * n + i];
+        }
+
+        (b, log_det)
+    }
+
+    fn dense_q_matrix(qfunc: &dyn QFunc, theta_model: &[f64], n: usize) -> Vec<f64> {
+        let mut q = vec![0.0_f64; n * n];
+        for i in 0..n {
+            q[i * n + i] = qfunc.eval(i, i, theta_model);
+            for j in (i + 1)..n {
+                if qfunc.graph().are_neighbors(i, j) {
+                    let val = qfunc.eval(i, j, theta_model);
+                    q[i * n + j] = val;
+                    q[j * n + i] = val;
+                }
+            }
+        }
+        q
+    }
 
     #[test]
     fn linear_predictor_includes_fixed_random_and_offset_terms() {
@@ -691,5 +797,96 @@ mod tests {
         assert_abs_diff_eq!(eta[0], 2.6, epsilon = 1e-12);
         assert_abs_diff_eq!(eta[1], 1.95, epsilon = 1e-12);
         assert_abs_diff_eq!(eta[2], 2.8, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn gaussian_laplace_eval_matches_dense_integrated_marginal_with_fixed_effects() {
+        let y = vec![1.2, f64::NAN, -0.4, 0.9];
+        let offset = vec![0.1, -0.2, 0.05, -0.1];
+        let fixed_matrix = vec![1.0, 1.0, 1.0, 1.0];
+        let a_i = vec![0, 1, 2, 3];
+        let a_j = vec![0, 1, 0, 1];
+        let a_x = vec![1.0, 1.0, 1.0, 1.0];
+        let theta = vec![0.4, 1.1];
+
+        let qfunc = IidModel::new(2);
+        let likelihood = GaussianLikelihood;
+        let model = InlaModel {
+            qfunc: &qfunc,
+            likelihood: &likelihood,
+            y: &y,
+            theta_init: theta.clone(),
+            latent_init: vec![],
+            fixed_init: vec![],
+            fixed_matrix: Some(&fixed_matrix),
+            n_fixed: 1,
+            n_latent: 2,
+            a_i: Some(&a_i),
+            a_j: Some(&a_j),
+            a_x: Some(&a_x),
+            offset: Some(&offset),
+            extr_constr: None,
+            n_constr: 0,
+        };
+
+        let mut problem = Problem::new(&model);
+        let eval = laplace_eval(
+            &mut problem,
+            &model,
+            &theta,
+            &[0.0; 2],
+            &[0.0; 1],
+            LaplaceEvalConfig {
+                phase: crate::diagnostics::LaplacePhase::Optimize,
+                n_irls: 10,
+                tol_irls: 1e-10,
+            },
+        )
+        .unwrap();
+
+        let tau_obs = theta[1].exp();
+        let centered_y = [y[0] - offset[0], y[2] - offset[2], y[3] - offset[3]];
+
+        let q_prior = dense_q_matrix(&qfunc, &theta[..1], 2);
+        let log_det_prior = 2.0 * theta[0] + PRIOR_PREC_BETA.ln();
+
+        let mut q_post = vec![
+            q_prior[0],
+            q_prior[1],
+            0.0,
+            q_prior[2],
+            q_prior[3],
+            0.0,
+            0.0,
+            0.0,
+            PRIOR_PREC_BETA,
+        ];
+        let design_rows = [[1.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]];
+        let mut rhs = vec![0.0_f64; 3];
+        for (row, &centered) in design_rows.iter().zip(centered_y.iter()) {
+            for i in 0..3 {
+                rhs[i] += tau_obs * row[i] * centered;
+                for j in 0..3 {
+                    q_post[i * 3 + j] += tau_obs * row[i] * row[j];
+                }
+            }
+        }
+
+        let (mode_joint, log_det_post) = dense_cholesky_solve(q_post, rhs.clone(), 3);
+        let b_mode_quad: f64 = rhs
+            .iter()
+            .zip(mode_joint.iter())
+            .map(|(b_i, z_i)| b_i * z_i)
+            .sum();
+        let n_obs = centered_y.len() as f64;
+        let response_ss: f64 = centered_y.iter().map(|value| value * value).sum();
+        let expected_log_mlik = 0.5 * (log_det_prior - log_det_post)
+            + 0.5 * n_obs * (theta[1] - std::f64::consts::TAU.ln())
+            - 0.5 * tau_obs * response_ss
+            + 0.5 * b_mode_quad
+            + qfunc.log_prior(&theta[..1])
+            + likelihood.log_prior(&theta[1..]);
+
+        assert_abs_diff_eq!(-eval.neg_log_mlik, expected_log_mlik, epsilon = 1e-6);
     }
 }

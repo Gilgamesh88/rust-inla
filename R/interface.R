@@ -103,11 +103,32 @@ build_backend_spec <- function(
 
             if (is.factor(cov_data)) {
                 c_idx <- as.numeric(cov_data)
+                level_values <- levels(cov_data)
             } else {
-                c_idx <- as.numeric(as.factor(cov_data))
+                cov_factor <- as.factor(cov_data)
+                c_idx <- as.numeric(cov_factor)
+                level_values <- type.convert(levels(cov_factor), as.is = TRUE)
             }
 
             n_latent_cov <- max(c_idx, na.rm=TRUE)
+            if (identical(m_type, "rw2") && n_latent_cov < 3L) {
+                stop("rw2 requires at least 3 unique levels.", call. = FALSE)
+            }
+            structure_values <- NULL
+            if (identical(m_type, "rw2")) {
+                structure_values <- suppressWarnings(as.numeric(level_values))
+                if (length(structure_values) != n_latent_cov ||
+                    anyNA(structure_values) ||
+                    !all(is.finite(structure_values))) {
+                    stop(
+                        "rw2 requires numeric covariate values or factor levels that convert cleanly to numeric.",
+                        call. = FALSE
+                    )
+                }
+                if (any(diff(structure_values) <= 0)) {
+                    stop("rw2 requires strictly increasing covariate values.", call. = FALSE)
+                }
+            }
 
             # Map into Trips (N_A rows)
             # R arrays are 1-based. A_i, A_j must be 0-based for Rust!
@@ -120,10 +141,24 @@ build_backend_spec <- function(
                 covariate_name = c_name,
                 model = m_type,
                 n_levels = as.integer(n_latent_cov),
-                start = as.integer(n_latent_total)
+                start = as.integer(n_latent_total),
+                level_values = level_values,
+                structure_values = structure_values
             )
             if (constr) {
-                C_rows[[length(C_rows) + 1]] <- list(start = n_latent_total, len = n_latent_cov)
+                C_rows[[length(C_rows) + 1]] <- list(
+                    start = n_latent_total,
+                    len = n_latent_cov,
+                    weights = rep(1.0, n_latent_cov)
+                )
+                if (identical(m_type, "rw2")) {
+                    # RW2 has a two-dimensional null space: constant and linear trends.
+                    C_rows[[length(C_rows) + 1]] <- list(
+                        start = n_latent_total,
+                        len = n_latent_cov,
+                        weights = structure_values - mean(structure_values)
+                    )
+                }
             }
 
             n_latent_total <- n_latent_total + n_latent_cov
@@ -137,7 +172,7 @@ build_backend_spec <- function(
         for (k in seq_along(C_rows)) {
             start <- C_rows[[k]]$start + 1
             len <- C_rows[[k]]$len
-            C_matrix[k, start:(start + len - 1)] <- 1.0
+            C_matrix[k, start:(start + len - 1)] <- C_rows[[k]]$weights
         }
         C_matrix_flat <- as.numeric(t(C_matrix)) # Flatten row-major
     }
@@ -437,19 +472,25 @@ rusty_inla <- function(
             c_name <- block$covariate_name
             nl <- as.integer(block$n_levels)
             end_idx <- start_idx + nl - 1
+            level_values <- if (!is.null(block$level_values) && length(block$level_values) == nl) {
+                block$level_values
+            } else {
+                seq_len(nl)
+            }
 
             rnd_mean <- res$marg_means[start_idx:end_idx]
             rnd_var <- res$marg_vars[start_idx:end_idx]
             rnd_sd <- sqrt(rnd_var)
 
             rnd_df <- data.frame(
-                ID = 1:nl,
+                ID = level_values,
                 mean = rnd_mean,
                 sd = rnd_sd,
                 `0.025quant` = rnd_mean - 1.96 * rnd_sd,
                 `0.975quant` = rnd_mean + 1.96 * rnd_sd,
                 check.names = FALSE
             )
+            rownames(rnd_df) <- as.character(level_values)
             fit$summary.random[[c_name]] <- rnd_df
             start_idx <- end_idx + 1
         }

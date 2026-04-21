@@ -418,26 +418,37 @@ impl Problem {
 
                 clamp_curvature(&mut curv_data);
 
-                let (grad_latent, atwa) = if let (Some(a_single_j), Some(a_single_x)) =
+                let (b_x, atwa) = if let (Some(a_single_j), Some(a_single_x)) =
                     (&self.a_single_j, &self.a_single_x)
                 {
-                    let mut grad_latent = vec![0.0_f64; n_latent];
+                    let mut b_x = vec![0.0_f64; n_latent];
                     let mut atwa_diag = vec![0.0_f64; n_latent];
                     for i in 0..n_data {
-                        grad_latent[a_single_j[i]] += a_single_x[i] * grad_data[i];
-                        atwa_diag[a_single_j[i]] += a_single_x[i] * curv_data[i] * a_single_x[i];
+                        let k = a_single_j[i];
+                        let ax = a_single_x[i];
+                        let grad = grad_data[i];
+                        let curv = curv_data[i];
+                        atwa_diag[k] += ax * curv * ax;
+
+                        let z_i = eta_data[i] + grad / curv;
+                        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+                        let wz = curv * (z_i - offset_i);
+                        b_x[k] += ax * wz;
                     }
-                    (grad_latent, AtwaStorage::Diagonal(atwa_diag))
+                    (b_x, AtwaStorage::Diagonal(atwa_diag))
                 } else {
-                    let mut grad_latent = vec![0.0_f64; n_latent];
+                    let mut b_x = vec![0.0_f64; n_latent];
                     let mut atwa_diag = vec![0.0_f64; n_latent];
                     let mut atwa_offdiag = HashMap::new();
                     for i in 0..n_data {
                         let grad = grad_data[i];
                         let w = curv_data[i];
                         let row = &self.a_rows[i];
+                        let z_i = eta_data[i] + grad / w;
+                        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+                        let wz = w * (z_i - offset_i);
                         for (idx, &(j1, ax1)) in row.iter().enumerate() {
-                            grad_latent[j1] += ax1 * grad;
+                            b_x[j1] += ax1 * wz;
                             atwa_diag[j1] += ax1 * w * ax1;
                             for &(j2, ax2) in &row[(idx + 1)..] {
                                 let (min_j, max_j) = if j1 < j2 { (j1, j2) } else { (j2, j1) };
@@ -446,7 +457,7 @@ impl Problem {
                         }
                     }
                     (
-                        grad_latent,
+                        b_x,
                         AtwaStorage::Split {
                             diag: atwa_diag,
                             offdiag: atwa_offdiag,
@@ -454,25 +465,13 @@ impl Problem {
                     )
                 };
 
-                // z = x + Q_aug^-1 grad => Q_aug x + grad
-                let mut rhs = vec![0.0_f64; n_latent];
-                for k in 0..n_latent {
-                    rhs[k] = grad_latent[k]
-                        + model.qfunc.eval(k, k, theta_model) * x[k]
-                        + atwa.diag(k) * x[k];
-                    for &neighbor in self.graph.neighbors_of(k) {
-                        if neighbor != k {
-                            let q_ij = model.qfunc.eval(k, neighbor, theta_model);
-                            let (min_j, max_j) = if k < neighbor {
-                                (k, neighbor)
-                            } else {
-                                (neighbor, k)
-                            };
-                            let atwa_ij = atwa.offdiag(min_j, max_j);
-                            rhs[k] += (q_ij + atwa_ij) * x[neighbor];
-                        }
-                    }
-                }
+                // Solve the same IRLS normal equations used by the fixed-effects
+                // path, but without the Schur complement:
+                //   (Q + A'WA) x = A'W(z - offset)
+                // This keeps the latent-only solver consistent with the
+                // fixed-effects solver and avoids depending on the graph's
+                // upper-triangular neighbor storage when assembling the RHS.
+                let mut rhs = b_x;
                 self.diagnostics.likelihood_assembly_time += assembly_started.elapsed();
 
                 let aug = AugmentedQFunc {

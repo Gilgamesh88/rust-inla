@@ -11,6 +11,7 @@
 # Public-source cases:
 # - Poisson + iid + offset: spData::nc.sids
 # - Poisson + iid + iid + offset: Gelman/Hill frisk_with_noise.dat
+# - Gaussian + rw2: SemiPar::lidar
 # - Poisson + ar1: MixtureInf::earthquake
 #
 # Synthetic fallback cases:
@@ -184,6 +185,16 @@ compare_nested_metrics <- function(lhs_list, rhs_list, abs_tol) {
             term_diffs <- abs(lhs[shared_ids] - rhs[shared_ids])
             diffs <- c(diffs, term_diffs)
             labels <- c(labels, paste(term, shared_ids, sep = "::"))
+            next
+        }
+
+        if (length(lhs) == length(rhs) && length(lhs) > 0) {
+            term_diffs <- abs(unname(lhs) - unname(rhs))
+            diffs <- c(diffs, term_diffs)
+            labels <- c(
+                labels,
+                paste(term, seq_along(term_diffs), sep = "::")
+            )
         }
     }
 
@@ -455,6 +466,42 @@ prepare_gamma_rw1_case <- function(cache_dir) {
     )
 }
 
+prepare_rw2_lidar_case <- function(cache_dir) {
+    if (!ensure_package("SemiPar")) {
+        return(prepare_case_record(
+            id = "gaussian_rw2_lidar",
+            label = "LIDAR Gaussian + rw2 smoothing",
+            family = "gaussian",
+            formula = logratio ~ -1 + f(range, model = "rw2", constr = FALSE),
+            data_path = NA_character_,
+            source_type = "public_exact",
+            provenance = "SemiPar::lidar; INLA GitBook Chapter 9 smoothing",
+            available = FALSE,
+            reason = "Package 'SemiPar' is not installed."
+        ))
+    }
+
+    data("lidar", package = "SemiPar", envir = environment())
+    df <- get("lidar", envir = environment())
+    path <- file.path(cache_dir, "gaussian_rw2_lidar.rds")
+    saveRDS(df, path)
+
+    prepare_case_record(
+        id = "gaussian_rw2_lidar",
+        label = "LIDAR Gaussian + rw2 smoothing",
+        family = "gaussian",
+        formula = logratio ~ -1 + f(range, model = "rw2", constr = FALSE),
+        data_path = path,
+        source_type = "public_exact",
+        provenance = "SemiPar::lidar; INLA GitBook Chapter 9 smoothing",
+        tolerances = list(
+            random_mean_abs = 0.35,
+            random_sd_abs = 0.35,
+            fitted_mean_rel = 0.35
+        )
+    )
+}
+
 prepare_earthquake_case <- function(cache_dir) {
     if (!ensure_package("MixtureInf")) {
         return(prepare_case_record(
@@ -521,6 +568,7 @@ prepare_cases <- function(cache_dir) {
         prepare_nc_sids_case(cache_dir),
         prepare_nyc_stops_case(cache_dir),
         prepare_gamma_rw1_case(cache_dir),
+        prepare_rw2_lidar_case(cache_dir),
         prepare_earthquake_case(cache_dir),
         prepare_zip_iid_case(cache_dir)
     )

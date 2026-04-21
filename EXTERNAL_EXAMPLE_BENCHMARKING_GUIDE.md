@@ -28,6 +28,7 @@ The external examples serve a different purpose:
 | --- | --- | --- | --- |
 | `poisson + iid + offset` | NC SIDS / Poisson exposure examples | exact public structural match | `spData::nc.sids` |
 | `poisson + iid + iid + offset` | NYC stop-and-frisk multilevel count example | exact public structural match | `frisk_with_noise.dat` |
+| `gaussian + rw2` | LIDAR smoothing example from the INLA GitBook | exact public structural match | `SemiPar::lidar` |
 | `poisson + ar1` | Earthquake temporal count example | exact public structural match | `MixtureInf::earthquake` |
 | `gamma + rw1` | Gamma likelihood doc + RW1 smoothing chapters | public semantic match, not first-pass exact dataset match | synthetic exact-family reference |
 | `zeroinflatedpoisson1 + iid + offset` | official ZIP1 docs + inlabru ZIP example | public semantic match, not first-pass exact dataset match | synthetic exact-family reference |
@@ -40,6 +41,7 @@ These are the best examples for public reproducibility:
 
 - `poisson + iid + offset`
 - `poisson + iid + iid + offset`
+- `gaussian + rw2`
 - `poisson + ar1`
 
 Use these when we want to show:
@@ -156,9 +158,16 @@ That gives us a strong and honest validation story.
 
 The guide gets stronger when we add:
 
-- one exact public `rw2` example if `rw2` is implemented next
 - one exact public example for the next GLM-like family, if we add one
 - frozen output snapshots for the external suite, not just the scripts
+
+The `rw2` gap is now closed by the public LIDAR smoothing case in
+`SemiPar::lidar`, which mirrors the GitBook `rw2` example directly.
+The key structural parity detail is that `rw2` must use the actual covariate
+values for irregular grids, not just sequential indices. With that fix in
+place, the current LIDAR benchmark is now very close to `R-INLA`
+(`random_mean_max_abs ~= 4.33e-05`, `random_sd_max_abs ~= 1.31e-05`,
+`fitted_mean_max_rel ~= 8.51e-05`).
 
 ## 10. Related files
 

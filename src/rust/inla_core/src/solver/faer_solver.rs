@@ -375,7 +375,7 @@ fn find_in_lower_symmetric(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Ar1Model, IidModel, Rw1Model};
+    use crate::models::{Ar1Model, IidModel, Rw1Model, Rw2Model};
     use approx::assert_abs_diff_eq;
 
     #[test]
@@ -408,6 +408,20 @@ mod tests {
         let sum: f64 = solver.triplets.iter().map(|t| t.val).sum();
         // suma = (1+2+1) + (-1-1) = 2  (triángulo superior de DᵀD)
         assert_abs_diff_eq!(sum, 2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn build_triplets_rw2_n5() {
+        let mut solver = FaerSolver::new();
+        let mut g = Graph::rw2(5);
+        let model = Rw2Model::new(5);
+        solver.reorder(&mut g);
+        solver.fill_triplets(&g, &model, &[0.0]);
+        // upper triangle: 5 diag + 4 first off-diag + 3 second off-diag = 12
+        assert_eq!(solver.triplets.len(), 12);
+        let sum: f64 = solver.triplets.iter().map(|t| t.val).sum();
+        // suma = diag(1+5+6+5+1) + off1(-2-4-4-2) + off2(1+1+1) = 9
+        assert_abs_diff_eq!(sum, 9.0, epsilon = 1e-10);
     }
 
     #[test]

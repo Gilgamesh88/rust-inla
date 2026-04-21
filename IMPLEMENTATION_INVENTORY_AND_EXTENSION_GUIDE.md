@@ -5,6 +5,8 @@ This document inventories the currently implemented `rustyINLA` subset and turns
 It is not a line-by-line map of every INLA C symbol. It is a subsystem-level inventory of what has already been reverse engineered into Rust, what is still missing, and how expensive common extension paths are likely to be.
 
 For a directory-level diagram showing where to intervene for future additions, see [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md). For a detailed snapshot of what is still missing relative to R-INLA, see [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md).
+For a worked latent-model extension template using `ar2` as the example, see
+[AR2_EXTENSION_EXAMPLE.md](AR2_EXTENSION_EXAMPLE.md).
 
 ## 1. Why this inventory exists
 
@@ -39,8 +41,11 @@ Implemented in [src/rust/inla_core/src/models/mod.rs](C:/Users/Antonio/Documents
 | --- | --- | --- | --- | --- |
 | `iid` | `IidModel` | `1` | diagonal | implemented |
 | `rw1` | `Rw1Model` | `1` | linear chain | implemented |
+| `rw2` | `Rw2Model` | `1` | second-order chain | implemented |
 | `ar1` | `Ar1Model` | `2` | linear chain | implemented |
 | compound block-diagonal combinations | `CompoundQFunc` | sum of block parameters | disjoint union of block graphs | implemented |
+
+For `rw2`, the current bridge now passes numeric latent level values into the Rust core when they are available. That means the precision and intrinsic linear-trend constraint follow the actual coordinate spacing for irregular grids, which is the INLA-style behavior needed by examples such as `SemiPar::lidar`.
 
 ### Core engine subsystems
 
@@ -72,6 +77,7 @@ The current graph layer already supports:
 
 - diagonal graphs for `iid`
 - linear-chain graphs for `rw1` and `ar1`
+- second-order chain graphs for `rw2`
 - generic edge-list graphs through [`Graph::from_neighbors`](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/graph/mod.rs:119)
 - block-diagonal unions through [`Graph::disjoint_union`](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/graph/mod.rs:146)
 - extra fill induced by `A^T A` structure through [`Graph::build_a_t_a_edges`](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/graph/mod.rs:164)
@@ -99,6 +105,8 @@ The `QFunc` trait already supports:
 - optional analytic derivatives with respect to theta
 - proper versus improper priors
 - model-specific hyperpriors
+
+In the current subset, `rw2` is the first model that uses extra structural metadata beyond block length alone: when the R side provides numeric latent values, [Rw2Model](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/models/mod.rs) builds the second-order precision on those coordinates instead of assuming unit spacing.
 
 That is enough for many additional latent models, provided they can be expressed as a sparse precision matrix over the current latent-vector representation.
 
@@ -129,7 +137,6 @@ The main missing pieces are not in the sparse solver or the optimizer. They are 
 
 - no current user-facing way to pass a generic adjacency graph into `f(...)`
 - no current support for graph-based spatial models such as `besag`
-- no current support for higher-order random walks such as `rw2`
 - no current support for coupled or scaled latent constructions such as `bym2`
 - no `SPDE` or mesh workflow
 
@@ -139,11 +146,12 @@ The R-side latent-model helper in [R/f.R](C:/Users/Antonio/Documents/rustyINLA/r
 
 - `iid`
 - `rw1`
+- `rw2`
 - `ar1`
 
-The binding registration in [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:155) mirrors that same restriction.
+The binding registration in [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:155) now mirrors that same four-model subset.
 
-So the core can already represent more than the public API can currently express.
+So the next latent-model bottleneck is no longer `rw2`; it is the lack of a public graph-input contract for models such as `besag`.
 
 ## 5. Extension difficulty classes
 
@@ -305,9 +313,8 @@ Rule of thumb:
 ### Lowest-friction next additions
 
 - one more GLM-like likelihood family
-- `rw2`
 
-These fit the current architecture best and would expand the useful subset without forcing an API redesign.
+The current architecture still makes another GLM-like family the cheapest next meaningful expansion.
 
 ### High-value additions after a modest API expansion
 

@@ -9,7 +9,7 @@ use inla_core::likelihood::{
     GammaLikelihood, GaussianLikelihood, LogLikelihood, PoissonLikelihood, TweedieLikelihood,
     ZipLikelihood,
 };
-use inla_core::models::{Ar1Model, CompoundQFunc, IidModel, QFunc, Rw1Model};
+use inla_core::models::{Ar1Model, CompoundQFunc, IidModel, QFunc, Rw1Model, Rw2Model};
 use std::collections::HashMap;
 
 type BridgeResult<T> = std::result::Result<T, String>;
@@ -18,6 +18,7 @@ struct LatentBlockSpec {
     model_type: String,
     n_levels: usize,
     start: usize,
+    structure_values: Option<Vec<f64>>,
 }
 
 struct BackendSpec {
@@ -151,32 +152,40 @@ fn parse_latent_blocks(obj: &Robj) -> BridgeResult<Vec<LatentBlockSpec>> {
                     get_required_field(&block_map, "start")?,
                     "latent_blocks$start",
                 )?,
+                structure_values: block_map
+                    .get("structure_values")
+                    .map(|obj| parse_optional_real_vec(obj, "latent_blocks$structure_values"))
+                    .transpose()?
+                    .flatten(),
             })
         })
         .collect()
 }
 
-fn build_single_qfunc(model_type: &str, n_levels: usize) -> BridgeResult<Box<dyn QFunc>> {
-    match model_type {
-        "iid" => Ok(Box::new(IidModel::new(n_levels))),
-        "rw1" => Ok(Box::new(Rw1Model::new(n_levels))),
-        "ar1" => Ok(Box::new(Ar1Model::new(n_levels))),
-        _ => Err(format!("Unknown model_type: {model_type}")),
+fn build_single_qfunc(block: &LatentBlockSpec) -> BridgeResult<Box<dyn QFunc>> {
+    match block.model_type.as_str() {
+        "iid" => Ok(Box::new(IidModel::new(block.n_levels))),
+        "rw1" => Ok(Box::new(Rw1Model::new(block.n_levels))),
+        "rw2" => match block.structure_values.as_deref() {
+            Some(values) => {
+                Rw2Model::new_with_values(values).map(|model| Box::new(model) as Box<dyn QFunc>)
+            }
+            None => Ok(Box::new(Rw2Model::new(block.n_levels))),
+        },
+        "ar1" => Ok(Box::new(Ar1Model::new(block.n_levels))),
+        _ => Err(format!("Unknown model_type: {}", block.model_type)),
     }
 }
 
 fn build_qfunc(latent_blocks: &[LatentBlockSpec]) -> BridgeResult<Box<dyn QFunc>> {
     if latent_blocks.len() == 1 {
         let block = &latent_blocks[0];
-        return build_single_qfunc(&block.model_type, block.n_levels);
+        return build_single_qfunc(block);
     }
 
     let mut blocks = Vec::with_capacity(latent_blocks.len());
     for block in latent_blocks {
-        blocks.push((
-            block.start,
-            build_single_qfunc(&block.model_type, block.n_levels)?,
-        ));
+        blocks.push((block.start, build_single_qfunc(block)?));
     }
     Ok(Box::new(CompoundQFunc::new(blocks)))
 }
@@ -185,7 +194,7 @@ fn default_model_theta_init(latent_blocks: &[LatentBlockSpec]) -> BridgeResult<V
     let mut theta_init = Vec::new();
     for block in latent_blocks {
         match block.model_type.as_str() {
-            "iid" | "rw1" => theta_init.push(4.0),
+            "iid" | "rw1" | "rw2" => theta_init.push(4.0),
             "ar1" => {
                 theta_init.push(4.0);
                 theta_init.push(2.0);
@@ -302,6 +311,31 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 "latent_blocks must be contiguous and ordered by their start positions".to_string(),
             );
         }
+        if block.model_type == "rw2" && block.n_levels < 3 {
+            return Err("latent model 'rw2' requires at least 3 levels".to_string());
+        }
+        if let Some(structure_values) = &block.structure_values {
+            if structure_values.len() != block.n_levels {
+                return Err(format!(
+                    "latent block '{}' structure_values length {} does not match n_levels {}",
+                    block.model_type,
+                    structure_values.len(),
+                    block.n_levels
+                ));
+            }
+            if structure_values.iter().any(|value| !value.is_finite()) {
+                return Err(format!(
+                    "latent block '{}' structure_values must be finite",
+                    block.model_type
+                ));
+            }
+            if structure_values.windows(2).any(|pair| pair[1] <= pair[0]) {
+                return Err(format!(
+                    "latent block '{}' structure_values must be strictly increasing",
+                    block.model_type
+                ));
+            }
+        }
         expected_start += block.n_levels;
         total_levels += block.n_levels;
     }
@@ -318,7 +352,7 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
             .latent_blocks
             .iter()
             .map(|block| match block.model_type.as_str() {
-                "iid" | "rw1" => 1usize,
+                "iid" | "rw1" | "rw2" => 1usize,
                 "ar1" => 2usize,
                 _ => 0usize,
             })

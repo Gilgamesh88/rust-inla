@@ -10,6 +10,7 @@
 //! |------------|-------------|----------------------------|--------------------------|
 //! | IidModel   | empty (diag)| [log τ]                    | Q = τ·I                  |
 //! | Rw1Model   | linear      | [log τ]                    | Q = τ·DᵀD (impropio)     |
+//! | Rw2Model   | rw2         | [log τ]                    | Q = τ·D₂ᵀD₂ (impropio)   |
 //! | Ar1Model   | linear      | [log τ, arctanh(ρ)]        | Q propio si |ρ| < 1       |
 //!
 //! ## RW1 es un prior impropio
@@ -62,6 +63,15 @@ pub trait QFunc: Send + Sync {
     /// modo de p(y|θ). Solo la verosimilitud y log|Q+W| determinan θ*.
     fn is_proper(&self) -> bool {
         true
+    }
+
+    /// Theta-dependent contribution of log|Q| to the Laplace objective.
+    ///
+    /// Proper models use an exact sparse log-determinant elsewhere. Intrinsic
+    /// models still need their generalized-determinant scaling term on theta
+    /// so the outer optimizer sees the correct precision penalty.
+    fn log_det_term(&self, _theta: &[f64]) -> f64 {
+        0.0
     }
 
     /// Log-prior density on the model's internal theta scale.
@@ -188,6 +198,132 @@ impl QFunc for Rw1Model {
     /// El vector constante [1,1,...,1] está en el kernel → log|Q| = -∞.
     fn is_proper(&self) -> bool {
         false
+    }
+
+    fn log_det_term(&self, theta: &[f64]) -> f64 {
+        (self.graph.n().saturating_sub(1) as f64) * theta[0]
+    }
+
+    fn log_prior(&self, theta: &[f64]) -> f64 {
+        loggamma_on_log_scale(theta[0], 1.0, 5e-5)
+    }
+}
+
+// ── Rw2Model ──────────────────────────────────────────────────────────────────
+
+/// Paseo aleatorio de segundo orden (Random Walk 2).
+///
+/// Q = τ · D₂ᵀD₂ donde D₂ es la matriz de segundas diferencias (n-2)×n:
+///
+/// ```text
+///   (D₂x)_r = x_r - 2 x_{r+1} + x_{r+2}
+/// ```
+///
+/// La estructura resultante es pentadiagonal:
+///
+/// ```text
+///   diag    = [1, 5, 6, ..., 6, 5, 1]
+///   off ±1  = [-2, -4, ..., -4, -2]
+///   off ±2  = [1, 1, ..., 1]
+/// ```
+///
+/// Hiperparámetros:
+/// - θ[0] = log τ   (log-precisión de las segundas diferencias)
+///
+/// **Nota:** Q es impropia. El espacio nulo está generado por funciones
+/// constantes y lineales sobre el índice.
+pub struct Rw2Model {
+    graph: Graph,
+    diag: Vec<f64>,
+    off1: Vec<f64>,
+    off2: Vec<f64>,
+}
+
+impl Rw2Model {
+    pub fn new(n: usize) -> Self {
+        let values: Vec<f64> = (0..n).map(|idx| idx as f64).collect();
+        Self::new_with_values(&values)
+            .expect("equally spaced rw2 values should always produce a valid structure")
+    }
+
+    pub fn new_with_values(values: &[f64]) -> Result<Self, String> {
+        if values.len() < 3 {
+            return Err("rw2 requires at least 3 levels".to_string());
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err("rw2 structure values must be finite".to_string());
+        }
+        for idx in 0..values.len() - 1 {
+            if values[idx + 1] <= values[idx] {
+                return Err("rw2 structure values must be strictly increasing".to_string());
+            }
+        }
+
+        let n = values.len();
+        let mut diag = vec![0.0; n];
+        let mut off1 = vec![0.0; n - 1];
+        let mut off2 = vec![0.0; n - 2];
+
+        for row in 0..(n - 2) {
+            let h_left = values[row + 1] - values[row];
+            let h_right = values[row + 2] - values[row + 1];
+            let weight = 2.0 / (h_left + h_right);
+            let coeffs = [1.0 / h_left, -(1.0 / h_left + 1.0 / h_right), 1.0 / h_right];
+
+            diag[row] += weight * coeffs[0] * coeffs[0];
+            diag[row + 1] += weight * coeffs[1] * coeffs[1];
+            diag[row + 2] += weight * coeffs[2] * coeffs[2];
+            off1[row] += weight * coeffs[0] * coeffs[1];
+            off1[row + 1] += weight * coeffs[1] * coeffs[2];
+            off2[row] += weight * coeffs[0] * coeffs[2];
+        }
+
+        Ok(Self {
+            graph: Graph::rw2(n),
+            diag,
+            off1,
+            off2,
+        })
+    }
+
+    #[inline]
+    fn structure_value(&self, i: usize, j: usize) -> f64 {
+        let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+        match hi - lo {
+            0 => self.diag[lo],
+            1 => self.off1[lo],
+            2 => self.off2[lo],
+            _ => 0.0,
+        }
+    }
+}
+
+impl QFunc for Rw2Model {
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    fn eval(&self, i: usize, j: usize, theta: &[f64]) -> f64 {
+        theta[0].exp() * self.structure_value(i, j)
+    }
+
+    fn n_hyperparams(&self) -> usize {
+        1
+    }
+
+    fn deval(&self, i: usize, j: usize, theta: &[f64], k: usize) -> Option<f64> {
+        if k != 0 {
+            return Some(0.0);
+        }
+        Some(self.eval(i, j, theta))
+    }
+
+    fn is_proper(&self) -> bool {
+        false
+    }
+
+    fn log_det_term(&self, theta: &[f64]) -> f64 {
+        (self.graph.n().saturating_sub(2) as f64) * theta[0]
     }
 
     fn log_prior(&self, theta: &[f64]) -> f64 {
@@ -386,6 +522,18 @@ impl QFunc for CompoundQFunc {
         self.blocks.iter().all(|block| block.qfunc.is_proper())
     }
 
+    fn log_det_term(&self, theta: &[f64]) -> f64 {
+        self.blocks
+            .iter()
+            .map(|block| {
+                let theta_end = block.theta_start + block.qfunc.n_hyperparams();
+                block
+                    .qfunc
+                    .log_det_term(&theta[block.theta_start..theta_end])
+            })
+            .sum()
+    }
+
     fn log_prior(&self, theta: &[f64]) -> f64 {
         self.blocks
             .iter()
@@ -486,6 +634,130 @@ mod tests {
                 epsilon = 1e-12
             );
         }
+    }
+
+    #[test]
+    fn rw1_log_det_term_matches_intrinsic_rank_scaling() {
+        let m = Rw1Model::new(6);
+        let theta = [1.7_f64];
+        assert_abs_diff_eq!(m.log_det_term(&theta), 5.0 * theta[0], epsilon = 1e-12);
+    }
+
+    // ── Rw2Model ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rw2_graph_is_pentadiagonal() {
+        let m = Rw2Model::new(5);
+        assert_eq!(m.graph().n(), 5);
+        assert_eq!(m.graph().nnz(), 5 + 2 * (4 + 3));
+        assert_eq!(m.n_hyperparams(), 1);
+    }
+
+    #[test]
+    fn rw2_diagonal_matches_second_difference_structure() {
+        let m = Rw2Model::new(6);
+        let theta = [0.0];
+        let expected = [1.0, 5.0, 6.0, 6.0, 5.0, 1.0];
+        for (idx, value) in expected.iter().enumerate() {
+            assert_abs_diff_eq!(m.eval(idx, idx, &theta), *value, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn rw2_first_offdiagonal_matches_second_difference_structure() {
+        let m = Rw2Model::new(6);
+        let theta = [0.0];
+        let expected = [-2.0, -4.0, -4.0, -4.0, -2.0];
+        for (idx, value) in expected.iter().enumerate() {
+            assert_abs_diff_eq!(m.eval(idx, idx + 1, &theta), *value, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn rw2_second_offdiagonal_is_tau() {
+        let m = Rw2Model::new(6);
+        let theta = [1.0];
+        let tau = 1.0_f64.exp();
+        for i in 0..4 {
+            assert_abs_diff_eq!(m.eval(i, i + 2, &theta), tau, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn rw2_irregular_spacing_matches_inla_reference_precision() {
+        let values = [1.0, 2.0, 4.0, 7.0, 11.0];
+        let m = Rw2Model::new_with_values(&values).unwrap();
+        let theta = [0.0];
+        let expected = [
+            [0.6666666666666666, -1.0, 0.3333333333333333, 0.0, 0.0],
+            [-1.0, 1.6, -0.6666666666666666, 0.06666666666666667, 0.0],
+            [
+                0.3333333333333333,
+                -0.6666666666666666,
+                0.47619047619047616,
+                -0.16666666666666666,
+                0.023809523809523808,
+            ],
+            [
+                0.0,
+                0.06666666666666667,
+                -0.16666666666666666,
+                0.14166666666666666,
+                -0.041666666666666664,
+            ],
+            [
+                0.0,
+                0.0,
+                0.023809523809523808,
+                -0.041666666666666664,
+                0.017857142857142856,
+            ],
+        ];
+
+        for (i, row) in expected.iter().enumerate() {
+            for (j, value) in row.iter().enumerate() {
+                assert_abs_diff_eq!(m.eval(i, j, &theta), *value, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn rw2_is_symmetric() {
+        let m = Rw2Model::new(6);
+        let theta = [0.5];
+        for i in 0..5 {
+            for j in 0..6 {
+                assert_abs_diff_eq!(m.eval(i, j, &theta), m.eval(j, i, &theta), epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn rw2_derivative_matches_finite_difference() {
+        let m = Rw2Model::new(6);
+        let theta = [0.7_f64];
+        let eps = 1e-6_f64;
+        let theta_plus = [theta[0] + eps];
+        let theta_minus = [theta[0] - eps];
+
+        for &(i, j) in &[(0_usize, 0_usize), (1, 2), (0, 2), (2, 4)] {
+            let analytic = m.deval(i, j, &theta, 0).unwrap();
+            let numeric = (m.eval(i, j, &theta_plus) - m.eval(i, j, &theta_minus)) / (2.0 * eps);
+            assert_abs_diff_eq!(analytic, numeric, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
+    fn rw2_log_det_term_matches_intrinsic_rank_scaling() {
+        let m = Rw2Model::new(6);
+        let theta = [1.7_f64];
+        assert_abs_diff_eq!(m.log_det_term(&theta), 4.0 * theta[0], epsilon = 1e-12);
+    }
+
+    #[test]
+    fn rw2_requires_strictly_increasing_values() {
+        assert!(Rw2Model::new_with_values(&[1.0, 1.0, 2.0]).is_err());
+        assert!(Rw2Model::new_with_values(&[1.0, f64::NAN, 2.0]).is_err());
     }
 
     // ── Ar1Model ──────────────────────────────────────────────────────────────
@@ -650,6 +922,39 @@ mod tests {
             (2, Box::new(Rw1Model::new(3))),
         ]);
         assert!(!model.is_proper());
+    }
+
+    #[test]
+    fn compound_qfunc_with_rw2_uses_second_order_block_values() {
+        let model = CompoundQFunc::new(vec![
+            (0, Box::new(IidModel::new(2))),
+            (2, Box::new(Rw2Model::new(4))),
+        ]);
+        let theta = [2.0_f64.ln(), 3.0_f64.ln()];
+        let tau_rw2 = 3.0_f64;
+
+        assert_eq!(model.graph().n(), 6);
+        assert_eq!(model.n_hyperparams(), 2);
+        assert!(!model.graph().are_neighbors(1, 2));
+        assert!(model.graph().are_neighbors(2, 3));
+        assert!(model.graph().are_neighbors(2, 4));
+        assert_abs_diff_eq!(model.eval(0, 0, &theta), 2.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(model.eval(2, 2, &theta), tau_rw2, epsilon = 1e-12);
+        assert_abs_diff_eq!(model.eval(3, 3, &theta), 5.0 * tau_rw2, epsilon = 1e-12);
+        assert_abs_diff_eq!(model.eval(2, 3, &theta), -2.0 * tau_rw2, epsilon = 1e-12);
+        assert_abs_diff_eq!(model.eval(2, 4, &theta), tau_rw2, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn compound_qfunc_log_det_term_sums_intrinsic_blocks() {
+        let model = CompoundQFunc::new(vec![
+            (0, Box::new(IidModel::new(2))),
+            (2, Box::new(Rw1Model::new(3))),
+            (5, Box::new(Rw2Model::new(4))),
+        ]);
+        let theta = [0.1_f64, 0.3_f64, 0.7_f64];
+        let expected = 2.0 * theta[1] + 2.0 * theta[2];
+        assert_abs_diff_eq!(model.log_det_term(&theta), expected, epsilon = 1e-12);
     }
 
     #[test]

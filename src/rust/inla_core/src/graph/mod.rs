@@ -87,7 +87,7 @@ impl Graph {
         Self::empty(n)
     }
 
-    /// Q tridiagonal (cadena). Uso: modelos RW1, RW2.
+    /// Q tridiagonal (cadena). Uso: modelos RW1.
     pub fn linear(n: usize) -> Self {
         let mut neighbors = vec![vec![]; n];
         for (i, row) in neighbors.iter_mut().enumerate().take(n.saturating_sub(1)) {
@@ -107,6 +107,18 @@ impl Graph {
     /// La diferencia está en los valores de Q(i,j,theta), no en la estructura.
     pub fn ar1(n: usize) -> Self {
         Self::linear(n)
+    }
+
+    /// Q pentadiagonal de cadena de segundo orden. Uso: modelo RW2.
+    pub fn rw2(n: usize) -> Self {
+        let mut edges = Vec::with_capacity(n.saturating_sub(1) + n.saturating_sub(2));
+        for i in 0..n.saturating_sub(1) {
+            edges.push((i, i + 1));
+        }
+        for i in 0..n.saturating_sub(2) {
+            edges.push((i, i + 2));
+        }
+        Self::from_neighbors(n, &edges)
     }
 
     /// Constructor genérico desde lista de aristas.
@@ -256,6 +268,29 @@ mod tests {
         let g2 = Graph::linear(20);
         assert_eq!(g1.hash(), g2.hash());
         assert_eq!(g1.nnz(), g2.nnz());
+    }
+
+    #[test]
+    fn rw2_graph_has_second_order_chain_edges() {
+        let g = Graph::rw2(5);
+        assert!(g.are_neighbors(0, 1));
+        assert!(g.are_neighbors(0, 2));
+        assert!(g.are_neighbors(2, 4));
+        assert!(!g.are_neighbors(0, 3));
+        assert_eq!(g.nnz(), 5 + 2 * (4 + 3));
+    }
+
+    #[test]
+    fn rw2_matches_explicit_neighbor_list() {
+        let n = 7;
+        let edges: Vec<(usize, usize)> = (0..n - 1)
+            .map(|i| (i, i + 1))
+            .chain((0..n - 2).map(|i| (i, i + 2)))
+            .collect();
+        let g_from = Graph::from_neighbors(n, &edges);
+        let g_rw2 = Graph::rw2(n);
+        assert_eq!(g_from.hash(), g_rw2.hash());
+        assert_eq!(g_from.nnz(), g_rw2.nnz());
     }
 
     // ── from_neighbors ────────────────────────────────────────────────────────

@@ -94,6 +94,7 @@ The checkpoint includes:
 Main areas:
 
 - `tools/with-r-build-env.ps1`
+- `tools/check-rust-workspace-win.ps1`
 - `tools/config.R`
 - `src/Makevars.in`
 - `src/Makevars.win.in`

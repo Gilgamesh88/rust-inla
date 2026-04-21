@@ -1,11 +1,11 @@
 #' Define a latent random effect in Rusty-INLA
 #'
 #' @param covariate The variable to map to the latent effect.
-#' @param model A string defining the model ("iid", "rw1", "ar1").
-#' @param constr Optional logical flag for a sum-to-zero constraint. When left
-#'   as `NULL`, Rusty-INLA follows the INLA devel defaults for the currently
-#'   supported latent models: `TRUE` for `"rw1"` and `FALSE` for `"iid"` and
-#'   `"ar1"`.
+#' @param model A string defining the model ("iid", "rw1", "rw2", "ar1").
+#' @param constr Optional logical flag for the default intrinsic-model
+#'   identifiability constraints. When left as `NULL`, Rusty-INLA follows the
+#'   INLA devel defaults for the currently supported latent models: `TRUE` for
+#'   `"rw1"` and `"rw2"`, and `FALSE` for `"iid"` and `"ar1"`.
 #' @return A list containing the covariate name, model type and constraint flag.
 #' @export
 f <- function(covariate, model, constr = NULL) {
@@ -14,6 +14,7 @@ f <- function(covariate, model, constr = NULL) {
     default_constr <- switch(
         model,
         rw1 = TRUE,
+        rw2 = TRUE,
         iid = FALSE,
         ar1 = FALSE,
         NULL
