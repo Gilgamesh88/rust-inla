@@ -1,13 +1,4 @@
-#' Native R Formula Interface for Rusty-INLA
-#'
-#' @param formula A robust R formula `y ~ 1 + f(cov, model="iid")`.
-#' @param data A data.frame containing the variables.
-#' @param family The likelihood family.
-#' @param offset Optional offset supplied either as a numeric vector or as an
-#'   expression evaluated in `data`, for example `offset = log(exposure)`.
-#'   Formula-based offsets through `offset(...)` are also supported and are
-#'   added to this argument when both are present.
-#' @export
+# Internal helper to assemble the backend specification consumed by Rust.
 build_backend_spec <- function(
     formula,
     data,
@@ -251,17 +242,257 @@ weighted_kernel_marginal_grid <- function(samples, weights, n = 75L, sds = 4.0) 
     cbind(x = x, y = y / area)
 }
 
-build_hyperparameter_marginals <- function(res, fit, n = 75L, sds = 4.0) {
+safe_elapsed_time <- function() {
+    unname(proc.time()[["elapsed"]])
+}
+
+rusty_package_version <- local({
+    cached_version <- NULL
+
+    function() {
+        if (!is.null(cached_version)) {
+            return(cached_version)
+        }
+
+        cached_version <<- tryCatch(
+            as.character(utils::packageVersion("rustyINLA")),
+            error = function(e) NULL
+        )
+        if (!is.null(cached_version)) {
+            return(cached_version)
+        }
+
+        description_path <- file.path(getwd(), "DESCRIPTION")
+        if (file.exists(description_path)) {
+            dcf <- tryCatch(read.dcf(description_path), error = function(e) NULL)
+            if (!is.null(dcf) && "Version" %in% colnames(dcf)) {
+                cached_version <<- as.character(dcf[1, "Version"])
+                return(cached_version)
+            }
+        }
+
+        cached_version <<- "unknown"
+        cached_version
+    }
+})
+
+build_size_random <- function(latent_blocks) {
+    if (length(latent_blocks) == 0) {
+        return(integer())
+    }
+
+    sizes <- vapply(latent_blocks, function(block) as.integer(block$n_levels), integer(1))
+    names(sizes) <- vapply(latent_blocks, function(block) block$covariate_name, character(1))
+    sizes
+}
+
+build_cpu_profile <- function(pre_time, running_time, post_time) {
+    stats::setNames(
+        pmax(c(pre_time, running_time, post_time, pre_time + running_time + post_time), 0),
+        c("Pre", "Running", "Post", "Total")
+    )
+}
+
+fallback_hyperparameter_specs <- function(n_theta) {
+    lapply(seq_len(n_theta), function(idx) {
+        list(
+            name = paste("theta", idx),
+            transform = identity
+        )
+    })
+}
+
+build_hyperparameter_specs <- function(backend_spec, family) {
+    specs <- list()
+    add_spec <- function(name, transform) {
+        specs[[length(specs) + 1L]] <<- list(
+            name = name,
+            transform = transform
+        )
+    }
+
+    for (block in backend_spec$latent_blocks) {
+        cov_name <- block$covariate_name
+        if (block$model %in% c("iid", "rw1", "rw2")) {
+            add_spec(sprintf("Precision for %s", cov_name), exp)
+            next
+        }
+
+        if (identical(block$model, "ar1")) {
+            add_spec(sprintf("Precision for %s", cov_name), exp)
+            add_spec(sprintf("Rho for %s", cov_name), function(theta) tanh(theta / 2.0))
+        }
+    }
+
+    family_name <- as.character(family)[[1]]
+    switch(
+        family_name,
+        gaussian = add_spec("Precision for the Gaussian observations", exp),
+        poisson = NULL,
+        gamma = add_spec("Shape for the Gamma observations", exp),
+        zeroinflatedpoisson1 = add_spec(
+            "Zero-inflation probability for the ZIP observations",
+            stats::plogis
+        ),
+        tweedie = {
+            add_spec("Dispersion for the Tweedie observations", exp)
+            add_spec("Power for the Tweedie observations", function(theta) 1.0 + stats::plogis(theta))
+        },
+        NULL
+    )
+
+    specs
+}
+
+resolve_hyperparameter_specs <- function(backend_spec, family, n_theta) {
+    specs <- build_hyperparameter_specs(backend_spec, family)
+    if (length(specs) != n_theta) {
+        warning(
+            sprintf(
+                "Hyperparameter spec count %d does not match theta length %d; using internal theta fallback.",
+                length(specs),
+                n_theta
+            ),
+            call. = FALSE
+        )
+        specs <- fallback_hyperparameter_specs(n_theta)
+    }
+    specs
+}
+
+transform_hyperparameter_values <- function(values, specs) {
+    out <- numeric(length(specs))
+    for (idx in seq_along(specs)) {
+        out[[idx]] <- specs[[idx]]$transform(values[[idx]])
+    }
+    out
+}
+
+transform_hyperparameter_matrix <- function(theta_matrix, specs) {
+    out <- theta_matrix
+    for (idx in seq_along(specs)) {
+        out[, idx] <- specs[[idx]]$transform(theta_matrix[, idx])
+    }
+    out
+}
+
+point_hyperparameter_summary <- function(values, row_names) {
+    data.frame(
+        row.names = row_names,
+        mean = values,
+        sd = NA_real_,
+        `0.025quant` = NA_real_,
+        `0.5quant` = values,
+        `0.975quant` = NA_real_,
+        mode = values,
+        check.names = FALSE
+    )
+}
+
+weighted_quantile <- function(values, weights, probs) {
+    if (length(values) == 0 || length(weights) == 0) {
+        return(rep(NA_real_, length(probs)))
+    }
+
+    ord <- order(values)
+    values <- values[ord]
+    weights <- weights[ord]
+    weights <- weights / sum(weights)
+    cdf <- cumsum(weights)
+
+    vapply(probs, function(prob) {
+        values[[which(cdf >= prob)[1L]]]
+    }, numeric(1))
+}
+
+build_hyperparameter_summary <- function(res, backend_spec, family) {
+    theta_opt <- if (is.null(res$theta_opt)) numeric() else as.numeric(res$theta_opt)
+    n_theta <- length(theta_opt)
+    if (n_theta == 0) {
+        return(data.frame())
+    }
+
+    specs <- resolve_hyperparameter_specs(backend_spec, family, n_theta)
+    theta_names <- vapply(specs, `[[`, character(1), "name")
+    theta_mode <- transform_hyperparameter_values(theta_opt, specs)
+
+    ccd_weights <- if (is.null(res$ccd_weights)) numeric() else as.numeric(res$ccd_weights)
+    ccd_thetas <- if (is.null(res$ccd_thetas)) numeric() else as.numeric(res$ccd_thetas)
+
+    if (length(ccd_weights) == 0 || length(ccd_thetas) == 0) {
+        return(point_hyperparameter_summary(theta_mode, theta_names))
+    }
+
+    if (length(ccd_thetas) %% n_theta != 0) {
+        warning(
+            "CCD theta grid does not align with theta_opt length; using point hyperparameter fallback.",
+            call. = FALSE
+        )
+        return(point_hyperparameter_summary(theta_mode, theta_names))
+    }
+
+    theta_matrix <- matrix(ccd_thetas, ncol = n_theta, byrow = TRUE)
+    if (nrow(theta_matrix) != length(ccd_weights)) {
+        warning(
+            "CCD theta matrix row count does not match CCD weights; using point hyperparameter fallback.",
+            call. = FALSE
+        )
+        return(point_hyperparameter_summary(theta_mode, theta_names))
+    }
+
+    theta_matrix <- transform_hyperparameter_matrix(theta_matrix, specs)
+
+    means <- numeric(n_theta)
+    sds <- numeric(n_theta)
+    q025 <- numeric(n_theta)
+    q500 <- numeric(n_theta)
+    q975 <- numeric(n_theta)
+
+    for (idx in seq_len(n_theta)) {
+        vals <- theta_matrix[, idx]
+        keep <- is.finite(vals) & is.finite(ccd_weights) & (ccd_weights > 0)
+        if (!any(keep)) {
+            means[[idx]] <- theta_mode[[idx]]
+            sds[[idx]] <- NA_real_
+            q025[[idx]] <- NA_real_
+            q500[[idx]] <- theta_mode[[idx]]
+            q975[[idx]] <- NA_real_
+            next
+        }
+
+        vals <- vals[keep]
+        weights <- ccd_weights[keep]
+        weights <- weights / sum(weights)
+        means[[idx]] <- sum(weights * vals)
+        sds[[idx]] <- sqrt(max(sum(weights * (vals - means[[idx]])^2), 0))
+        qs <- weighted_quantile(vals, weights, probs = c(0.025, 0.5, 0.975))
+        q025[[idx]] <- qs[[1]]
+        q500[[idx]] <- qs[[2]]
+        q975[[idx]] <- qs[[3]]
+    }
+
+    data.frame(
+        row.names = theta_names,
+        mean = means,
+        sd = sds,
+        `0.025quant` = q025,
+        `0.5quant` = q500,
+        `0.975quant` = q975,
+        mode = theta_mode,
+        check.names = FALSE
+    )
+}
+
+build_hyperparameter_marginals <- function(res, backend_spec, family, n = 75L, sds = 4.0) {
     theta_opt <- if (is.null(res$theta_opt)) numeric() else as.numeric(res$theta_opt)
     n_theta <- length(theta_opt)
     if (n_theta == 0) {
         return(NULL)
     }
 
-    theta_names <- rownames(fit$summary.hyperpar)
-    if (is.null(theta_names) || length(theta_names) != n_theta) {
-        theta_names <- paste("theta", seq_len(n_theta))
-    }
+    specs <- resolve_hyperparameter_specs(backend_spec, family, n_theta)
+    theta_names <- vapply(specs, `[[`, character(1), "name")
+    theta_mode <- transform_hyperparameter_values(theta_opt, specs)
 
     ccd_weights <- if (is.null(res$ccd_weights)) numeric() else as.numeric(res$ccd_weights)
     ccd_thetas <- if (is.null(res$ccd_thetas)) numeric() else as.numeric(res$ccd_thetas)
@@ -269,17 +500,20 @@ build_hyperparameter_marginals <- function(res, fit, n = 75L, sds = 4.0) {
     if (length(ccd_weights) == 0 || length(ccd_thetas) == 0) {
         return(setNames(
             lapply(seq_len(n_theta), function(idx) {
-                gaussian_marginal_grid(theta_opt[[idx]], 1e-3, n = n, sds = sds)
+                gaussian_marginal_grid(theta_mode[[idx]], 1e-3, n = n, sds = sds)
             }),
             theta_names
         ))
     }
 
     if (length(ccd_thetas) %% n_theta != 0) {
-        warning("CCD theta grid does not align with theta_opt length; using Gaussian hyperparameter fallback.")
+        warning(
+            "CCD theta grid does not align with theta_opt length; using Gaussian hyperparameter fallback.",
+            call. = FALSE
+        )
         return(setNames(
             lapply(seq_len(n_theta), function(idx) {
-                gaussian_marginal_grid(theta_opt[[idx]], 1e-3, n = n, sds = sds)
+                gaussian_marginal_grid(theta_mode[[idx]], 1e-3, n = n, sds = sds)
             }),
             theta_names
         ))
@@ -287,14 +521,19 @@ build_hyperparameter_marginals <- function(res, fit, n = 75L, sds = 4.0) {
 
     theta_matrix <- matrix(ccd_thetas, ncol = n_theta, byrow = TRUE)
     if (nrow(theta_matrix) != length(ccd_weights)) {
-        warning("CCD theta matrix row count does not match CCD weights; using Gaussian hyperparameter fallback.")
+        warning(
+            "CCD theta matrix row count does not match CCD weights; using Gaussian hyperparameter fallback.",
+            call. = FALSE
+        )
         return(setNames(
             lapply(seq_len(n_theta), function(idx) {
-                gaussian_marginal_grid(theta_opt[[idx]], 1e-3, n = n, sds = sds)
+                gaussian_marginal_grid(theta_mode[[idx]], 1e-3, n = n, sds = sds)
             }),
             theta_names
         ))
     }
+
+    theta_matrix <- transform_hyperparameter_matrix(theta_matrix, specs)
 
     setNames(
         lapply(seq_len(n_theta), function(idx) {
@@ -367,7 +606,11 @@ append_benchmark_outputs <- function(fit, res, backend_spec, data, formula, fami
     }
 
     if (nrow(fit$summary.hyperpar) > 0) {
-        fit$marginals.hyperpar <- build_hyperparameter_marginals(res, fit)
+        fit$marginals.hyperpar <- build_hyperparameter_marginals(
+            res = res,
+            backend_spec = backend_spec,
+            family = family
+        )
     }
 
     fit$.args <- build_benchmark_args(
@@ -401,6 +644,7 @@ rusty_inla <- function(
     offset = NULL,
     output_profile = c("thin", "benchmark")
 ) {
+    fit_start_time <- safe_elapsed_time()
     output_profile <- match.arg(output_profile)
     backend_spec <- build_backend_spec(
         formula,
@@ -411,9 +655,11 @@ rusty_inla <- function(
         offset_env = parent.frame(),
         offset_provided = !missing(offset)
     )
+    after_spec_time <- safe_elapsed_time()
 
     # 4. Invoke the Rust Core
     res <- rust_inla_run(backend_spec)
+    after_run_time <- safe_elapsed_time()
 
     # Error handling from backend
     if (is.character(res)) { stop(res) }
@@ -432,7 +678,9 @@ rusty_inla <- function(
             mean = res$fixed_means,
             sd = res$fixed_sds,
             `0.025quant` = res$fixed_means - 1.96 * res$fixed_sds,
+            `0.5quant` = res$fixed_means,
             `0.975quant` = res$fixed_means + 1.96 * res$fixed_sds,
+            mode = res$fixed_means,
             check.names = FALSE
         ),
         summary.random = list(),
@@ -457,9 +705,10 @@ rusty_inla <- function(
 
     # Format Hyperparameters securely if present
     if (length(res$theta_opt) > 0) {
-        fit$summary.hyperpar <- data.frame(
-            row.names = paste("theta", 1:length(res$theta_opt)),
-            mean = res$theta_opt
+        fit$summary.hyperpar <- build_hyperparameter_summary(
+            res = res,
+            backend_spec = backend_spec,
+            family = family
         )
     } else {
         fit$summary.hyperpar <- data.frame()
@@ -487,7 +736,9 @@ rusty_inla <- function(
                 mean = rnd_mean,
                 sd = rnd_sd,
                 `0.025quant` = rnd_mean - 1.96 * rnd_sd,
+                `0.5quant` = rnd_mean,
                 `0.975quant` = rnd_mean + 1.96 * rnd_sd,
+                mode = rnd_mean,
                 check.names = FALSE
             )
             rownames(rnd_df) <- as.character(level_values)
@@ -528,6 +779,24 @@ rusty_inla <- function(
             output_profile = output_profile
         )
     }
+
+    fit$names.fixed <- rownames(fit$summary.fixed)
+    fit$size.random <- build_size_random(backend_spec$latent_blocks)
+    fit$size.linear.predictor <- as.integer(nrow(data))
+    fit$nhyper <- as.integer(length(res$theta_opt))
+    fit$ok <- TRUE
+    fit$version <- c(
+        package = "rustyINLA",
+        version = rusty_package_version()
+    )
+    after_post_time <- safe_elapsed_time()
+    cpu_profile <- build_cpu_profile(
+        pre_time = after_spec_time - fit_start_time,
+        running_time = after_run_time - after_spec_time,
+        post_time = after_post_time - after_run_time
+    )
+    fit$cpu.used <- cpu_profile
+    fit$cpu.intern <- cpu_profile
 
     class(fit) <- "rusty_inla"
     return(fit)

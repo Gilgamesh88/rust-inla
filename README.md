@@ -4,7 +4,7 @@
 
 ## Current Benchmark Snapshot
 
-The latest local parity sweep was run on April 19, 2026 against the `freMTPL2` data from `CASdatasets` using [benchmark.R](benchmark.R). The active benchmark suite currently excludes Tweedie because that path remains unstable and is not yet a reliable parity target.
+The latest local parity sweep was refreshed on April 21, 2026 against the `freMTPL2` data from `CASdatasets` using [benchmark.R](benchmark.R). The active benchmark suite currently excludes Tweedie because that path remains unstable and is not yet a reliable parity target.
 
 Headline result on the active stable suite:
 
@@ -16,6 +16,7 @@ Headline result on the active stable suite:
   - Poisson + `ar1`
   - Zero-inflated Poisson + `iid`
 - Gamma + `rw1` now passes after the intrinsic-field covariance fix.
+- Public reference coverage now also includes Gaussian + `rw2`, with the LIDAR smoothing example numerically close to `R-INLA`.
 
 | Likelihood Model | Latent Component | Rusty-INLA | R-INLA | Status |
 | --- | --- | --- | --- | --- |
@@ -27,6 +28,8 @@ Headline result on the active stable suite:
 
 The detailed comparison note is tracked in [scratch/BENCHMARK_SUMMARY_2026-04-19.md](scratch/BENCHMARK_SUMMARY_2026-04-19.md).
 
+For deeper parity inspection of returned summaries, set `RUSTYINLA_OUTPUT_PROFILE=benchmark` before running the local harnesses. That extended mode compares additional fit-object surfaces such as fixed-effect standard deviations, hyperparameter summaries, and linear-predictor summaries.
+
 For the current implemented subset, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the posterior-state update RFC, the external-example benchmarking guide, the directory-level intervention map, and the recommended path for adding new families or latent models, see [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md](EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
 
 ## Implementation Roadmap (75% Complete)
@@ -34,7 +37,7 @@ For the current implemented subset, the coverage evaluation, the detailed R-INLA
 Our goal is to port the subset of INLA specifically relied upon by the actuarial industry, enhancing velocity without sacrificing gradient accuracy.
 
 - [x] **Phase 1:** Core Optimization (L-BFGS, Laplace Newton-Raphson solvers).
-- [x] **Phase 2:** Base Latent Topologies (IID, Random Walk 1, Auto-Regressive 1).
+- [x] **Phase 2:** Base Latent Topologies (IID, Random Walk 1, Random Walk 2, Auto-Regressive 1).
 - [x] **Phase 3:** Hyperparameter Uncertainty via Central Composite Design (CCD).
 - [x] **Phase 4:** Core Likelihoods (Gaussian).
 - [x] **Phase 5:** Actuarial Likelihoods (ZIP Type-1, initial Tweedie prototype).
@@ -44,6 +47,16 @@ Our goal is to port the subset of INLA specifically relied upon by the actuarial
 - [ ] **Phase 9:** Dynamic Arbitrary Priors. (Exposing prior modification arrays to the R frontend).
 
 Tweedie support remains experimental and is currently excluded from the active parity benchmark sweep until the instability path is better understood.
+
+## Windows Validation
+
+For the current Windows GNU toolchain flow, use:
+
+```powershell
+.\tools\check-rust-workspace-win.ps1
+```
+
+That wrapper bootstraps the R and `extendr` build environment and then runs the workspace Rust checks on the same target configuration used by the package build.
 
 ---
 *Built via `extendr` inside `rust-inla`.*

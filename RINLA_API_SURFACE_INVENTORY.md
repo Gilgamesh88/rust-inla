@@ -121,6 +121,133 @@ Those are the best candidates if we ever want a more INLA-like call surface with
 
 ## 4. Output-object inventory
 
+### Release-focused object-parity read
+
+As of the current branch state on April 21, 2026, a representative
+`Poisson + iid` comparison in `output_profile = "benchmark"` gives:
+
+- `rustyINLA` top-level fields: `30`
+- `R-INLA` top-level fields: `53`
+- exact shared names: `21`
+- missing in `rustyINLA`: `32`
+- extra `rustyINLA`-specific names: `9`
+
+Shared top-level names in that representative comparison:
+
+- `call`
+- `mlik`
+- `summary.fixed`
+- `summary.random`
+- `summary.fitted.values`
+- `summary.hyperpar`
+- `mode`
+- `summary.linear.predictor`
+- `model.matrix`
+- `marginals.fixed`
+- `marginals.random`
+- `marginals.hyperpar`
+- `.args`
+- `names.fixed`
+- `size.random`
+- `size.linear.predictor`
+- `nhyper`
+- `ok`
+- `version`
+- `cpu.used`
+- `cpu.intern`
+
+`rustyINLA`-specific top-level names in that same comparison:
+
+- `formula`
+- `data`
+- `family`
+- `offset`
+- `offset_arg_provided`
+- `output_profile`
+- `diagnostics`
+- `theta_init_used`
+- `laplace_terms`
+
+This is the main reason we should not force raw `53/53` object-name parity
+before release:
+
+- several missing names belong to unsupported workflows, not missing engine correctness
+- some missing names are memory-heavy or subsystem-heavy, not cheap polish
+- some current `rustyINLA` fields are useful engineering outputs even if they are not named like `R-INLA`
+
+For release planning, the missing top-level names break down more usefully as:
+
+#### Good enough for release with current subset
+
+These are already present and cover the main supported-subset fit summaries:
+
+- `summary.fixed`
+- `summary.random`
+- `summary.hyperpar`
+- `summary.fitted.values`
+- `summary.linear.predictor`
+- `marginals.fixed`
+- `marginals.random`
+- `marginals.hyperpar`
+- `mlik`
+- `mode`
+- `model.matrix`
+- `.args`
+- `names.fixed`
+- `size.random`
+- `size.linear.predictor`
+- `nhyper`
+- `ok`
+- `version`
+- `cpu.used`
+- `cpu.intern`
+
+#### Best remaining pre-release candidates
+
+These still fit the current architecture and improve inspection/parity without
+opening a major subsystem:
+
+- `internal.summary.hyperpar`
+- `internal.marginals.hyperpar`
+- `all.hyper`
+- `model.random`
+- `offset.linear.predictor`
+
+#### Better left for post-release or feature milestones
+
+These are real features, but they are not just object-label polish:
+
+- `summary.lincomb`
+- `marginals.lincomb`
+- `size.lincomb`
+- `summary.lincomb.derived`
+- `marginals.lincomb.derived`
+- `size.lincomb.derived`
+- `cpo`
+- `gcpo`
+- `po`
+- `waic`
+- `dic`
+- `residuals`
+- `marginals.linear.predictor`
+- `marginals.fitted.values`
+- `joint.hyper`
+- `Q`
+- `graph`
+- `logfile`
+- `misc`
+
+#### Explicitly blocked by missing SPDE/model-family surface
+
+- `model.spde2.blc`
+- `summary.spde2.blc`
+- `marginals.spde2.blc`
+- `size.spde2.blc`
+- `model.spde3.blc`
+- `summary.spde3.blc`
+- `marginals.spde3.blc`
+- `size.spde3.blc`
+
 ### A. Output surfaces already present in `rustyINLA`
 
 Always present in current fits:
@@ -129,6 +256,14 @@ Always present in current fits:
 - `summary.random`
 - `summary.hyperpar`
 - `summary.fitted.values`
+- `names.fixed`
+- `size.random`
+- `size.linear.predictor`
+- `nhyper`
+- `ok`
+- `version`
+- `cpu.intern`
+- `cpu.used`
 - `mlik`
 - `mode`
 - diagnostics-related fields
@@ -159,13 +294,6 @@ These are not really missing from the engine. They are mostly profile-policy dec
 
 | Output | Current status | Likely difficulty | Why |
 | --- | --- | --- | --- |
-| `names.fixed` | missing | `Low` | bookkeeping around current fixed-effect outputs |
-| `size.random` | missing | `Low` | straightforward metadata |
-| `size.linear.predictor` | missing | `Low` | straightforward metadata |
-| `nhyper` | missing | `Low` | straightforward metadata |
-| `version` | missing | `Low` | bookkeeping |
-| `ok` | missing | `Low` | bookkeeping |
-| `cpu.intern`, `cpu.used` | missing | `Low` to `Medium` | timing bookkeeping |
 | `internal.summary.hyperpar` | missing | `Medium` | needs internal-scale hyperparameter summaries |
 | `internal.marginals.hyperpar` | missing | `Medium` | same |
 | `all.hyper` | missing | `Medium` | needs clearer hyperparameter bookkeeping/export |

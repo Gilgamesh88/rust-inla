@@ -4,15 +4,20 @@
 \alias{f}
 \title{Define a latent random effect in Rusty-INLA}
 \usage{
-f(covariate, model)
+f(covariate, model, constr = NULL)
 }
 \arguments{
 \item{covariate}{The variable to map to the latent effect.}
 
-\item{model}{A string defining the model ("iid", "rw1", "ar1").}
+\item{model}{A string defining the model ("iid", "rw1", "rw2", "ar1").}
+
+\item{constr}{Optional logical flag for the default intrinsic-model
+identifiability constraints. When left as \code{NULL}, Rusty-INLA follows the
+INLA devel defaults for the currently supported latent models: \code{TRUE} for
+\code{"rw1"} and \code{"rw2"}, and \code{FALSE} for \code{"iid"} and \code{"ar1"}.}
 }
 \value{
-A list containing the covariate name and model type.
+A list containing the covariate name, model type and constraint flag.
 }
 \description{
 Define a latent random effect in Rusty-INLA

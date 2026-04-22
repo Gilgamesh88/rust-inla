@@ -1,0 +1,115 @@
+name: windows-r-package
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-install-smoke:
+    runs-on: windows-latest
+    env:
+      NOT_CRAN: true
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          rtools-version: "45"
+          use-public-rspm: true
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Show toolchain versions
+        shell: pwsh
+        run: |
+          R --version
+          cargo --version
+          rustc --version
+
+      - name: Build source tarball
+        shell: pwsh
+        run: |
+          & R CMD build . --no-build-vignettes
+
+      - name: Install built package from tarball
+        shell: pwsh
+        run: |
+          $libraryPath = Join-Path $PWD "ci-r-lib"
+          New-Item -ItemType Directory -Force -Path $libraryPath | Out-Null
+          $tarball = Get-ChildItem -Path $PWD -Filter "rustyINLA_*.tar.gz" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $tarball) {
+            throw "Built tarball not found."
+          }
+
+          & R CMD INSTALL --library=$libraryPath $tarball.FullName
+
+      - name: Smoke test installed package
+        shell: pwsh
+        run: |
+          $libraryPath = Join-Path $PWD "ci-r-lib"
+          @'
+          lib <- normalizePath("ci-r-lib", winslash = "/", mustWork = TRUE)
+          .libPaths(c(lib, .libPaths()))
+
+          suppressPackageStartupMessages(library(rustyINLA))
+
+          set.seed(1)
+          n <- 50L
+          grp <- factor(sample(letters[1:4], n, replace = TRUE))
+          expo <- runif(n, 0.5, 2.0)
+          y <- rpois(n, lambda = exp(0.2 + log(expo)))
+
+          fit <- rusty_inla(
+              y ~ 1 + f(grp, model = "iid"),
+              data = data.frame(y = y, grp = grp, expo = expo),
+              family = "poisson",
+              offset = log(expo),
+              output_profile = "benchmark"
+          )
+
+          stopifnot(inherits(fit, "rusty_inla"))
+          stopifnot(
+              all(c(
+                  "summary.fixed",
+                  "summary.random",
+                  "summary.hyperpar",
+                  "summary.fitted.values",
+                  "summary.linear.predictor",
+                  "model.matrix",
+                  ".args"
+              ) %in% names(fit))
+          )
+          stopifnot(
+              all(c(
+                  "names.fixed",
+                  "size.random",
+                  "size.linear.predictor",
+                  "nhyper",
+                  "ok",
+                  "version",
+                  "cpu.used",
+                  "cpu.intern"
+              ) %in% names(fit))
+          )
+          stopifnot(isTRUE(fit$ok))
+          stopifnot(identical(names(fit$size.random), "grp"))
+          stopifnot(identical(unname(fit$size.random), 4L))
+          stopifnot(identical(fit$size.linear.predictor, n))
+          stopifnot(identical(fit$nhyper, 1L))
+          stopifnot(identical(unname(fit$version["package"]), "rustyINLA"))
+          '@ | Rscript -

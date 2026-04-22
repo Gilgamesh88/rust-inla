@@ -126,6 +126,13 @@ named_column <- function(df, column) {
     stats::setNames(as.numeric(df[[column]]), rownames(df))
 }
 
+indexed_column <- function(df, column) {
+    if (is.null(df) || nrow(df) == 0 || !(column %in% names(df))) {
+        return(setNames(numeric(), character()))
+    }
+    stats::setNames(as.numeric(df[[column]]), as.character(seq_len(nrow(df))))
+}
+
 collect_random_metric <- function(fit, metric) {
     if (is.null(fit$summary.random) || length(fit$summary.random) == 0) {
         return(list())
@@ -152,7 +159,21 @@ compare_named_numeric <- function(lhs, rhs, abs_tol = NULL) {
         ))
     }
 
-    diffs <- abs(lhs[shared] - rhs[shared])
+    lhs_vals <- as.numeric(lhs[shared])
+    rhs_vals <- as.numeric(rhs[shared])
+    keep <- is.finite(lhs_vals) & is.finite(rhs_vals)
+    if (!any(keep)) {
+        return(list(
+            n = 0L,
+            max_abs = NA_real_,
+            mean_abs = NA_real_,
+            worst = NA_character_,
+            pass = NA
+        ))
+    }
+
+    shared <- shared[keep]
+    diffs <- abs(lhs_vals[keep] - rhs_vals[keep])
     worst_idx <- which.max(diffs)
     list(
         n = length(shared),
@@ -600,9 +621,14 @@ evaluate_case <- function(case) {
             inla_mem = NA_real_,
             mlik_abs_diff = NA_real_,
             fixed_mean_max_abs = NA_real_,
+            fixed_sd_max_abs = NA_real_,
             random_mean_max_abs = NA_real_,
             random_sd_max_abs = NA_real_,
             fitted_mean_max_rel = NA_real_,
+            hyper_mean_max_abs = NA_real_,
+            hyper_sd_max_abs = NA_real_,
+            linear_predictor_mean_max_abs = NA_real_,
+            linear_predictor_sd_max_abs = NA_real_,
             stringsAsFactors = FALSE
         ))
     }
@@ -653,9 +679,14 @@ evaluate_case <- function(case) {
             inla_mem = rinla_perf$mem,
             mlik_abs_diff = NA_real_,
             fixed_mean_max_abs = NA_real_,
+            fixed_sd_max_abs = NA_real_,
             random_mean_max_abs = NA_real_,
             random_sd_max_abs = NA_real_,
             fitted_mean_max_rel = NA_real_,
+            hyper_mean_max_abs = NA_real_,
+            hyper_sd_max_abs = NA_real_,
+            linear_predictor_mean_max_abs = NA_real_,
+            linear_predictor_sd_max_abs = NA_real_,
             stringsAsFactors = FALSE
         ))
     }
@@ -664,6 +695,10 @@ evaluate_case <- function(case) {
         named_column(rusty_perf$res$summary.fixed, "mean"),
         named_column(rinla_perf$res$summary.fixed, "mean"),
         tolerances$fixed_mean_abs
+    )
+    fixed_sd <- compare_named_numeric(
+        named_column(rusty_perf$res$summary.fixed, "sd"),
+        named_column(rinla_perf$res$summary.fixed, "sd")
     )
     random_mean <- compare_nested_metrics(
         collect_random_metric(rusty_perf$res, "mean"),
@@ -679,6 +714,22 @@ evaluate_case <- function(case) {
         rusty_perf$res,
         rinla_perf$res,
         tolerances$fitted_mean_rel
+    )
+    hyper_mean <- compare_named_numeric(
+        indexed_column(rusty_perf$res$summary.hyperpar, "mean"),
+        indexed_column(rinla_perf$res$summary.hyperpar, "mean")
+    )
+    hyper_sd <- compare_named_numeric(
+        indexed_column(rusty_perf$res$summary.hyperpar, "sd"),
+        indexed_column(rinla_perf$res$summary.hyperpar, "sd")
+    )
+    linear_predictor_mean <- compare_named_numeric(
+        indexed_column(rusty_perf$res$summary.linear.predictor, "mean"),
+        indexed_column(rinla_perf$res$summary.linear.predictor, "mean")
+    )
+    linear_predictor_sd <- compare_named_numeric(
+        indexed_column(rusty_perf$res$summary.linear.predictor, "sd"),
+        indexed_column(rinla_perf$res$summary.linear.predictor, "sd")
     )
 
     pass_flags <- c(fixed$pass, random_mean$pass, random_sd$pass, fitted$pass)
@@ -699,9 +750,14 @@ evaluate_case <- function(case) {
         inla_mem = rinla_perf$mem,
         mlik_abs_diff = abs(extract_mlik(rusty_perf$res) - extract_mlik(rinla_perf$res)),
         fixed_mean_max_abs = fixed$max_abs,
+        fixed_sd_max_abs = fixed_sd$max_abs,
         random_mean_max_abs = random_mean$max_abs,
         random_sd_max_abs = random_sd$max_abs,
         fitted_mean_max_rel = fitted$max_rel,
+        hyper_mean_max_abs = hyper_mean$max_abs,
+        hyper_sd_max_abs = hyper_sd$max_abs,
+        linear_predictor_mean_max_abs = linear_predictor_mean$max_abs,
+        linear_predictor_sd_max_abs = linear_predictor_sd$max_abs,
         stringsAsFactors = FALSE
     )
 }
