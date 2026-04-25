@@ -48,6 +48,32 @@ Our goal is to port the subset of INLA specifically relied upon by the actuarial
 
 Tweedie support remains experimental and is currently excluded from the active parity benchmark sweep until the instability path is better understood.
 
+## Installing Rust
+
+If you want to build `rustyINLA` from source, or install it from GitHub with `remotes::install_github()` / `devtools::install_github()`, install Rust first with the official `rustup` tool.
+
+On Windows:
+
+1. Download and run the official `rustup-init.exe` installer from [rust-lang.org](https://www.rust-lang.org/tools/install).
+2. Open a new PowerShell window after the installer finishes.
+3. Add the GNU target used by this package build:
+
+```powershell
+rustup target add x86_64-pc-windows-gnu
+```
+
+4. Verify the toolchain is available:
+
+```powershell
+rustc --version
+cargo --version
+rustup target list --installed
+```
+
+On macOS, Linux, or WSL, install Rust with `rustup` using the official command from [rust-lang.org](https://www.rust-lang.org/tools/install), then verify with `rustc --version` and `cargo --version`.
+
+For Windows source installs, you will also need a working R toolchain such as `Rtools`, because this package is built with the GNU target on Windows.
+
 ## Windows Validation
 
 For the current Windows GNU toolchain flow, use:
