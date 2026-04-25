@@ -41,7 +41,7 @@ are fair rustyINLA validations:
 | `FixedOnly_Gamma` | Candidate | Fixed-effect-only Gamma GLM with supported fixed columns. |
 | `Germany_Poisson_IID` | Adaptable | Supported Poisson + `iid` with fixed `x`; convert `E` to formula offset. |
 | `Epil_Poisson_IID` | Candidate | Multi-column fixed effects plus `iid`. |
-| `Epil_Poisson_IID2` | Deferred | Structurally relevant two-`iid` case, but the exact uploaded data currently hits a sparse augmented-precision singularity; keep synthetic two-`iid` coverage for now. |
+| `Epil_Poisson_IID2` | Candidate | Exact uploaded two-`iid` case; covered by the curated harness after adding fixed/latent mode-step damping for the observation-level `iid` component. |
 | `Simulated_Gaussian_AR1` | Candidate | Gaussian + `ar1`; uses supported `constr = FALSE`. |
 | `Simulated_Poisson_AR1` | Candidate | Poisson + `ar1`; uses supported `constr = FALSE`. |
 | `Simulated_Gaussian_AR2` | Adaptable | Convert R-INLA `model = "ar", order = 2` to rustyINLA `model = "ar2"`. |

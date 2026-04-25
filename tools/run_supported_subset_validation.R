@@ -399,6 +399,15 @@ build_cases <- function() {
             tolerances = list(fixed_mean_abs = 0.25, random_mean_abs = 0.75, random_sd_abs = 0.75)
         ),
         case_record(
+            id = "suite_part1_epil_poisson_iid2",
+            manifest_source = "uploaded part1: Epil_Poisson_IID2",
+            family = "poisson",
+            formula = y ~ 1 + Trt + Base + Age + V4 +
+                f(Ind, model = "iid") + f(rand, model = "iid"),
+            data = make_suite_part1_epil(),
+            tolerances = list(fixed_mean_abs = 0.30, random_mean_abs = 1.00, random_sd_abs = 1.00)
+        ),
+        case_record(
             id = "suite_part2_f01_poisson_offset",
             manifest_source = "uploaded part2: F01_Poisson_Offset synthetic fallback",
             family = "poisson",

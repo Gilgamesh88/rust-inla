@@ -7,6 +7,9 @@ use crate::models::QFunc;
 use crate::solver::{FaerSolver, SpMat, SparseSolver};
 
 pub const PRIOR_PREC_BETA: f64 = 0.001;
+const MODE_LINE_SEARCH_MAX_ETA_STEP: f64 = 8.0;
+const MODE_LINE_SEARCH_MIN_STEP: f64 = 1.0 / 1024.0;
+const MODE_OBJECTIVE_REL_TOL: f64 = 1e-10;
 type ModeCoreResult = (Vec<f64>, f64, Option<Vec<f64>>);
 type FixedEffectsModeResult = (Vec<f64>, Vec<f64>, f64, Vec<f64>, f64);
 type FixedEffectsModeWithCovResult = (Vec<f64>, Vec<f64>, f64, Vec<f64>, Vec<f64>, Vec<f64>, f64);
@@ -27,6 +30,20 @@ struct ModeControl {
     need_diag_aug_inv: bool,
     need_fixed_cov: bool,
     need_latent_fixed_cov: bool,
+}
+
+struct FixedEffectsModeStep<'a> {
+    x: &'a [f64],
+    beta: &'a [f64],
+}
+
+struct FixedEffectsDampingContext<'a, 'model> {
+    model: &'a crate::inference::InlaModel<'model>,
+    theta_model: &'a [f64],
+    theta_lik: &'a [f64],
+    x_m: &'a [f64],
+    n_fixed: usize,
+    current_eta: &'a [f64],
 }
 
 pub struct Problem {
@@ -98,6 +115,61 @@ where
         sum = t;
     }
     sum
+}
+
+fn quadratic_form_qfunc(qfunc: &dyn QFunc, theta_model: &[f64], x: &[f64]) -> f64 {
+    let n = qfunc.graph().n();
+    let diag: f64 = (0..n)
+        .map(|i| qfunc.eval(i, i, theta_model) * x[i] * x[i])
+        .sum();
+    let offdiag: f64 = qfunc
+        .graph()
+        .iter_upper_triangle()
+        .map(|(i, j)| 2.0 * qfunc.eval(i, j, theta_model) * x[i] * x[j])
+        .sum();
+    let intrinsic_ridge: f64 = if qfunc.is_proper() {
+        0.0
+    } else {
+        1e-6 * compensated_sum(x.iter().map(|v| v * v))
+    };
+    diag + offdiag + intrinsic_ridge
+}
+
+fn mode_kernel_objective(
+    model: &crate::inference::InlaModel<'_>,
+    theta_model: &[f64],
+    theta_lik: &[f64],
+    eta_data: &[f64],
+    x: &[f64],
+    beta: &[f64],
+) -> f64 {
+    let mut logll = vec![0.0_f64; eta_data.len()];
+    model
+        .likelihood
+        .evaluate(&mut logll, eta_data, model.y, theta_lik);
+
+    let ll = compensated_sum(logll);
+    let latent_penalty = if x.is_empty() {
+        0.0
+    } else {
+        0.5 * quadratic_form_qfunc(model.qfunc, theta_model, x)
+    };
+    let beta_penalty =
+        0.5 * PRIOR_PREC_BETA * compensated_sum(beta.iter().map(|value| value * value));
+    ll - latent_penalty - beta_penalty
+}
+
+fn objective_not_worse(candidate: f64, current: f64) -> bool {
+    candidate.is_finite()
+        && (!current.is_finite()
+            || candidate >= current - MODE_OBJECTIVE_REL_TOL * current.abs().max(1.0))
+}
+
+fn scaled_step(old: &[f64], proposal: &[f64], scale: f64) -> Vec<f64> {
+    old.iter()
+        .zip(proposal.iter())
+        .map(|(old_value, proposal_value)| old_value + scale * (proposal_value - old_value))
+        .collect()
 }
 
 enum AtwaStorage {
@@ -373,6 +445,114 @@ impl Problem {
             .collect();
 
         Ok((log_det, diag_qinv))
+    }
+
+    fn fixed_effects_eta(
+        &self,
+        eta_data: &mut [f64],
+        x: &[f64],
+        beta: &[f64],
+        x_m: &[f64],
+        n_fixed: usize,
+        offset: Option<&[f64]>,
+    ) {
+        eta_data.fill(0.0);
+        let n_data = eta_data.len();
+        if let (Some(a_single_j), Some(a_single_x)) = (&self.a_single_j, &self.a_single_x) {
+            for (i, eta_i) in eta_data.iter_mut().enumerate().take(n_data) {
+                *eta_i = a_single_x[i] * x[a_single_j[i]];
+                for j in 0..n_fixed {
+                    *eta_i += x_m[i + j * n_data] * beta[j];
+                }
+            }
+        } else {
+            for (i, eta_i) in eta_data.iter_mut().enumerate().take(n_data) {
+                for &(j, ax) in &self.a_rows[i] {
+                    *eta_i += ax * x[j];
+                }
+                for j in 0..n_fixed {
+                    *eta_i += x_m[i + j * n_data] * beta[j];
+                }
+            }
+        }
+        add_offset(eta_data, offset);
+    }
+
+    fn damp_fixed_effects_mode_step(
+        &self,
+        ctx: FixedEffectsDampingContext<'_, '_>,
+        old: FixedEffectsModeStep<'_>,
+        proposal: FixedEffectsModeStep<'_>,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let current_obj = mode_kernel_objective(
+            ctx.model,
+            ctx.theta_model,
+            ctx.theta_lik,
+            ctx.current_eta,
+            old.x,
+            old.beta,
+        );
+
+        let mut proposal_eta = vec![0.0_f64; ctx.current_eta.len()];
+        self.fixed_effects_eta(
+            &mut proposal_eta,
+            proposal.x,
+            proposal.beta,
+            ctx.x_m,
+            ctx.n_fixed,
+            ctx.model.offset,
+        );
+        let max_eta_delta = proposal_eta
+            .iter()
+            .zip(ctx.current_eta.iter())
+            .fold(0.0_f64, |acc, (new_eta, old_eta)| {
+                acc.max((new_eta - old_eta).abs())
+            });
+
+        let mut step = if max_eta_delta.is_finite()
+            && max_eta_delta > MODE_LINE_SEARCH_MAX_ETA_STEP
+        {
+            MODE_LINE_SEARCH_MAX_ETA_STEP / max_eta_delta
+        } else {
+            1.0
+        };
+
+        loop {
+            let (candidate_x, candidate_beta, candidate_eta) = if step >= 1.0 {
+                (
+                    proposal.x.to_vec(),
+                    proposal.beta.to_vec(),
+                    proposal_eta.clone(),
+                )
+            } else {
+                let candidate_x = scaled_step(old.x, proposal.x, step);
+                let candidate_beta = scaled_step(old.beta, proposal.beta, step);
+                let mut candidate_eta = vec![0.0_f64; ctx.current_eta.len()];
+                self.fixed_effects_eta(
+                    &mut candidate_eta,
+                    &candidate_x,
+                    &candidate_beta,
+                    ctx.x_m,
+                    ctx.n_fixed,
+                    ctx.model.offset,
+                );
+                (candidate_x, candidate_beta, candidate_eta)
+            };
+            let candidate_obj = mode_kernel_objective(
+                ctx.model,
+                ctx.theta_model,
+                ctx.theta_lik,
+                &candidate_eta,
+                &candidate_x,
+                &candidate_beta,
+            );
+            if objective_not_worse(candidate_obj, current_obj)
+                || step <= MODE_LINE_SEARCH_MIN_STEP
+            {
+                return (candidate_x, candidate_beta);
+            }
+            step *= 0.5;
+        }
     }
 
     fn find_mode_core(
@@ -708,7 +888,25 @@ impl Problem {
                             s_mat_bkp[0], theta,
                         ))
                     })?;
-                    beta[..n_fixed].copy_from_slice(&b_beta[..n_fixed]);
+                    let (_, beta_next) = self.damp_fixed_effects_mode_step(
+                        FixedEffectsDampingContext {
+                            model,
+                            theta_model,
+                            theta_lik,
+                            x_m,
+                            n_fixed,
+                            current_eta: &eta_data,
+                        },
+                        FixedEffectsModeStep {
+                            x: &[],
+                            beta: &beta_old,
+                        },
+                        FixedEffectsModeStep {
+                            x: &[],
+                            beta: &b_beta,
+                        },
+                    );
+                    beta = beta_next;
 
                     let mut delta_max = 0.0_f64;
                     for (a, b_val) in beta.iter().zip(beta_old.iter()) {
@@ -892,9 +1090,17 @@ impl Problem {
                 self.solver.build(&self.graph, &aug, theta_model);
 
                 self.solver.factorize().map_err(|_| {
+                    let w_min = curv_data.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
+                    let w_max = curv_data
+                        .iter()
+                        .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+                    let eta_min = eta_data.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
+                    let eta_max = eta_data
+                        .iter()
+                        .fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
                     crate::error::InlaError::NotPositiveDefiniteContext(format!(
-                        "Sparse Q_aug block 2 singular at iter {}",
-                        _iter
+                        "Sparse Q_aug block 2 singular at iter {}, w_min: {:?}, w_max: {:?}, eta_min: {:?}, eta_max: {:?}",
+                        _iter, w_min, w_max, eta_min, eta_max
                     ))
                 })?;
 
@@ -991,15 +1197,37 @@ impl Problem {
                     ));
                     }
                 };
-                beta[..n_fixed].copy_from_slice(&b_s[..n_fixed]);
+                let beta_proposal = b_s;
 
+                let mut x_proposal = vec![0.0_f64; n_latent];
                 for k in 0..n_latent {
                     let mut vb = 0.0;
                     for j in 0..n_fixed {
-                        vb += v[k + j * n_latent] * beta[j];
+                        vb += v[k + j * n_latent] * beta_proposal[j];
                     }
-                    x[k] = u[k] - vb;
+                    x_proposal[k] = u[k] - vb;
                 }
+
+                let (x_next, beta_next) = self.damp_fixed_effects_mode_step(
+                    FixedEffectsDampingContext {
+                        model,
+                        theta_model,
+                        theta_lik,
+                        x_m,
+                        n_fixed,
+                        current_eta: &eta_data,
+                    },
+                    FixedEffectsModeStep {
+                        x: &x_old,
+                        beta: &beta_old,
+                    },
+                    FixedEffectsModeStep {
+                        x: &x_proposal,
+                        beta: &beta_proposal,
+                    },
+                );
+                x = x_next;
+                beta = beta_next;
 
                 let mut delta_max = 0.0_f64;
                 for (a, b_val) in x.iter().zip(x_old.iter()) {
@@ -1302,16 +1530,7 @@ impl Problem {
     }
 
     pub fn quadratic_form_x(&self, qfunc: &dyn QFunc, theta_model: &[f64], x: &[f64]) -> f64 {
-        let n = self.n();
-        let diag: f64 = (0..n)
-            .map(|i| qfunc.eval(i, i, theta_model) * x[i] * x[i])
-            .sum();
-        let offdiag: f64 = qfunc
-            .graph()
-            .iter_upper_triangle()
-            .map(|(i, j)| 2.0 * qfunc.eval(i, j, theta_model) * x[i] * x[j])
-            .sum();
-        diag + offdiag
+        quadratic_form_qfunc(qfunc, theta_model, x)
     }
 }
 
