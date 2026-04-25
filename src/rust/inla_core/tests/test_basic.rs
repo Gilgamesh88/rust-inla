@@ -2,7 +2,7 @@ use inla_core::inference::{InlaEngine, InlaModel, InlaParams};
 use inla_core::likelihood::{
     GammaLikelihood, GaussianLikelihood, LogLikelihood, PoissonLikelihood,
 };
-use inla_core::models::{Ar1Model, CompoundQFunc, IidModel, QFunc, Rw1Model, Rw2Model};
+use inla_core::models::{Ar1Model, Ar2Model, CompoundQFunc, IidModel, QFunc, Rw1Model, Rw2Model};
 use inla_core::problem::Problem;
 
 fn dense_cholesky_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Vec<f64> {
@@ -50,6 +50,19 @@ fn dense_spd_inverse_diagonal(a: &[f64], n: usize) -> Vec<f64> {
     diag
 }
 
+fn dense_spd_inverse(a: &[f64], n: usize) -> Vec<f64> {
+    let mut inv = vec![0.0_f64; n * n];
+    for col in 0..n {
+        let mut rhs = vec![0.0_f64; n];
+        rhs[col] = 1.0;
+        let sol = dense_cholesky_solve(a.to_vec(), rhs, n);
+        for row in 0..n {
+            inv[row * n + col] = sol[row];
+        }
+    }
+    inv
+}
+
 fn dense_q_matrix(qfunc: &dyn QFunc, theta_model: &[f64], n: usize) -> Vec<f64> {
     let mut q = vec![0.0_f64; n * n];
     for i in 0..n {
@@ -63,6 +76,10 @@ fn dense_q_matrix(qfunc: &dyn QFunc, theta_model: &[f64], n: usize) -> Vec<f64> 
         }
     }
     q
+}
+
+fn inla_correlation_theta_from_rho(rho: f64) -> f64 {
+    ((1.0 + rho) / (1.0 - rho)).ln()
 }
 
 #[test]
@@ -223,6 +240,383 @@ fn test_gamma_iid_run_end_to_end() {
 }
 
 #[test]
+fn test_gaussian_multi_fixed_iid_run_end_to_end() {
+    let y = vec![0.9, 1.4, 0.8, 1.7, 1.1, 1.9];
+    let offset = vec![0.0; y.len()];
+    let fixed_matrix = vec![
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // intercept
+        -1.0, -0.2, 0.5, 1.1, -0.7, 0.8, // x1
+        0.0, 1.0, 0.0, 1.0, 0.0, 1.0, // promo indicator
+        -0.4, 0.2, 0.9, 0.5, -0.8, 0.6, // x2
+    ];
+
+    let qfunc = IidModel::new(3);
+    let likelihood = GaussianLikelihood {};
+
+    let a_i = vec![0, 1, 2, 3, 4, 5];
+    let a_j = vec![0, 1, 2, 0, 1, 2];
+    let a_x = vec![1.0; y.len()];
+
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: Some(&a_i),
+        a_j: Some(&a_j),
+        a_x: Some(&a_x),
+        n_fixed: 4,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: 3,
+        theta_init: vec![0.0; qfunc.n_hyperparams() + likelihood.n_hyperparams()],
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
+
+    assert_eq!(res.theta_opt.len(), 2);
+    assert_eq!(res.fixed_means.len(), 4);
+    assert_eq!(res.fixed_sds.len(), 4);
+    assert_eq!(res.random.len(), 3);
+    assert!(res.fixed_means.iter().all(|value| value.is_finite()));
+    assert!(res
+        .fixed_sds
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0));
+    assert!(res
+        .fitted
+        .iter()
+        .all(|marginal| marginal.mean().is_finite()));
+}
+
+#[test]
+fn test_gaussian_multi_fixed_iid_problem_returns_exact_fixed_covariance() {
+    let y = vec![0.9, 1.4, 0.8, 1.7, 1.1, 1.9];
+    let offset = vec![0.0; y.len()];
+    let fixed_matrix = vec![
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // intercept
+        -1.0, -0.2, 0.5, 1.1, -0.7, 0.8, // x1
+        0.0, 1.0, 0.0, 1.0, 0.0, 1.0, // promo indicator
+        -0.4, 0.2, 0.9, 0.5, -0.8, 0.6, // x2
+    ];
+    let a_i = vec![0, 1, 2, 3, 4, 5];
+    let a_j = vec![0, 1, 2, 0, 1, 2];
+    let a_x = vec![1.0; y.len()];
+
+    let qfunc = IidModel::new(3);
+    let likelihood = GaussianLikelihood {};
+    let theta = vec![0.35, 1.1];
+
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: Some(&a_i),
+        a_j: Some(&a_j),
+        a_x: Some(&a_x),
+        n_fixed: 4,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: 3,
+        theta_init: theta.clone(),
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let mut problem = Problem::new(&model);
+    let (_, _, _, diag_aug_inv, fixed_cov, latent_fixed_cov, _) = problem
+        .find_mode_with_fixed_effects_with_cov(&model, &theta, &[], &[], 50, 1e-8)
+        .unwrap();
+
+    let n_data = y.len();
+    let n_fixed = 4;
+    let n_latent = 3;
+    let tau_obs = theta[1].exp();
+    let q_latent = dense_q_matrix(&qfunc, &theta[..1], n_latent);
+    let joint_dim = n_fixed + n_latent;
+    let mut joint_precision = vec![0.0_f64; joint_dim * joint_dim];
+
+    for j1 in 0..n_fixed {
+        for j2 in 0..n_fixed {
+            let mut xtwx = 0.0_f64;
+            for i in 0..n_data {
+                xtwx += tau_obs * fixed_matrix[i + j1 * n_data] * fixed_matrix[i + j2 * n_data];
+            }
+            if j1 == j2 {
+                xtwx += inla_core::problem::PRIOR_PREC_BETA;
+            }
+            joint_precision[j1 * joint_dim + j2] = xtwx;
+        }
+    }
+
+    for j in 0..n_fixed {
+        for latent in 0..n_latent {
+            let mut cross = 0.0_f64;
+            for i in 0..n_data {
+                if a_j[i] == latent {
+                    cross += tau_obs * fixed_matrix[i + j * n_data] * a_x[i];
+                }
+            }
+            joint_precision[j * joint_dim + (n_fixed + latent)] = cross;
+            joint_precision[(n_fixed + latent) * joint_dim + j] = cross;
+        }
+    }
+
+    for latent_i in 0..n_latent {
+        for latent_j in 0..n_latent {
+            let mut val = q_latent[latent_i * n_latent + latent_j];
+            if latent_i == latent_j {
+                let obs_count = a_j.iter().filter(|&&idx| idx == latent_i).count() as f64;
+                val += tau_obs * obs_count;
+            }
+            joint_precision[(n_fixed + latent_i) * joint_dim + (n_fixed + latent_j)] = val;
+        }
+    }
+
+    let joint_cov = dense_spd_inverse(&joint_precision, joint_dim);
+    for j1 in 0..n_fixed {
+        for j2 in 0..n_fixed {
+            let expected = joint_cov[j1 * joint_dim + j2];
+            let got = fixed_cov[j1 * n_fixed + j2];
+            assert!(
+                (got - expected).abs() < 1e-8,
+                "fixed covariance mismatch ({j1}, {j2}): got {got}, expected {expected}"
+            );
+        }
+    }
+    for latent in 0..n_latent {
+        let expected = joint_cov[(n_fixed + latent) * joint_dim + (n_fixed + latent)];
+        let got = diag_aug_inv[latent];
+        assert!(
+            (got - expected).abs() < 1e-8,
+            "latent covariance diagonal mismatch at {latent}: got {got}, expected {expected}"
+        );
+    }
+    for j in 0..n_fixed {
+        for latent in 0..n_latent {
+            let expected = joint_cov[(n_fixed + latent) * joint_dim + j];
+            let got = latent_fixed_cov[latent + j * n_latent];
+            assert!(
+                (got - expected).abs() < 1e-8,
+                "latent/fixed covariance mismatch at latent {latent}, fixed {j}: got {got}, expected {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_gaussian_multi_fixed_skip_ccd_fixed_sds_match_conditional_covariance() {
+    let y = vec![0.9, 1.4, 0.8, 1.7, 1.1, 1.9];
+    let offset = vec![0.0; y.len()];
+    let fixed_matrix = vec![
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // intercept
+        -1.0, -0.2, 0.5, 1.1, -0.7, 0.8, // x1
+        0.0, 1.0, 0.0, 1.0, 0.0, 1.0, // promo indicator
+        -0.4, 0.2, 0.9, 0.5, -0.8, 0.6, // x2
+    ];
+
+    let qfunc = IidModel::new(3);
+    let likelihood = GaussianLikelihood {};
+
+    let a_i = vec![0, 1, 2, 3, 4, 5];
+    let a_j = vec![0, 1, 2, 0, 1, 2];
+    let a_x = vec![1.0; y.len()];
+
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: Some(&a_i),
+        a_j: Some(&a_j),
+        a_x: Some(&a_x),
+        n_fixed: 4,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: 3,
+        theta_init: vec![0.0; qfunc.n_hyperparams() + likelihood.n_hyperparams()],
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let params = InlaParams {
+        skip_ccd: true,
+        ..InlaParams::default()
+    };
+    let res = InlaEngine::run(&model, &params).unwrap();
+
+    let mut problem = Problem::new(&model);
+    let (_, _, _, _, fixed_cov, _, _) = problem
+        .find_mode_with_fixed_effects_with_cov(
+            &model,
+            &res.theta_opt,
+            &res.mode_x,
+            &res.mode_beta,
+            20,
+            1e-8,
+        )
+        .unwrap();
+
+    for j in 0..model.n_fixed {
+        let expected = fixed_cov[j * model.n_fixed + j].sqrt();
+        let got = res.fixed_sds[j];
+        assert!(
+            (got - expected).abs() < 1e-8,
+            "mixed fixed SD mismatch at {j}: got {got}, expected {expected}"
+        );
+    }
+
+    let n_data = y.len();
+    let n_fixed = model.n_fixed;
+    let n_latent = model.n_latent;
+    let tau_obs = res.theta_opt[1].exp();
+    let q_latent = dense_q_matrix(&qfunc, &res.theta_opt[..1], n_latent);
+    let joint_dim = n_fixed + n_latent;
+    let mut joint_precision = vec![0.0_f64; joint_dim * joint_dim];
+
+    for j1 in 0..n_fixed {
+        for j2 in 0..n_fixed {
+            let mut xtwx = 0.0_f64;
+            for i in 0..n_data {
+                xtwx += tau_obs * fixed_matrix[i + j1 * n_data] * fixed_matrix[i + j2 * n_data];
+            }
+            if j1 == j2 {
+                xtwx += inla_core::problem::PRIOR_PREC_BETA;
+            }
+            joint_precision[j1 * joint_dim + j2] = xtwx;
+        }
+    }
+
+    for j in 0..n_fixed {
+        for latent in 0..n_latent {
+            let mut cross = 0.0_f64;
+            for i in 0..n_data {
+                if a_j[i] == latent {
+                    cross += tau_obs * fixed_matrix[i + j * n_data] * a_x[i];
+                }
+            }
+            joint_precision[j * joint_dim + (n_fixed + latent)] = cross;
+            joint_precision[(n_fixed + latent) * joint_dim + j] = cross;
+        }
+    }
+
+    for latent_i in 0..n_latent {
+        for latent_j in 0..n_latent {
+            let mut val = q_latent[latent_i * n_latent + latent_j];
+            if latent_i == latent_j {
+                let obs_count = a_j.iter().filter(|&&idx| idx == latent_i).count() as f64;
+                val += tau_obs * obs_count;
+            }
+            joint_precision[(n_fixed + latent_i) * joint_dim + (n_fixed + latent_j)] = val;
+        }
+    }
+
+    let joint_cov = dense_spd_inverse(&joint_precision, joint_dim);
+    for i in 0..n_data {
+        let mut eta_row = vec![0.0_f64; joint_dim];
+        for j in 0..n_fixed {
+            eta_row[j] = fixed_matrix[i + j * n_data];
+        }
+        eta_row[n_fixed + a_j[i]] = a_x[i];
+
+        let mut expected_var = 0.0_f64;
+        for r in 0..joint_dim {
+            for c in 0..joint_dim {
+                expected_var += eta_row[r] * joint_cov[r * joint_dim + c] * eta_row[c];
+            }
+        }
+
+        let got = res.fitted[i].variance();
+        assert!(
+            (got - expected_var).abs() < 2e-5,
+            "linear predictor variance mismatch at {i}: got {got}, expected {expected_var}"
+        );
+    }
+}
+
+#[test]
+fn test_gaussian_benchmark_style_fixed_covariance_matches_dense_gls_reference() {
+    let n_groups = 12;
+    let reps_per_group = 10;
+    let n = n_groups * reps_per_group;
+    let group_assignments = (0..n_groups)
+        .flat_map(|group| std::iter::repeat(group).take(reps_per_group))
+        .collect::<Vec<_>>();
+    let latent_u = (0..n_groups)
+        .map(|group| (group as f64 - 5.5) * 0.05)
+        .collect::<Vec<_>>();
+    let mut x1 = vec![0.0_f64; n];
+    let mut x2 = vec![0.0_f64; n];
+    let mut promo_is_promo = vec![0.0_f64; n];
+    let mut y = vec![0.0_f64; n];
+    for i in 0..n {
+        x1[i] = ((i % 13) as f64 - 6.0) / 3.5;
+        x2[i] = (((i * 7) % 17) as f64 - 8.0) / 8.0;
+        promo_is_promo[i] = if (i * 5) % 7 < 3 { 1.0 } else { 0.0 };
+        let eta = 0.75 - 0.55 * x1[i]
+            + 0.35 * x2[i]
+            + 0.40 * promo_is_promo[i]
+            + 0.25 * x1[i] * promo_is_promo[i]
+            + latent_u[group_assignments[i]];
+        y[i] = eta;
+    }
+
+    let mut fixed_matrix = vec![0.0_f64; n * 5];
+    for i in 0..n {
+        fixed_matrix[i] = 1.0;
+        fixed_matrix[i + n] = x1[i];
+        fixed_matrix[i + 2 * n] = promo_is_promo[i];
+        fixed_matrix[i + 3 * n] = x2[i];
+        fixed_matrix[i + 4 * n] = x1[i] * promo_is_promo[i];
+    }
+
+    let qfunc = IidModel::new(n_groups);
+    let likelihood = GaussianLikelihood {};
+    let theta = vec![10.0_f64.ln(), 25.0_f64.ln()];
+    let offset = vec![0.0_f64; n];
+    let a_i = (0..n).collect::<Vec<_>>();
+    let a_j = group_assignments;
+    let a_x = vec![1.0_f64; n];
+
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: Some(&a_i),
+        a_j: Some(&a_j),
+        a_x: Some(&a_x),
+        n_fixed: 5,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: n_groups,
+        theta_init: theta.clone(),
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let mut problem = Problem::new(&model);
+    let (_, _, _, _, fixed_cov, _, _) = problem
+        .find_mode_with_fixed_effects_with_cov(&model, &theta, &[], &[], 50, 1e-8)
+        .unwrap();
+
+    for j in 0..model.n_fixed {
+        assert!(
+            fixed_cov[j * model.n_fixed + j] > 1e-4,
+            "benchmark-style fixed covariance diagonal should be positive and substantial at {j}, got {}",
+            fixed_cov[j * model.n_fixed + j]
+        );
+    }
+}
+
+#[test]
 fn test_rw1_constraint_changes_latent_covariance_diagonal() {
     let y = vec![1.5, 1.5, 1.5, 1.5];
     let offset = vec![0.0; y.len()];
@@ -345,6 +739,54 @@ fn test_rw2_gaussian_with_intrinsic_constraints_runs_end_to_end() {
 }
 
 #[test]
+fn test_ar2_gaussian_runs_end_to_end() {
+    let y = vec![0.2, 0.5, 0.1, -0.2, 0.3, 0.6, 0.4, 0.1];
+    let fixed_matrix = vec![1.0; y.len()];
+    let offset = vec![0.0; y.len()];
+    let a_i = (0..y.len()).collect::<Vec<_>>();
+    let a_j = (0..y.len()).collect::<Vec<_>>();
+    let a_x = vec![1.0; y.len()];
+
+    let qfunc = Ar2Model::new(y.len());
+    let likelihood = GaussianLikelihood {};
+    let theta = vec![
+        4.0,
+        inla_correlation_theta_from_rho(0.6),
+        inla_correlation_theta_from_rho(-0.25),
+        3.5,
+    ];
+
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: Some(&a_i),
+        a_j: Some(&a_j),
+        a_x: Some(&a_x),
+        n_fixed: 1,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: y.len(),
+        theta_init: theta,
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
+
+    assert_eq!(res.theta_opt.len(), 4);
+    assert_eq!(res.fixed_means.len(), 1);
+    assert_eq!(res.random.len(), y.len());
+    assert_eq!(res.fitted.len(), y.len());
+    assert!(res.fixed_means[0].is_finite());
+    assert!(res.fixed_sds[0].is_finite());
+    assert!(res.random.iter().all(|m| m.mean().is_finite()));
+    assert!(res.random.iter().all(|m| m.variance().is_finite()));
+}
+
+#[test]
 fn test_latent_only_rw2_gaussian_mode_matches_dense_posterior() {
     let y = vec![0.15, -0.05, 0.30, 0.80, 0.40, -0.10];
     let offset = vec![0.0; y.len()];
@@ -459,6 +901,71 @@ fn test_latent_only_irregular_rw2_gaussian_mode_matches_dense_posterior() {
         assert!(
             (diag_aug_inv[i] - exact_diag[i]).abs() < 1e-8,
             "irregular latent variance mismatch at {i}: got {}, expected {}",
+            diag_aug_inv[i],
+            exact_diag[i]
+        );
+    }
+}
+
+#[test]
+fn test_latent_only_ar2_gaussian_mode_matches_dense_posterior() {
+    let y = vec![0.15, -0.05, 0.30, 0.80, 0.40, -0.10, 0.05];
+    let offset = vec![0.0; y.len()];
+    let a_i = (0..y.len()).collect::<Vec<_>>();
+    let a_j = (0..y.len()).collect::<Vec<_>>();
+    let a_x = vec![1.0; y.len()];
+    let theta = vec![
+        6.0,
+        inla_correlation_theta_from_rho(0.6),
+        inla_correlation_theta_from_rho(-0.25),
+        3.5,
+    ];
+
+    let qfunc = Ar2Model::new(y.len());
+    let likelihood = GaussianLikelihood {};
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: Some(&a_i),
+        a_j: Some(&a_j),
+        a_x: Some(&a_x),
+        n_fixed: 0,
+        fixed_matrix: None,
+        n_latent: y.len(),
+        theta_init: theta.clone(),
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let mut problem = Problem::new(&model);
+    let (mode_x, _, diag_aug_inv) = problem
+        .find_mode_with_inverse(&model, &theta, &[], 50, 1e-10)
+        .unwrap();
+
+    let tau_obs = theta[3].exp();
+    let mut q_aug = dense_q_matrix(&qfunc, &theta[..3], y.len());
+    for i in 0..y.len() {
+        q_aug[i * y.len() + i] += tau_obs;
+    }
+
+    let rhs: Vec<f64> = y.iter().map(|yi| tau_obs * yi).collect();
+    let exact_mean = dense_cholesky_solve(q_aug.clone(), rhs, y.len());
+    let exact_diag = dense_spd_inverse_diagonal(&q_aug, y.len());
+
+    for i in 0..y.len() {
+        assert!(
+            (mode_x[i] - exact_mean[i]).abs() < 1e-8,
+            "ar2 latent mode mismatch at {i}: got {}, expected {}",
+            mode_x[i],
+            exact_mean[i]
+        );
+        assert!(
+            (diag_aug_inv[i] - exact_diag[i]).abs() < 1e-8,
+            "ar2 latent variance mismatch at {i}: got {}, expected {}",
             diag_aug_inv[i],
             exact_diag[i]
         );

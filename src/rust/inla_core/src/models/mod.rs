@@ -12,6 +12,7 @@
 //! | Rw1Model   | linear      | [log τ]                    | Q = τ·DᵀD (impropio)     |
 //! | Rw2Model   | rw2         | [log τ]                    | Q = τ·D₂ᵀD₂ (impropio)   |
 //! | Ar1Model   | linear      | [log τ, arctanh(ρ)]        | Q propio si |ρ| < 1       |
+//! | Ar2Model   | ar2         | [log τ, pacf1, pacf2]      | Q propio, banda ±2       |
 //!
 //! ## RW1 es un prior impropio
 //!
@@ -33,6 +34,24 @@ fn loggamma_on_log_scale(theta: f64, shape: f64, rate: f64) -> f64 {
 fn gaussian_prior_kernel(theta: f64, mean: f64, precision: f64) -> f64 {
     0.5 * (precision.ln() - std::f64::consts::TAU.ln())
         - 0.5 * precision * (theta - mean) * (theta - mean)
+}
+
+#[inline]
+fn inla_correlation_from_theta(theta: f64) -> f64 {
+    (theta * 0.5).tanh()
+}
+
+#[inline]
+fn pc_cor0_log_prior(theta: f64, u: f64, alpha: f64) -> f64 {
+    let lambda = -alpha.ln() / (-(1.0 - u * u).ln()).sqrt();
+    let rho = inla_correlation_from_theta(theta);
+    let mu = (-(1.0 - rho * rho).ln()).sqrt();
+
+    if mu < 1e-12 {
+        return lambda.ln() - 4.0_f64.ln();
+    }
+
+    lambda.ln() - lambda * mu + rho.abs().ln() - mu.ln() - 4.0_f64.ln()
 }
 
 /// Contrato de cada modelo GMRF latente.
@@ -375,7 +394,7 @@ impl QFunc for Ar1Model {
 
     fn eval(&self, i: usize, j: usize, theta: &[f64]) -> f64 {
         let kappa = theta[0].exp(); // precisión marginal estacionaria
-        let rho = (theta[1] * 0.5).tanh(); // autocorrelación ∈ (-1, 1), same as INLA
+        let rho = inla_correlation_from_theta(theta[1]); // autocorrelación ∈ (-1, 1), same as INLA
         let n = self.graph.n();
         let scale = kappa / (1.0 - rho * rho);
 
@@ -396,7 +415,7 @@ impl QFunc for Ar1Model {
 
     fn deval(&self, i: usize, j: usize, theta: &[f64], k: usize) -> Option<f64> {
         let kappa = theta[0].exp();
-        let rho = (theta[1] * 0.5).tanh();
+        let rho = inla_correlation_from_theta(theta[1]);
         let n = self.graph.n();
         let scale = kappa / (1.0 - rho * rho);
         match k {
@@ -421,6 +440,156 @@ impl QFunc for Ar1Model {
 
     fn log_prior(&self, theta: &[f64]) -> f64 {
         loggamma_on_log_scale(theta[0], 1.0, 5e-5) + gaussian_prior_kernel(theta[1], 0.0, 0.15)
+    }
+}
+
+// ── Ar2Model ─────────────────────────────────────────────────────────────────────────────
+
+/// Proceso autoregresivo de segundo orden (AR2) parametrizado por PACF.
+///
+/// INLA expone el modelo AR(p) en términos de:
+///
+/// - θ[0] = log κ, donde κ es la precisión marginal estacionaria
+/// - θ[1] = logit-like(pacf1)
+/// - θ[2] = logit-like(pacf2)
+///
+/// Con `pacf_j = tanh(theta[j] / 2)`, las PACF quedan en (-1, 1) y la
+/// recursión de Durbin-Levinson produce coeficientes AR2 estacionarios.
+///
+/// Para p = 2:
+///
+/// ```text
+/// phi2 = pacf2
+/// phi1 = pacf1 * (1 - pacf2)
+/// ```
+///
+/// La matriz de precisión exacta para una realización finita estacionaria se
+/// compone de:
+///
+/// - el bloque de precisión de los dos primeros estados estacionarios
+/// - más las innovaciones AR2 para t = 3, ..., n
+///
+/// El resultado es una matriz pentadiagonal propia con el mismo patrón de
+/// banda que `rw2`.
+pub struct Ar2Model {
+    graph: Graph,
+}
+
+#[derive(Clone, Copy)]
+struct Ar2State {
+    kappa: f64,
+    phi1: f64,
+    phi2: f64,
+    innovation_scale: f64,
+    initial_diag: f64,
+    initial_offdiag: f64,
+}
+
+impl Ar2Model {
+    pub fn new(n: usize) -> Self {
+        Self {
+            graph: Graph::ar2(n),
+        }
+    }
+
+    #[inline]
+    fn state(theta: &[f64]) -> Ar2State {
+        let kappa = theta[0].exp();
+        let pacf1 = inla_correlation_from_theta(theta[1]);
+        let pacf2 = inla_correlation_from_theta(theta[2]);
+
+        // Same p=2 Durbin-Levinson recursion used by INLA's ar.R helpers.
+        let phi2 = pacf2;
+        let phi1 = pacf1 * (1.0 - pacf2);
+
+        let rho1 = phi1 / (1.0 - phi2);
+        let rho2 = phi1 * rho1 + phi2;
+        let innovation_factor = (1.0 - phi1 * rho1 - phi2 * rho2).max(1e-12);
+        let innovation_scale = 1.0 / innovation_factor;
+        let initial_scale = 1.0 / (1.0 - rho1 * rho1).max(1e-12);
+
+        Ar2State {
+            kappa,
+            phi1,
+            phi2,
+            innovation_scale,
+            initial_diag: initial_scale,
+            initial_offdiag: -rho1 * initial_scale,
+        }
+    }
+
+    #[inline]
+    fn structure_value(&self, i: usize, j: usize, theta: &[f64]) -> f64 {
+        let n = self.graph.n();
+        if n == 1 {
+            return if i == 0 && j == 0 { 1.0 } else { 0.0 };
+        }
+
+        let state = Self::state(theta);
+        let (lo, hi) = if i <= j { (i, j) } else { (j, i) };
+        match hi - lo {
+            0 => {
+                let innovation = (if lo >= 2 { 1.0 } else { 0.0 })
+                    + (if lo >= 1 && lo + 1 < n {
+                        state.phi1 * state.phi1
+                    } else {
+                        0.0
+                    })
+                    + (if lo + 2 < n {
+                        state.phi2 * state.phi2
+                    } else {
+                        0.0
+                    });
+                let initial = if lo < 2 { state.initial_diag } else { 0.0 };
+                initial + state.innovation_scale * innovation
+            }
+            1 => {
+                let innovation = (if lo >= 1 { -state.phi1 } else { 0.0 })
+                    + (if lo + 2 < n {
+                        state.phi1 * state.phi2
+                    } else {
+                        0.0
+                    });
+                let initial = if lo == 0 { state.initial_offdiag } else { 0.0 };
+                initial + state.innovation_scale * innovation
+            }
+            2 => {
+                if lo + 2 < n {
+                    -state.innovation_scale * state.phi2
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+impl QFunc for Ar2Model {
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    fn eval(&self, i: usize, j: usize, theta: &[f64]) -> f64 {
+        let state = Self::state(theta);
+        state.kappa * self.structure_value(i, j, theta)
+    }
+
+    fn n_hyperparams(&self) -> usize {
+        3
+    }
+
+    fn deval(&self, i: usize, j: usize, theta: &[f64], k: usize) -> Option<f64> {
+        match k {
+            0 => Some(self.eval(i, j, theta)),
+            _ => None,
+        }
+    }
+
+    fn log_prior(&self, theta: &[f64]) -> f64 {
+        loggamma_on_log_scale(theta[0], 1.0, 5e-5)
+            + pc_cor0_log_prior(theta[1], 0.5, 0.5)
+            + pc_cor0_log_prior(theta[2], 0.5, 0.4)
     }
 }
 
@@ -552,6 +721,74 @@ mod tests {
 
     fn inla_ar1_theta_from_rho(rho: f64) -> f64 {
         ((1.0 + rho) / (1.0 - rho)).ln()
+    }
+
+    fn dense_cholesky_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Vec<f64> {
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[i * n + j];
+                for k in 0..j {
+                    sum -= a[i * n + k] * a[j * n + k];
+                }
+                if i == j {
+                    assert!(sum > 1e-12, "dense reference matrix must remain SPD");
+                    a[i * n + j] = sum.sqrt();
+                } else {
+                    a[i * n + j] = sum / a[j * n + j];
+                }
+            }
+        }
+
+        for i in 0..n {
+            let mut sum = b[i];
+            for k in 0..i {
+                sum -= a[i * n + k] * b[k];
+            }
+            b[i] = sum / a[i * n + i];
+        }
+        for i in (0..n).rev() {
+            let mut sum = b[i];
+            for k in (i + 1)..n {
+                sum -= a[k * n + i] * b[k];
+            }
+            b[i] = sum / a[i * n + i];
+        }
+
+        b
+    }
+
+    fn dense_spd_inverse(a: &[f64], n: usize) -> Vec<f64> {
+        let mut inv = vec![0.0_f64; n * n];
+        for col in 0..n {
+            let mut rhs = vec![0.0_f64; n];
+            rhs[col] = 1.0;
+            let sol = dense_cholesky_solve(a.to_vec(), rhs, n);
+            for row in 0..n {
+                inv[row * n + col] = sol[row];
+            }
+        }
+        inv
+    }
+
+    fn ar2_phi_from_pacf(pacf1: f64, pacf2: f64) -> (f64, f64) {
+        (pacf1 * (1.0 - pacf2), pacf2)
+    }
+
+    fn ar2_acf_from_phi(phi1: f64, phi2: f64, lag_max: usize) -> Vec<f64> {
+        let rho1 = phi1 / (1.0 - phi2);
+        let rho2 = phi1 * rho1 + phi2;
+        let mut acf = vec![0.0_f64; lag_max + 1];
+        acf[0] = 1.0;
+        if lag_max >= 1 {
+            acf[1] = rho1;
+        }
+        if lag_max >= 2 {
+            acf[2] = rho2;
+        }
+        for lag in 3..=lag_max {
+            acf[lag] = phi1 * acf[lag - 1] + phi2 * acf[lag - 2];
+        }
+        acf
     }
 
     // ── IidModel ──────────────────────────────────────────────────────────────
@@ -974,5 +1211,122 @@ mod tests {
             + 0.5 * (precision.ln() - std::f64::consts::TAU.ln())
             - 0.5 * precision * theta[1] * theta[1];
         assert_abs_diff_eq!(model.log_prior(&theta), expected, epsilon = 1e-12);
+    }
+
+    // ── Ar2Model ───────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ar2_graph_is_pentadiagonal() {
+        let m = Ar2Model::new(8);
+        assert_eq!(m.graph().n(), 8);
+        assert_eq!(m.graph().nnz(), 8 + 2 * (7 + 6));
+        assert_eq!(m.n_hyperparams(), 3);
+    }
+
+    #[test]
+    fn ar2_with_zero_pacf_reduces_to_iid() {
+        let m_ar2 = Ar2Model::new(6);
+        let m_iid = IidModel::new(6);
+        let theta_ar2 = [0.0, 0.0, 0.0];
+        let theta_iid = [0.0];
+
+        for i in 0..6 {
+            assert_abs_diff_eq!(
+                m_ar2.eval(i, i, &theta_ar2),
+                m_iid.eval(i, i, &theta_iid),
+                epsilon = 1e-12
+            );
+        }
+        for i in 0..5 {
+            assert_abs_diff_eq!(m_ar2.eval(i, i + 1, &theta_ar2), 0.0, epsilon = 1e-12);
+        }
+        for i in 0..4 {
+            assert_abs_diff_eq!(m_ar2.eval(i, i + 2, &theta_ar2), 0.0, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn ar2_with_zero_second_pacf_matches_ar1() {
+        let m_ar2 = Ar2Model::new(7);
+        let m_ar1 = Ar1Model::new(7);
+        let rho = 0.6_f64;
+        let theta_corr = inla_ar1_theta_from_rho(rho);
+        let theta_ar2 = [1.3_f64, theta_corr, 0.0];
+        let theta_ar1 = [1.3_f64, theta_corr];
+
+        for i in 0..7 {
+            assert_abs_diff_eq!(
+                m_ar2.eval(i, i, &theta_ar2),
+                m_ar1.eval(i, i, &theta_ar1),
+                epsilon = 1e-10
+            );
+        }
+        for i in 0..6 {
+            assert_abs_diff_eq!(
+                m_ar2.eval(i, i + 1, &theta_ar2),
+                m_ar1.eval(i, i + 1, &theta_ar1),
+                epsilon = 1e-10
+            );
+        }
+        for i in 0..5 {
+            assert_abs_diff_eq!(m_ar2.eval(i, i + 2, &theta_ar2), 0.0, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn ar2_matches_dense_stationary_precision() {
+        let n = 6usize;
+        let pacf1 = 0.6_f64;
+        let pacf2 = -0.25_f64;
+        let theta = [
+            1.8_f64,
+            inla_ar1_theta_from_rho(pacf1),
+            inla_ar1_theta_from_rho(pacf2),
+        ];
+        let model = Ar2Model::new(n);
+        let (phi1, phi2) = ar2_phi_from_pacf(pacf1, pacf2);
+        let acf = ar2_acf_from_phi(phi1, phi2, n - 1);
+
+        let mut sigma = vec![0.0_f64; n * n];
+        let marginal_var = (-theta[0]).exp();
+        for i in 0..n {
+            for j in 0..n {
+                sigma[i * n + j] = marginal_var * acf[i.abs_diff(j)];
+            }
+        }
+        let expected_q = dense_spd_inverse(&sigma, n);
+
+        for i in 0..n {
+            for j in 0..n {
+                let got = if i == j || model.graph().are_neighbors(i, j) {
+                    model.eval(i, j, &theta)
+                } else {
+                    0.0
+                };
+                assert_abs_diff_eq!(got, expected_q[i * n + j], epsilon = 1e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn ar2_is_symmetric() {
+        let m = Ar2Model::new(6);
+        let theta = [
+            1.1_f64,
+            inla_ar1_theta_from_rho(0.4),
+            inla_ar1_theta_from_rho(-0.2),
+        ];
+        for i in 0..6 {
+            for j in 0..6 {
+                assert_abs_diff_eq!(m.eval(i, j, &theta), m.eval(j, i, &theta), epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn ar2_log_prior_is_finite_on_inla_internal_scale() {
+        let m = Ar2Model::new(6);
+        let theta = [2.0_f64.ln(), 1.0_f64, 0.0_f64];
+        assert!(m.log_prior(&theta).is_finite());
     }
 }

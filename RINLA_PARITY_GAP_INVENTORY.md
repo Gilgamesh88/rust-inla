@@ -23,7 +23,7 @@ For the architectural intervention map behind these gaps, see [EXTENSION_INTERVE
 | Surface | R-INLA registry count | Current rustyINLA status | Gap summary |
 | --- | ---: | --- | --- |
 | likelihood families | `105` | `5` implemented: `gaussian`, `poisson`, `gamma`, `zeroinflatedpoisson1`, `tweedie` | `100` missing |
-| latent models | `52` | `3` implemented: `iid`, `rw1`, `ar1` | `49` missing |
+| latent models | `52` | `4` direct registry names implemented: `iid`, `rw1`, `rw2`, `ar1`; plus `ar2` as a dedicated `ar(order = 2)` surface | `48` direct registry names still missing, and `ar` remains only partially covered |
 | group models | `8` | no dedicated parity surface | effectively missing as a subsystem |
 | hazard models | `3` | no dedicated parity surface | effectively missing as a subsystem |
 | link registry | `27` | family-default links exist, but no explicit public link registry parity | mostly missing as a public feature |
@@ -38,7 +38,7 @@ For the architectural intervention map behind these gaps, see [EXTENSION_INTERVE
 These are the model-family and latent-model surfaces already present in the Rust core:
 
 - likelihoods: `gaussian`, `poisson`, `gamma`, `zeroinflatedpoisson1`, `tweedie`
-- latent models: `iid`, `rw1`, `ar1`
+- latent models: `iid`, `rw1`, `rw2`, `ar1`, `ar2`
 
 Important nuance:
 
@@ -51,11 +51,15 @@ Important nuance:
 
 Lower-friction additions that fit the current architecture relatively well:
 
-- `rw2`
 - `ar`
 - `ou`
 - `seasonal`
 - `prw2`
+
+Important nuance:
+
+- `rw2` is no longer missing
+- `ar2` now exists in `rustyINLA` as a dedicated latent-model surface, but `R-INLA` exposes this through the broader `ar` registry entry with `order = 2`, so `ar` is still only partially covered from a registry-parity perspective
 
 Graph-driven or spatial additions that likely need public API widening:
 

@@ -121,6 +121,12 @@ impl Graph {
         Self::from_neighbors(n, &edges)
     }
 
+    /// Alias semántico de rw2 para contextos AR2.
+    /// AR2 y RW2 comparten el mismo patrón de banda de segundo orden.
+    pub fn ar2(n: usize) -> Self {
+        Self::rw2(n)
+    }
+
     /// Constructor genérico desde lista de aristas.
     ///
     /// Los pares pueden venir en cualquier orden y con duplicados:
@@ -291,6 +297,14 @@ mod tests {
         let g_rw2 = Graph::rw2(n);
         assert_eq!(g_from.hash(), g_rw2.hash());
         assert_eq!(g_from.nnz(), g_rw2.nnz());
+    }
+
+    #[test]
+    fn ar2_equals_rw2_graph_pattern() {
+        let g_ar2 = Graph::ar2(9);
+        let g_rw2 = Graph::rw2(9);
+        assert_eq!(g_ar2.hash(), g_rw2.hash());
+        assert_eq!(g_ar2.nnz(), g_rw2.nnz());
     }
 
     // ── from_neighbors ────────────────────────────────────────────────────────

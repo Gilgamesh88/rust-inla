@@ -18,6 +18,9 @@
 # - Gamma + rw1: no clean public exact gamma+rw1 benchmark dataset was found
 #   on the first pass, so this follows the official INLA gamma parameterization
 #   with an ordered RW1 latent effect.
+# - Gaussian + multiple fixed effects + iid: synthetic reference covering the
+#   Phase 7A fixed-effect subset with a latent random intercept.
+# - Gaussian + ar2: synthetic comparison against INLA's model="ar", order=2.
 # - ZIP + iid + offset: no clean public exact type1 ZIP + iid + offset dataset
 #   was found on the first pass, so this uses a reproducible synthetic
 #   zeroinflatedpoisson1 reference.
@@ -308,6 +311,50 @@ build_gamma_rw1_reference <- function(seed = 20260418L) {
     )
 }
 
+build_gaussian_fixed_iid_reference <- function(seed = 20260425L) {
+    set.seed(seed)
+    n_groups <- 18L
+    reps_per_group <- 8L
+    n <- n_groups * reps_per_group
+
+    group <- factor(rep(seq_len(n_groups), each = reps_per_group))
+    x1 <- stats::rnorm(n, mean = 0.0, sd = 1.0)
+    x2 <- stats::runif(n, min = -1.0, max = 1.0)
+    promo <- factor(sample(c("baseline", "promo"), size = n, replace = TRUE))
+    u <- stats::rnorm(n_groups, mean = 0.0, sd = 0.30)
+
+    eta <- 0.75 -
+        0.55 * x1 +
+        0.35 * x2 +
+        0.40 * (promo == "promo") +
+        0.25 * x1 * (promo == "promo") +
+        u[as.integer(group)]
+
+    data.frame(
+        y = eta + stats::rnorm(n, sd = 0.20),
+        x1 = x1,
+        x2 = x2,
+        promo = promo,
+        group = group
+    )
+}
+
+build_gaussian_ar2_reference <- function(seed = 20260425L) {
+    set.seed(seed)
+    n <- 90L
+    pacf1 <- 0.60
+    pacf2 <- -0.25
+    phi <- c(pacf1 * (1 - pacf2), pacf2)
+    latent <- as.numeric(stats::arima.sim(model = list(ar = phi), n = n, sd = 0.35))
+    intercept <- 0.40
+    obs_sd <- 0.15
+
+    data.frame(
+        y = intercept + latent + stats::rnorm(n, sd = obs_sd),
+        time = seq_len(n)
+    )
+}
+
 build_zip_iid_offset_reference <- function(seed = 20260419L) {
     set.seed(seed)
     n_groups <- 35L
@@ -333,6 +380,8 @@ prepare_case_record <- function(
     label,
     family,
     formula,
+    rusty_formula = formula,
+    rinla_formula = formula,
     data_path,
     source_type,
     provenance,
@@ -345,6 +394,8 @@ prepare_case_record <- function(
         label = label,
         family = family,
         formula = formula,
+        rusty_formula = rusty_formula,
+        rinla_formula = rinla_formula,
         data_path = data_path,
         source_type = source_type,
         provenance = provenance,
@@ -487,6 +538,57 @@ prepare_gamma_rw1_case <- function(cache_dir) {
     )
 }
 
+prepare_gaussian_fixed_iid_case <- function(cache_dir) {
+    df <- build_gaussian_fixed_iid_reference()
+    path <- file.path(cache_dir, "gaussian_multi_fixed_iid_reference_synthetic.rds")
+    saveRDS(df, path)
+
+    prepare_case_record(
+        id = "gaussian_multi_fixed_iid_reference",
+        label = "Synthetic Gaussian + multiple fixed effects + iid reference",
+        family = "gaussian",
+        formula = y ~ 1 + x1 * promo + x2 + f(group, model = "iid"),
+        data_path = path,
+        source_type = "synthetic_exact_family",
+        provenance = paste(
+            "Synthetic Gaussian reference covering the current",
+            "multiple-fixed-effect subset with an iid latent intercept"
+        ),
+        tolerances = list(
+            fixed_mean_abs = 0.10,
+            random_mean_abs = 0.35,
+            random_sd_abs = 0.35,
+            fitted_mean_rel = 0.10
+        )
+    )
+}
+
+prepare_gaussian_ar2_case <- function(cache_dir) {
+    df <- build_gaussian_ar2_reference()
+    path <- file.path(cache_dir, "gaussian_ar2_reference_synthetic.rds")
+    saveRDS(df, path)
+
+    prepare_case_record(
+        id = "gaussian_ar2_reference",
+        label = "Synthetic Gaussian + ar2 reference",
+        family = "gaussian",
+        formula = y ~ 1 + f(time, model = "ar2"),
+        rusty_formula = y ~ 1 + f(time, model = "ar2"),
+        rinla_formula = y ~ 1 + f(time, model = "ar", order = 2),
+        data_path = path,
+        source_type = "synthetic_exact_family",
+        provenance = paste(
+            "Synthetic Gaussian AR2 reference;",
+            "rustyINLA model='ar2' compared against R-INLA model='ar', order=2"
+        ),
+        tolerances = list(
+            random_mean_abs = 0.35,
+            random_sd_abs = 0.35,
+            fitted_mean_rel = 0.35
+        )
+    )
+}
+
 prepare_rw2_lidar_case <- function(cache_dir) {
     if (!ensure_package("SemiPar")) {
         return(prepare_case_record(
@@ -589,6 +691,8 @@ prepare_cases <- function(cache_dir) {
         prepare_nc_sids_case(cache_dir),
         prepare_nyc_stops_case(cache_dir),
         prepare_gamma_rw1_case(cache_dir),
+        prepare_gaussian_fixed_iid_case(cache_dir),
+        prepare_gaussian_ar2_case(cache_dir),
         prepare_rw2_lidar_case(cache_dir),
         prepare_earthquake_case(cache_dir),
         prepare_zip_iid_case(cache_dir)
@@ -636,7 +740,7 @@ evaluate_case <- function(case) {
     df <- readRDS(case$data_path)
     rusty_expr <- bquote(
         rusty_inla(
-            .(case$formula),
+            .(case$rusty_formula),
             data = df,
             family = .(case$family),
             output_profile = .(rusty_output_profile)
@@ -645,7 +749,7 @@ evaluate_case <- function(case) {
     inla_expr <- bquote(
         suppressWarnings(suppressMessages(
             inla(
-                .(case$formula),
+                .(case$rinla_formula),
                 data = df,
                 family = .(case$family),
                 control.compute = list(config = FALSE),
@@ -765,8 +869,10 @@ evaluate_case <- function(case) {
 main <- function() {
     suppressPackageStartupMessages({
         library(INLA)
-        library(rustyINLA)
     })
+
+    source(file.path(getwd(), "tools", "load_worktree_package.R"), local = TRUE)
+    load_rustyinla_for_benchmarks(getwd())
 
     cases <- prepare_cases(cache_dir)
 

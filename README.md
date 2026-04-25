@@ -10,13 +10,17 @@ Headline result on the active stable suite:
 
 - `rustyINLA` passes `5/5` benchmark cases.
 - `rustyINLA` uses less memory than `R-INLA` in every benchmarked case.
+- Implemented latent models now include `iid`, `rw1`, `rw2`, `ar1`, and `ar2`.
 - Count-model parity is now strong for:
   - Poisson + `iid`
   - Poisson + `iid + iid`
   - Poisson + `ar1`
   - Zero-inflated Poisson + `iid`
 - Gamma + `rw1` now passes after the intrinsic-field covariance fix.
-- Public reference coverage now also includes Gaussian + `rw2`, with the LIDAR smoothing example numerically close to `R-INLA`.
+- External/reference coverage now also includes:
+  - Gaussian + `rw2`, with the LIDAR smoothing example numerically close to `R-INLA`
+  - synthetic Gaussian + `ar2`, compared against `R-INLA` `model = "ar", order = 2`
+  - synthetic Gaussian + multiple fixed effects + `iid`, covering the first Phase 7A fixed-effects slice
 
 | Likelihood Model | Latent Component | Rusty-INLA | R-INLA | Status |
 | --- | --- | --- | --- | --- |
@@ -37,7 +41,7 @@ For the current implemented subset, the coverage evaluation, the detailed R-INLA
 Our goal is to port the subset of INLA specifically relied upon by the actuarial industry, enhancing velocity without sacrificing gradient accuracy.
 
 - [x] **Phase 1:** Core Optimization (L-BFGS, Laplace Newton-Raphson solvers).
-- [x] **Phase 2:** Base Latent Topologies (IID, Random Walk 1, Random Walk 2, Auto-Regressive 1).
+- [x] **Phase 2:** Base Latent Topologies (IID, Random Walk 1, Random Walk 2, Auto-Regressive 1, Auto-Regressive 2).
 - [x] **Phase 3:** Hyperparameter Uncertainty via Central Composite Design (CCD).
 - [x] **Phase 4:** Core Likelihoods (Gaussian).
 - [x] **Phase 5:** Actuarial Likelihoods (ZIP Type-1, initial Tweedie prototype).
@@ -47,6 +51,8 @@ Our goal is to port the subset of INLA specifically relied upon by the actuarial
 - [ ] **Phase 9:** Dynamic Arbitrary Priors. (Exposing prior modification arrays to the R frontend).
 
 Tweedie support remains experimental and is currently excluded from the active parity benchmark sweep until the instability path is better understood.
+
+Phase 7 has now started in a narrow productization slice: multiple fixed-effect columns are validated through the current `model.matrix()` path, rank-deficient fixed designs fail fast with a clear error, and the external reference harness includes a multi-fixed-effect Gaussian + `iid` comparison against `R-INLA`.
 
 ## Installing Rust
 
@@ -83,6 +89,8 @@ For the current Windows GNU toolchain flow, use:
 ```
 
 That wrapper bootstraps the R and `extendr` build environment and then runs the workspace Rust checks on the same target configuration used by the package build.
+
+If `R CMD INSTALL` is flaky in the current Windows shell, the local benchmark harnesses can still load the package directly from the worktree through [tools/load_worktree_package.R](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/tools/load_worktree_package.R).
 
 ---
 *Built via `extendr` inside `rust-inla`.*

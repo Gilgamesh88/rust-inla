@@ -1,11 +1,13 @@
 # AR2 Extension Example
 
-This note is a worked example for how an `ar2` latent model would be added on
-top of the current `rustyINLA` architecture.
+This note started as a worked example for how an `ar2` latent model would be
+added on top of the current `rustyINLA` architecture. `ar2` is now implemented
+in this branch, so this document is best read as a post-hoc walkthrough of the
+touch points and design choices we used.
 
-It is intentionally a template, not an implementation. The actual model added
-in this branch is `rw2`, but `ar2` is a good next-example because it exercises
-the same extension surfaces while introducing a different precision
+It is still intentionally schematic rather than line-by-line. `ar2` remains a
+good extension example because it exercises the same surfaces as `rw2` while
+introducing a different precision
 parameterization.
 
 ## 1. Files to touch
@@ -20,7 +22,8 @@ For an `ar2` addition, the expected touch points are:
 - `src/rust/inla_core/tests/test_basic.rs`
 - one reference or benchmark harness under `scratch/`
 
-That is the same high-level path we used for `rw2`.
+That is the same high-level path we used for `rw2`, and it is now also the path
+used by the shipped `ar2` implementation.
 
 ## 2. Core-model shape
 
@@ -154,5 +157,5 @@ classes:
 So the takeaway is:
 
 - `rw2` showed the repo path for a new latent model end-to-end
-- `ar2` would follow the same path, but with a stationarity-safe proper
+- `ar2` followed the same path, but with a stationarity-safe proper
   precision instead of an intrinsic second-difference precision

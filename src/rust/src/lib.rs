@@ -9,7 +9,7 @@ use inla_core::likelihood::{
     GammaLikelihood, GaussianLikelihood, LogLikelihood, PoissonLikelihood, TweedieLikelihood,
     ZipLikelihood,
 };
-use inla_core::models::{Ar1Model, CompoundQFunc, IidModel, QFunc, Rw1Model, Rw2Model};
+use inla_core::models::{Ar1Model, Ar2Model, CompoundQFunc, IidModel, QFunc, Rw1Model, Rw2Model};
 use std::collections::HashMap;
 
 type BridgeResult<T> = std::result::Result<T, String>;
@@ -173,6 +173,7 @@ fn build_single_qfunc(block: &LatentBlockSpec) -> BridgeResult<Box<dyn QFunc>> {
             None => Ok(Box::new(Rw2Model::new(block.n_levels))),
         },
         "ar1" => Ok(Box::new(Ar1Model::new(block.n_levels))),
+        "ar2" => Ok(Box::new(Ar2Model::new(block.n_levels))),
         _ => Err(format!("Unknown model_type: {}", block.model_type)),
     }
 }
@@ -198,6 +199,11 @@ fn default_model_theta_init(latent_blocks: &[LatentBlockSpec]) -> BridgeResult<V
             "ar1" => {
                 theta_init.push(4.0);
                 theta_init.push(2.0);
+            }
+            "ar2" => {
+                theta_init.push(4.0);
+                theta_init.push(1.0);
+                theta_init.push(0.0);
             }
             _ => {
                 return Err(format!(
@@ -354,6 +360,7 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
             .map(|block| match block.model_type.as_str() {
                 "iid" | "rw1" | "rw2" => 1usize,
                 "ar1" => 2usize,
+                "ar2" => 3usize,
                 _ => 0usize,
             })
             .sum::<usize>()
@@ -585,6 +592,7 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
                 n_evals = res.n_evals,
                 fixed_means = res.fixed_means,
                 fixed_sds = res.fixed_sds,
+                fixed_var_theta_opt = res.fixed_var_theta_opt,
                 marg_means = marg_means,
                 marg_vars = marg_vars,
                 // Predictions mapped to the Response (μ) Scale natively!

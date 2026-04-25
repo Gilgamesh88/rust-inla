@@ -43,9 +43,11 @@ Implemented in [src/rust/inla_core/src/models/mod.rs](C:/Users/Antonio/Documents
 | `rw1` | `Rw1Model` | `1` | linear chain | implemented |
 | `rw2` | `Rw2Model` | `1` | second-order chain | implemented |
 | `ar1` | `Ar1Model` | `2` | linear chain | implemented |
+| `ar2` | `Ar2Model` | `3` | second-order chain | implemented |
 | compound block-diagonal combinations | `CompoundQFunc` | sum of block parameters | disjoint union of block graphs | implemented |
 
 For `rw2`, the current bridge now passes numeric latent level values into the Rust core when they are available. That means the precision and intrinsic linear-trend constraint follow the actual coordinate spacing for irregular grids, which is the INLA-style behavior needed by examples such as `SemiPar::lidar`.
+For `ar2`, the current implementation uses INLA-style PACF hyperparameters internally and is benchmarked against `R-INLA` `model = "ar", order = 2` in the external reference harness.
 
 ### Core engine subsystems
 
@@ -77,7 +79,7 @@ The current graph layer already supports:
 
 - diagonal graphs for `iid`
 - linear-chain graphs for `rw1` and `ar1`
-- second-order chain graphs for `rw2`
+- second-order chain graphs for `rw2` and `ar2`
 - generic edge-list graphs through [`Graph::from_neighbors`](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/graph/mod.rs:119)
 - block-diagonal unions through [`Graph::disjoint_union`](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/graph/mod.rs:146)
 - extra fill induced by `A^T A` structure through [`Graph::build_a_t_a_edges`](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/graph/mod.rs:164)
@@ -107,6 +109,7 @@ The `QFunc` trait already supports:
 - model-specific hyperpriors
 
 In the current subset, `rw2` is the first model that uses extra structural metadata beyond block length alone: when the R side provides numeric latent values, [Rw2Model](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/models/mod.rs) builds the second-order precision on those coordinates instead of assuming unit spacing.
+The current proper-chain subset now also includes [Ar2Model](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/inla_core/src/models/mod.rs), which reuses the same second-order sparsity pattern but swaps in the stationary AR2 precision induced by unconstrained PACF hyperparameters.
 
 That is enough for many additional latent models, provided they can be expressed as a sparse precision matrix over the current latent-vector representation.
 
@@ -148,10 +151,11 @@ The R-side latent-model helper in [R/f.R](C:/Users/Antonio/Documents/rustyINLA/r
 - `rw1`
 - `rw2`
 - `ar1`
+- `ar2`
 
-The binding registration in [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:155) now mirrors that same four-model subset.
+The binding registration in [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:155) now mirrors that same five-model subset.
 
-So the next latent-model bottleneck is no longer `rw2`; it is the lack of a public graph-input contract for models such as `besag`.
+So the next latent-model bottleneck is no longer `rw2` or `ar2`; it is the lack of a public graph-input contract for models such as `besag`.
 
 ## 5. Extension difficulty classes
 
@@ -180,6 +184,7 @@ This is usually the cheapest meaningful expansion path.
 Examples:
 
 - `rw2`
+- `ar2`
 - another chain-based or block-diagonal GMRF with no extra front-end inputs
 
 Typical work:

@@ -27,6 +27,23 @@ build_backend_spec <- function(
 
     mf_fixed <- model.frame(tf_fixed, data = data, na.action = na.pass)
     X_fixed <- model.matrix(tf_fixed, mf_fixed)
+    if (ncol(X_fixed) > 0L) {
+        qr_fixed <- qr(X_fixed)
+        if (qr_fixed$rank < ncol(X_fixed)) {
+            aliased_idx <- qr_fixed$pivot[seq.int(qr_fixed$rank + 1L, ncol(X_fixed))]
+            aliased_names <- colnames(X_fixed)[aliased_idx]
+            stop(
+                sprintf(
+                    paste(
+                        "Fixed-effects design matrix is rank-deficient.",
+                        "Remove or reparameterize aliased columns: %s"
+                    ),
+                    paste(aliased_names, collapse = ", ")
+                ),
+                call. = FALSE
+            )
+        }
+    }
     formula_offset <- model.offset(mf_fixed)
     if (!is.null(formula_offset)) {
         formula_offset <- as.numeric(formula_offset)
@@ -321,6 +338,12 @@ build_hyperparameter_specs <- function(backend_spec, family) {
         if (identical(block$model, "ar1")) {
             add_spec(sprintf("Precision for %s", cov_name), exp)
             add_spec(sprintf("Rho for %s", cov_name), function(theta) tanh(theta / 2.0))
+        }
+
+        if (identical(block$model, "ar2")) {
+            add_spec(sprintf("Precision for %s", cov_name), exp)
+            add_spec(sprintf("PACF1 for %s", cov_name), function(theta) tanh(theta / 2.0))
+            add_spec(sprintf("PACF2 for %s", cov_name), function(theta) tanh(theta / 2.0))
         }
     }
 

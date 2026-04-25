@@ -55,6 +55,7 @@ pub struct InlaResult {
     pub n_evals: usize,
     pub fixed_means: Vec<f64>,
     pub fixed_sds: Vec<f64>,
+    pub fixed_var_theta_opt: Vec<f64>,
     pub ccd_thetas: Vec<f64>,
     pub ccd_base_weights: Vec<f64>,
     pub ccd_weights: Vec<f64>,
@@ -89,9 +90,10 @@ impl InlaEngine {
         let n = model.n_latent;
         let k = model.n_fixed;
 
+        let mut fixed_var_theta_opt = vec![0.0_f64; k];
         let latent_var_theta_opt = if k > 0 {
-            let (_, _, _, diag_aug_inv, _) = problem
-                .find_mode_with_fixed_effects(
+            let (_, _, _, diag_aug_inv, fixed_cov, _, _) = problem
+                .find_mode_with_fixed_effects_with_cov(
                     model,
                     &theta_opt,
                     &opt.mode_x,
@@ -104,6 +106,9 @@ impl InlaEngine {
                         "Theta-opt conditional covariance solve failed while solving fixed effects: {err}"
                     ),
                 })?;
+            for j in 0..k {
+                fixed_var_theta_opt[j] = fixed_cov[j * k + j];
+            }
             diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect()
         } else {
             let (_, _, diag_aug_inv) = problem
@@ -139,7 +144,10 @@ impl InlaEngine {
         let mut mixed_mean_sq = vec![0.0_f64; n];
 
         let mut mixed_fixed_mean = vec![0.0_f64; k];
-        let mut mixed_fixed_mean_sq = vec![0.0_f64; k];
+        let mut mixed_fixed_second_moment = vec![0.0_f64; k * k];
+        let mut mixed_fixed_cov_inner = vec![0.0_f64; k * k];
+        let mut mixed_latent_fixed_second_moment = vec![0.0_f64; n * k];
+        let mut mixed_latent_fixed_cov_inner = vec![0.0_f64; n * k];
         let mut next_x_warm = opt.mode_x.clone();
         let mut next_beta_warm = opt.mode_beta.clone();
 
@@ -175,16 +183,18 @@ impl InlaEngine {
                 }
             }
 
-            let (fixed_k, mean_k, vars_k) = if k > 0 {
-                let (beta, x_hat, _, diag_aug_inv, _) = problem
-                    .find_mode_with_fixed_effects(model, theta_k, &x_warm, &beta_warm, 20, 1e-8)
+            let (fixed_k, mean_k, vars_k, fixed_cov_k, latent_fixed_cov_k) = if k > 0 {
+                let (beta, x_hat, _, diag_aug_inv, fixed_cov, latent_fixed_cov, _) = problem
+                    .find_mode_with_fixed_effects_with_cov(
+                        model, theta_k, &x_warm, &beta_warm, 20, 1e-8,
+                    )
                     .map_err(|err| InlaError::ConvergenceFailed {
                         reason: format!(
                             "CCD point {pt_idx} failed while solving fixed effects: {err}"
                         ),
                     })?;
                 let vs: Vec<f64> = diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect();
-                (beta, x_hat, vs)
+                (beta, x_hat, vs, fixed_cov, latent_fixed_cov)
             } else {
                 let (x_hat, _, diag_aug_inv) = problem
                     .find_mode_with_inverse(model, theta_k, &x_warm, 20, 1e-8)
@@ -194,21 +204,29 @@ impl InlaEngine {
                         ),
                     })?;
                 let vs: Vec<f64> = diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect();
-                (vec![], x_hat, vs)
+                (vec![], x_hat, vs, vec![], vec![])
             };
 
             next_x_warm = mean_k.clone();
             next_beta_warm = fixed_k.clone();
 
-            for (j, fixed_value) in fixed_k.iter().enumerate().take(k) {
-                mixed_fixed_mean[j] += weight * *fixed_value;
-                mixed_fixed_mean_sq[j] += weight * *fixed_value * *fixed_value;
+            for (j1, fixed_value) in fixed_k.iter().enumerate().take(k) {
+                mixed_fixed_mean[j1] += weight * *fixed_value;
+                for j2 in 0..k {
+                    mixed_fixed_second_moment[j1 * k + j2] += weight * *fixed_value * fixed_k[j2];
+                    mixed_fixed_cov_inner[j1 * k + j2] += weight * fixed_cov_k[j1 * k + j2];
+                }
             }
 
             for i in 0..n {
                 mixed_mean[i] += weight * mean_k[i];
                 mixed_mean_sq[i] += weight * mean_k[i] * mean_k[i];
                 mixed_var_inner[i] += weight * vars_k[i];
+                for j in 0..k {
+                    mixed_latent_fixed_second_moment[i + j * n] += weight * mean_k[i] * fixed_k[j];
+                    mixed_latent_fixed_cov_inner[i + j * n] +=
+                        weight * latent_fixed_cov_k[i + j * n];
+                }
             }
         }
 
@@ -219,10 +237,25 @@ impl InlaEngine {
             final_vars[i] = mixed_var_inner[i] + inter_var[i];
         }
 
+        let mut mixed_fixed_cov = mixed_fixed_cov_inner;
+        for j1 in 0..k {
+            for j2 in 0..k {
+                mixed_fixed_cov[j1 * k + j2] += mixed_fixed_second_moment[j1 * k + j2]
+                    - mixed_fixed_mean[j1] * mixed_fixed_mean[j2];
+            }
+        }
+
+        let mut mixed_latent_fixed_cov = mixed_latent_fixed_cov_inner;
+        for j in 0..k {
+            for i in 0..n {
+                mixed_latent_fixed_cov[i + j * n] += mixed_latent_fixed_second_moment[i + j * n]
+                    - mixed_mean[i] * mixed_fixed_mean[j];
+            }
+        }
+
         let mut fixed_sds = vec![0.0_f64; k];
         for j in 0..k {
-            let iv = (mixed_fixed_mean_sq[j] - mixed_fixed_mean[j] * mixed_fixed_mean[j]).max(0.0);
-            fixed_sds[j] = iv.sqrt();
+            fixed_sds[j] = mixed_fixed_cov[j * k + j].max(0.0).sqrt();
         }
 
         let mut posterior_mean = mixed_mean.clone();
@@ -332,8 +365,21 @@ impl InlaEngine {
                     var += ax * ax * variances[j];
                 }
                 if let Some(fixed_matrix) = model.fixed_matrix {
-                    for (j, fixed_sd) in fixed_sds.iter().enumerate().take(k) {
-                        var += fixed_matrix[i + j * model.y.len()].powi(2) * *fixed_sd * *fixed_sd;
+                    for j1 in 0..k {
+                        let x_i_j1 = fixed_matrix[i + j1 * model.y.len()];
+                        for j2 in 0..k {
+                            var += x_i_j1
+                                * mixed_fixed_cov[j1 * k + j2]
+                                * fixed_matrix[i + j2 * model.y.len()];
+                        }
+                    }
+                    for &(latent_idx, ax) in &a_rows[i] {
+                        for j in 0..k {
+                            var += 2.0
+                                * ax
+                                * mixed_latent_fixed_cov[latent_idx + j * n]
+                                * fixed_matrix[i + j * model.y.len()];
+                        }
                     }
                 }
                 let sd = var.sqrt().max(1e-10);
@@ -387,6 +433,7 @@ impl InlaEngine {
             n_evals: opt.n_evals,
             fixed_means: mixed_fixed_mean,
             fixed_sds,
+            fixed_var_theta_opt,
             ccd_thetas,
             ccd_base_weights,
             ccd_weights,

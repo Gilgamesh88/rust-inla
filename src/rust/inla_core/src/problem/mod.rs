@@ -9,13 +9,24 @@ use crate::solver::{FaerSolver, SpMat, SparseSolver};
 pub const PRIOR_PREC_BETA: f64 = 0.001;
 type ModeCoreResult = (Vec<f64>, f64, Option<Vec<f64>>);
 type FixedEffectsModeResult = (Vec<f64>, Vec<f64>, f64, Vec<f64>, f64);
-type FixedEffectsModeCoreResult = (Vec<f64>, Vec<f64>, f64, Option<Vec<f64>>, f64);
+type FixedEffectsModeWithCovResult = (Vec<f64>, Vec<f64>, f64, Vec<f64>, Vec<f64>, Vec<f64>, f64);
+type FixedEffectsModeCoreResult = (
+    Vec<f64>,
+    Vec<f64>,
+    f64,
+    Option<Vec<f64>>,
+    Option<Vec<f64>>,
+    Option<Vec<f64>>,
+    f64,
+);
 
 #[derive(Clone, Copy)]
 struct ModeControl {
     max_iter: usize,
     tol: f64,
     need_diag_aug_inv: bool,
+    need_fixed_cov: bool,
+    need_latent_fixed_cov: bool,
 }
 
 pub struct Problem {
@@ -550,6 +561,8 @@ impl Problem {
                 max_iter,
                 tol,
                 need_diag_aug_inv: true,
+                need_fixed_cov: false,
+                need_latent_fixed_cov: false,
             },
         )?;
         Ok((x, log_det_aug, diag_aug_inv.unwrap_or_default()))
@@ -571,6 +584,8 @@ impl Problem {
                 max_iter,
                 tol,
                 need_diag_aug_inv: false,
+                need_fixed_cov: false,
+                need_latent_fixed_cov: false,
             },
         )?;
         Ok((x, log_det_aug))
@@ -588,7 +603,7 @@ impl Problem {
     ) -> Result<FixedEffectsModeCoreResult, InlaError> {
         if model.n_fixed == 0 || model.fixed_matrix.is_none() {
             let (x, ld, di) = self.find_mode_core(model, theta, x_init, control)?;
-            return Ok((vec![], x, ld, di, 0.0));
+            return Ok((vec![], x, ld, di, None, None, 0.0));
         }
         self.diagnostics.latent_mode_solve_calls += 1;
         let solve_started = Instant::now();
@@ -932,7 +947,10 @@ impl Problem {
                 }
             }
 
-            if let Some(diag_latent_cov) = diag_aug_inv.as_mut() {
+            let mut fixed_cov = None;
+            let mut latent_fixed_cov = None;
+            if control.need_diag_aug_inv || control.need_fixed_cov || control.need_latent_fixed_cov
+            {
                 let (schur_inv, schur_inv_jitter) = dense_spd_inverse_with_schur_stabilization(
                     &s_mat,
                     n_fixed,
@@ -951,21 +969,45 @@ impl Problem {
                     }
                 }
 
-                // Joint fixed/random Gaussian covariance:
-                // Var(x | y, theta) = Q_aug^{-1} + Q_aug^{-1} C S^{-1} C^T Q_aug^{-1}
-                // with C = A^T W X and S the fixed-effects Schur complement.
-                // Keeping only diag(Q_aug^{-1}) makes latent SDs too tight whenever
-                // fixed effects are present and coupled to the latent field.
-                for k in 0..n_latent {
-                    let mut schur_var = 0.0_f64;
-                    for j1 in 0..n_fixed {
-                        let vk_j1 = v[k + j1 * n_latent];
-                        for j2 in 0..n_fixed {
-                            schur_var +=
-                                vk_j1 * schur_inv[j1 * n_fixed + j2] * v[k + j2 * n_latent];
+                if control.need_diag_aug_inv {
+                    let diag_latent_cov = diag_aug_inv
+                        .as_mut()
+                        .expect("latent covariance diagonal requested");
+
+                    // Joint fixed/random Gaussian covariance:
+                    // Var(x | y, theta) = Q_aug^{-1} + Q_aug^{-1} C S^{-1} C^T Q_aug^{-1}
+                    // with C = A^T W X and S the fixed-effects Schur complement.
+                    // Keeping only diag(Q_aug^{-1}) makes latent SDs too tight whenever
+                    // fixed effects are present and coupled to the latent field.
+                    for k in 0..n_latent {
+                        let mut schur_var = 0.0_f64;
+                        for j1 in 0..n_fixed {
+                            let vk_j1 = v[k + j1 * n_latent];
+                            for j2 in 0..n_fixed {
+                                schur_var +=
+                                    vk_j1 * schur_inv[j1 * n_fixed + j2] * v[k + j2 * n_latent];
+                            }
+                        }
+                        diag_latent_cov[k] = (diag_latent_cov[k] + schur_var).max(1e-12);
+                    }
+                }
+
+                if control.need_fixed_cov {
+                    fixed_cov = Some(schur_inv.clone());
+                }
+
+                if control.need_latent_fixed_cov {
+                    let mut cross_cov = vec![0.0_f64; n_latent * n_fixed];
+                    for j2 in 0..n_fixed {
+                        for k in 0..n_latent {
+                            let mut cov = 0.0_f64;
+                            for j1 in 0..n_fixed {
+                                cov -= v[k + j1 * n_latent] * schur_inv[j1 * n_fixed + j2];
+                            }
+                            cross_cov[k + j2 * n_latent] = cov;
                         }
                     }
-                    diag_latent_cov[k] = (diag_latent_cov[k] + schur_var).max(1e-12);
+                    latent_fixed_cov = Some(cross_cov);
                 }
             }
 
@@ -984,7 +1026,15 @@ impl Problem {
                 )
             })?;
 
-            Ok((beta, x, log_det_aug, diag_aug_inv, schur_log_det))
+            Ok((
+                beta,
+                x,
+                log_det_aug,
+                diag_aug_inv,
+                fixed_cov,
+                latent_fixed_cov,
+                schur_log_det,
+            ))
         })();
         self.diagnostics.latent_mode_solve_time += solve_started.elapsed();
         result
@@ -999,7 +1049,7 @@ impl Problem {
         max_iter: usize,
         tol: f64,
     ) -> Result<FixedEffectsModeResult, InlaError> {
-        let (beta, x, log_det_aug, diag_aug_inv, schur_log_det) = self
+        let (beta, x, log_det_aug, diag_aug_inv, _, _, schur_log_det) = self
             .find_mode_with_fixed_effects_core(
                 model,
                 theta,
@@ -1009,6 +1059,8 @@ impl Problem {
                     max_iter,
                     tol,
                     need_diag_aug_inv: true,
+                    need_fixed_cov: false,
+                    need_latent_fixed_cov: false,
                 },
             )?;
         Ok((
@@ -1016,6 +1068,40 @@ impl Problem {
             x,
             log_det_aug,
             diag_aug_inv.unwrap_or_default(),
+            schur_log_det,
+        ))
+    }
+
+    pub fn find_mode_with_fixed_effects_with_cov(
+        &mut self,
+        model: &crate::inference::InlaModel<'_>,
+        theta: &[f64],
+        x_init: &[f64],
+        beta_init: &[f64],
+        max_iter: usize,
+        tol: f64,
+    ) -> Result<FixedEffectsModeWithCovResult, InlaError> {
+        let (beta, x, log_det_aug, diag_aug_inv, fixed_cov, latent_fixed_cov, schur_log_det) = self
+            .find_mode_with_fixed_effects_core(
+                model,
+                theta,
+                x_init,
+                beta_init,
+                ModeControl {
+                    max_iter,
+                    tol,
+                    need_diag_aug_inv: true,
+                    need_fixed_cov: true,
+                    need_latent_fixed_cov: true,
+                },
+            )?;
+        Ok((
+            beta,
+            x,
+            log_det_aug,
+            diag_aug_inv.unwrap_or_default(),
+            fixed_cov.unwrap_or_default(),
+            latent_fixed_cov.unwrap_or_default(),
             schur_log_det,
         ))
     }
@@ -1029,17 +1115,20 @@ impl Problem {
         max_iter: usize,
         tol: f64,
     ) -> Result<(Vec<f64>, Vec<f64>, f64, f64), InlaError> {
-        let (beta, x, log_det_aug, _, schur_log_det) = self.find_mode_with_fixed_effects_core(
-            model,
-            theta,
-            x_init,
-            beta_init,
-            ModeControl {
-                max_iter,
-                tol,
-                need_diag_aug_inv: false,
-            },
-        )?;
+        let (beta, x, log_det_aug, _, _, _, schur_log_det) = self
+            .find_mode_with_fixed_effects_core(
+                model,
+                theta,
+                x_init,
+                beta_init,
+                ModeControl {
+                    max_iter,
+                    tol,
+                    need_diag_aug_inv: false,
+                    need_fixed_cov: false,
+                    need_latent_fixed_cov: false,
+                },
+            )?;
         Ok((beta, x, log_det_aug, schur_log_det))
     }
 

@@ -26,24 +26,32 @@ Why first:
 - a stable base makes every later extension cheaper to validate
 - parity regressions are easier to catch when the supported subset is already frozen
 
+`rw2` and `ar2` are now implemented. The next highest-value pre-release work is the first fixed-effects productization slice from Phase 7.
+
 ## Priority 1: low-friction, high-fit extensions
 
 These are the best next additions because they fit the current abstractions with minimal front-end redesign.
 
-### 1. `rw2`
+### 1. Phase 7A fixed-effects productization
 
 Why now:
 
-- it fits the current `QFunc` model shape
-- it reuses the current chain-graph machinery
-- it expands the smoothing subset in a natural way
+- arbitrary-width fixed effects already work in the core
+- the R-side design-matrix path already exists through `model.matrix()`
+- making that support explicit is more valuable to beta users than one more latent topology
 
 Expected work:
 
-- add `Rw2Model` in `src/rust/inla_core/src/models/mod.rs`
-- expose `"rw2"` in `R/f.R` and the Rust bridge
-- add default theta initialization
-- add model tests and at least one reference benchmark
+- validate rank-deficient or aliased fixed designs explicitly
+- add benchmark/reference coverage with multiple fixed columns
+- document the supported fixed-effect formula subset
+- decide whether any fixed-prior controls should be exposed before release
+- fix the current fixed-effect SD underestimation before treating Phase 7A as complete
+- at the end of Phase 7A, adapt and run the external comprehensive validation bundle
+  (`inla_test_suite_part1.R`, `inla_test_suite_part2_fremtpl2.R`,
+  `inla_test_suite_part3_stress.R`, `run_all_benchmarks.R`,
+  `inla_complete_test_suite.R`) against the supported subset instead of
+  running it mid-phase
 
 ### 2. one additional GLM-like likelihood family
 
@@ -63,11 +71,11 @@ Expected work:
 - register its string name and defaults in the bridge
 - add unit tests, end-to-end tests, and reference comparisons
 
-### If we add exactly one extension before the first public release
+### If we add exactly one thing before the first public release
 
 Recommended choice:
 
-- `rw2`
+- Phase 7A fixed-effects productization
 
 Why:
 
@@ -83,7 +91,7 @@ Best second choice after that:
 
 Practical interpretation:
 
-- if we choose one thing for architectural credibility, choose `rw2`
+- if we choose one thing for beta usability, choose Phase 7A
 - if we choose one thing for immediate actuarial model breadth after that, choose a GLM-like family
 
 ## Priority 2: modest API expansion with strong payoff
@@ -179,7 +187,7 @@ Why later:
 If development capacity is limited, the most efficient sequence is:
 
 1. keep the current stable subset benchmark-clean
-2. add `rw2`
+2. finish Phase 7A fixed-effects productization
 3. add one additional GLM-like family
 4. widen the backend spec for generic graph input
 5. add `besag`

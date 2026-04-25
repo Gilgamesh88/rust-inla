@@ -30,6 +30,8 @@ The external examples serve a different purpose:
 | `poisson + iid + iid + offset` | NYC stop-and-frisk multilevel count example | exact public structural match | `frisk_with_noise.dat` |
 | `gaussian + rw2` | LIDAR smoothing example from the INLA GitBook | exact public structural match | `SemiPar::lidar` |
 | `poisson + ar1` | Earthquake temporal count example | exact public structural match | `MixtureInf::earthquake` |
+| `gaussian + ar2` | no clean first-pass public exact dataset match | synthetic exact-family reference | synthetic Gaussian AR2 reference |
+| `gaussian + multiple fixed effects + iid` | no clean public exact beta-heavy benchmark was prioritized yet | synthetic exact-family reference | synthetic Gaussian multi-fixed-effect reference |
 | `gamma + rw1` | Gamma likelihood doc + RW1 smoothing chapters | public semantic match, not first-pass exact dataset match | synthetic exact-family reference |
 | `zeroinflatedpoisson1 + iid + offset` | official ZIP1 docs + inlabru ZIP example | public semantic match, not first-pass exact dataset match | synthetic exact-family reference |
 
@@ -54,6 +56,8 @@ Use these when we want to show:
 These are still useful, but should be described honestly:
 
 - `gamma + rw1`
+- `gaussian + ar2`
+- `gaussian + multiple fixed effects + iid`
 - `zeroinflatedpoisson1 + iid + offset`
 
 Use these when we want to show:
@@ -168,6 +172,11 @@ values for irregular grids, not just sequential indices. With that fix in
 place, the current LIDAR benchmark is now very close to `R-INLA`
 (`random_mean_max_abs ~= 4.33e-05`, `random_sd_max_abs ~= 1.31e-05`,
 `fitted_mean_max_rel ~= 8.51e-05`).
+
+The current synthetic exact-family coverage also includes:
+
+- Gaussian + `ar2`, benchmarked against `R-INLA` `model = "ar", order = 2`
+- Gaussian + multiple fixed effects + `iid`, which exercises the first Phase 7A fixed-effects slice through the current `model.matrix()` path
 
 ## 10. Related files
 

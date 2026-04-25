@@ -12,8 +12,10 @@ if (nzchar(local_rustyinla_lib)) {
 suppressPackageStartupMessages({
     library(INLA)
     library(CASdatasets)
-    library(rustyINLA)
 })
+
+source(file.path(getwd(), "tools", "load_worktree_package.R"), local = TRUE)
+load_rustyinla_for_benchmarks(getwd())
 
 rusty_output_profile <- Sys.getenv("RUSTYINLA_OUTPUT_PROFILE", "thin")
 if (!(rusty_output_profile %in% c("thin", "benchmark"))) {
