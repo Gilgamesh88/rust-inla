@@ -205,7 +205,9 @@ pub(crate) fn laplace_eval(
         (x, ld, eta, vec![], 0.0_f64)
     };
 
-    let log_det_q = if model.qfunc.is_proper() {
+    let log_det_q = if model.n_latent == 0 {
+        0.0
+    } else if model.qfunc.is_proper() {
         problem.eval(model.qfunc, theta_model)?
     } else {
         model.qfunc.log_det_term(theta_model)

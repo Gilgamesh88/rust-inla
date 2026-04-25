@@ -2,7 +2,9 @@ use inla_core::inference::{InlaEngine, InlaModel, InlaParams};
 use inla_core::likelihood::{
     GammaLikelihood, GaussianLikelihood, LogLikelihood, PoissonLikelihood,
 };
-use inla_core::models::{Ar1Model, Ar2Model, CompoundQFunc, IidModel, QFunc, Rw1Model, Rw2Model};
+use inla_core::models::{
+    Ar1Model, Ar2Model, CompoundQFunc, FixedOnlyModel, IidModel, QFunc, Rw1Model, Rw2Model,
+};
 use inla_core::problem::Problem;
 
 fn dense_cholesky_solve(mut a: Vec<f64>, mut b: Vec<f64>, n: usize) -> Vec<f64> {
@@ -290,6 +292,158 @@ fn test_gaussian_multi_fixed_iid_run_end_to_end() {
         .fitted
         .iter()
         .all(|marginal| marginal.mean().is_finite()));
+}
+
+#[test]
+fn test_fixed_only_poisson_run_end_to_end() {
+    let y = vec![0.0, 1.0, 3.0, 1.0, 4.0, 2.0, 0.0, 2.0];
+    let offset = vec![
+        0.8_f64.ln(),
+        1.1_f64.ln(),
+        1.4_f64.ln(),
+        1.0_f64.ln(),
+        1.6_f64.ln(),
+        1.2_f64.ln(),
+        0.9_f64.ln(),
+        1.5_f64.ln(),
+    ];
+    let fixed_matrix = vec![
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // intercept
+        -1.0, -0.4, 0.2, 0.8, -0.7, 0.5, 1.1, -0.2, // x1
+        0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, // promo indicator
+    ];
+
+    let qfunc = FixedOnlyModel::new();
+    let likelihood = PoissonLikelihood {};
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: None,
+        a_j: None,
+        a_x: None,
+        n_fixed: 3,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: 0,
+        theta_init: vec![],
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
+
+    assert!(res.theta_opt.is_empty());
+    assert_eq!(res.fixed_means.len(), 3);
+    assert_eq!(res.fixed_sds.len(), 3);
+    assert!(res.random.is_empty());
+    assert!(res.posterior_mean.is_empty());
+    assert!(res.w_opt.is_empty());
+    assert_eq!(res.fitted.len(), y.len());
+    assert!(res.fixed_means.iter().all(|value| value.is_finite()));
+    assert!(res
+        .fixed_sds
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0));
+    assert!(res
+        .fitted
+        .iter()
+        .all(|marginal| marginal.mean().is_finite()));
+}
+
+#[test]
+fn test_fixed_only_gaussian_covariance_matches_dense_gls_reference() {
+    let y = vec![0.9, 1.4, 0.8, 1.7, 1.1, 1.9];
+    let offset = vec![0.05, -0.02, 0.03, 0.0, -0.01, 0.04];
+    let fixed_matrix = vec![
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // intercept
+        -1.0, -0.2, 0.5, 1.1, -0.7, 0.8, // x1
+        0.0, 1.0, 0.0, 1.0, 0.0, 1.0, // promo indicator
+    ];
+
+    let qfunc = FixedOnlyModel::new();
+    let likelihood = GaussianLikelihood {};
+    let theta = vec![1.2_f64];
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &qfunc,
+        likelihood: &likelihood,
+        a_i: None,
+        a_j: None,
+        a_x: None,
+        n_fixed: 3,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: 0,
+        theta_init: theta.clone(),
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+    };
+
+    let mut problem = Problem::new(&model);
+    let (_, x_hat, log_det_aug, diag_aug_inv, fixed_cov, latent_fixed_cov, schur_log_det) = problem
+        .find_mode_with_fixed_effects_with_cov(&model, &theta, &[], &[], 50, 1e-8)
+        .unwrap();
+
+    assert!(x_hat.is_empty());
+    assert_eq!(log_det_aug, 0.0);
+    assert!(diag_aug_inv.is_empty());
+    assert!(latent_fixed_cov.is_empty());
+
+    let n_data = y.len();
+    let n_fixed = model.n_fixed;
+    let tau_obs = theta[0].exp();
+    let mut xtwx = vec![0.0_f64; n_fixed * n_fixed];
+    for j1 in 0..n_fixed {
+        for j2 in 0..n_fixed {
+            let mut val = 0.0_f64;
+            for i in 0..n_data {
+                val += tau_obs * fixed_matrix[i + j1 * n_data] * fixed_matrix[i + j2 * n_data];
+            }
+            if j1 == j2 {
+                val += inla_core::problem::PRIOR_PREC_BETA;
+            }
+            xtwx[j1 * n_fixed + j2] = val;
+        }
+    }
+
+    let expected_cov = dense_spd_inverse(&xtwx, n_fixed);
+    for j1 in 0..n_fixed {
+        for j2 in 0..n_fixed {
+            let expected = expected_cov[j1 * n_fixed + j2];
+            let got = fixed_cov[j1 * n_fixed + j2];
+            assert!(
+                (got - expected).abs() < 1e-8,
+                "fixed-only covariance mismatch ({j1}, {j2}): got {got}, expected {expected}"
+            );
+        }
+    }
+
+    let expected_log_det = {
+        let mut xtwx_for_det = xtwx.clone();
+        let mut log_det = 0.0;
+        for i in 0..n_fixed {
+            for j in 0..=i {
+                let mut sum = xtwx_for_det[i * n_fixed + j];
+                for k in 0..j {
+                    sum -= xtwx_for_det[i * n_fixed + k] * xtwx_for_det[j * n_fixed + k];
+                }
+                if i == j {
+                    let l_ii = sum.sqrt();
+                    xtwx_for_det[i * n_fixed + j] = l_ii;
+                    log_det += 2.0 * l_ii.ln();
+                } else {
+                    xtwx_for_det[i * n_fixed + j] = sum / xtwx_for_det[j * n_fixed + j];
+                }
+            }
+        }
+        log_det
+    };
+    assert!((schur_log_det - expected_log_det).abs() < 1e-8);
 }
 
 #[test]

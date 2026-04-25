@@ -7,7 +7,8 @@ Description: Fits a focused, INLA-style subset of latent Gaussian models
     through an R formula interface backed by a Rust implementation. The
     current supported surface includes Gaussian, Poisson, Gamma,
     zero-inflated Poisson, and experimental Tweedie likelihoods together
-    with iid, rw1, rw2, and ar1 latent effects.
+    with fixed-effect-only GLMs and iid, rw1, rw2, ar1, and ar2 latent
+    effects.
 License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
     license
 Encoding: UTF-8

@@ -30,8 +30,9 @@ The external examples serve a different purpose:
 | `poisson + iid + iid + offset` | NYC stop-and-frisk multilevel count example | exact public structural match | `frisk_with_noise.dat` |
 | `gaussian + rw2` | LIDAR smoothing example from the INLA GitBook | exact public structural match | `SemiPar::lidar` |
 | `poisson + ar1` | Earthquake temporal count example | exact public structural match | `MixtureInf::earthquake` |
+| `fixed-effect-only GLMs` | uploaded-suite GLM surfaces after supported-column filtering | curated supported-subset match | `tools/run_supported_subset_validation.R` |
 | `gaussian + ar2` | no clean first-pass public exact dataset match | synthetic exact-family reference | synthetic Gaussian AR2 reference |
-| `gaussian + multiple fixed effects + iid` | no clean public exact beta-heavy benchmark was prioritized yet | synthetic exact-family reference | synthetic Gaussian multi-fixed-effect reference |
+| `gaussian + multiple fixed effects + iid + offset` | no clean public exact beta-heavy benchmark was prioritized yet | synthetic exact-family reference | synthetic Gaussian multi-fixed-effect reference |
 | `gamma + rw1` | Gamma likelihood doc + RW1 smoothing chapters | public semantic match, not first-pass exact dataset match | synthetic exact-family reference |
 | `zeroinflatedpoisson1 + iid + offset` | official ZIP1 docs + inlabru ZIP example | public semantic match, not first-pass exact dataset match | synthetic exact-family reference |
 
@@ -57,7 +58,7 @@ These are still useful, but should be described honestly:
 
 - `gamma + rw1`
 - `gaussian + ar2`
-- `gaussian + multiple fixed effects + iid`
+- `gaussian + multiple fixed effects + iid + offset`
 - `zeroinflatedpoisson1 + iid + offset`
 
 Use these when we want to show:
@@ -79,6 +80,10 @@ not:
 Use the external harness:
 
 - [scratch/benchmark_external_reference_cases.R](scratch/benchmark_external_reference_cases.R)
+
+Use the uploaded-suite supported-subset harness:
+
+- [tools/run_supported_subset_validation.R](tools/run_supported_subset_validation.R)
 
 What it does:
 
@@ -176,11 +181,13 @@ place, the current LIDAR benchmark is now very close to `R-INLA`
 The current synthetic exact-family coverage also includes:
 
 - Gaussian + `ar2`, benchmarked against `R-INLA` `model = "ar", order = 2`
-- Gaussian + multiple fixed effects + `iid`, which exercises the first Phase 7A fixed-effects slice through the current `model.matrix()` path
+- Gaussian + multiple fixed effects + `iid` + offset, which exercises the first Phase 7A fixed-effects slice through the current `model.matrix()` path
+- Fixed-effect-only Poisson/Gamma-style GLM surfaces through `tools/run_supported_subset_validation.R`
 
 ## 10. Related files
 
 - [scratch/EXTERNAL_EXAMPLES_FOR_ACTIVE_BENCHMARK_MODELS_2026-04-18.md](scratch/EXTERNAL_EXAMPLES_FOR_ACTIVE_BENCHMARK_MODELS_2026-04-18.md)
 - [scratch/benchmark_external_reference_cases.R](scratch/benchmark_external_reference_cases.R)
+- [tools/run_supported_subset_validation.R](tools/run_supported_subset_validation.R)
 - [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md)
 - [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md)

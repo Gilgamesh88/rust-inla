@@ -13,7 +13,11 @@ rusty_inla(
 )
 }
 \arguments{
-\item{formula}{A robust R formula \code{y ~ 1 + f(cov, model="iid")}.}
+\item{formula}{A robust R formula such as
+\code{y ~ 1 + x1 * factor_col + offset(log_exposure) + f(cov, model="iid")}.
+The current fixed-effects subset supports bare data columns and simple
+interactions among them, with or without standalone latent \code{f(...)} terms;
+create transformed columns in \code{data} first.}
 
 \item{data}{A data.frame containing the variables.}
 

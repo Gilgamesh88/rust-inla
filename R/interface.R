@@ -1,3 +1,221 @@
+formula_expr_label <- function(expr) {
+    paste(deparse(expr, width.cutoff = 500L), collapse = "")
+}
+
+is_bare_formula_name <- function(expr) {
+    is.name(expr) && !identical(as.character(expr), ".")
+}
+
+formula_variable_expr <- function(variables, idx) {
+    variables[[idx + 1L]]
+}
+
+validate_supported_f_call <- function(f_call) {
+    if (!is.call(f_call) || !identical(as.character(f_call[[1L]]), "f")) {
+        stop("Latent terms must use f(...).", call. = FALSE)
+    }
+
+    args <- as.list(f_call[-1L])
+    if (length(args) == 0L) {
+        stop("f() requires a covariate and model.", call. = FALSE)
+    }
+
+    arg_names <- names(args)
+    if (is.null(arg_names)) {
+        arg_names <- rep("", length(args))
+    } else {
+        arg_names[is.na(arg_names)] <- ""
+    }
+
+    unsupported_args <- unique(arg_names[
+        nzchar(arg_names) & !(arg_names %in% c("model", "constr"))
+    ])
+    if (length(unsupported_args) > 0L) {
+        stop(
+            sprintf(
+                paste(
+                    "Unsupported f() argument(s): %s.",
+                    "The current rustyINLA formula subset supports only",
+                    "f(covariate, model = ..., constr = ...)."
+                ),
+                paste(unsupported_args, collapse = ", ")
+            ),
+            call. = FALSE
+        )
+    }
+
+    unnamed_count <- sum(!nzchar(arg_names))
+    if (unnamed_count > 2L) {
+        stop("f() supports only covariate and optional model as positional arguments.", call. = FALSE)
+    }
+
+    if (!is_bare_formula_name(args[[1L]])) {
+        stop("f() covariate must be a single untransformed data column name.", call. = FALSE)
+    }
+
+    model_named <- which(arg_names == "model")
+    if (length(model_named) > 1L) {
+        stop("f() model was supplied more than once.", call. = FALSE)
+    }
+    if (length(model_named) == 1L && unnamed_count >= 2L) {
+        stop("f() model was supplied both positionally and by name.", call. = FALSE)
+    }
+
+    model_expr <- if (length(model_named) == 1L) {
+        args[[model_named[[1L]]]]
+    } else if (length(args) >= 2L && !nzchar(arg_names[[2L]])) {
+        args[[2L]]
+    } else {
+        NULL
+    }
+    if (!is.character(model_expr) || length(model_expr) != 1L || is.na(model_expr)) {
+        stop("f() model must be a literal supported model string.", call. = FALSE)
+    }
+    if (!(model_expr %in% c("iid", "rw1", "rw2", "ar1", "ar2"))) {
+        stop(sprintf("Unsupported latent model '%s'.", model_expr), call. = FALSE)
+    }
+
+    constr_named <- which(arg_names == "constr")
+    if (length(constr_named) > 1L) {
+        stop("f() constr was supplied more than once.", call. = FALSE)
+    }
+    if (length(constr_named) == 1L) {
+        constr_expr <- args[[constr_named[[1L]]]]
+        if (!is.logical(constr_expr) || length(constr_expr) != 1L || is.na(constr_expr)) {
+            stop("f() constr must be a literal single TRUE/FALSE value.", call. = FALSE)
+        }
+    }
+
+    invisible(TRUE)
+}
+
+validate_fixed_formula_variable <- function(expr, data) {
+    if (!is_bare_formula_name(expr)) {
+        stop(
+            sprintf(
+                paste(
+                    "Unsupported fixed-effect term '%s'.",
+                    "Create transformed variables in data first;",
+                    "the current subset supports bare columns and simple interactions among them."
+                ),
+                formula_expr_label(expr)
+            ),
+            call. = FALSE
+        )
+    }
+
+    var_name <- as.character(expr)
+    if (!(var_name %in% names(data))) {
+        stop(sprintf("Formula variable '%s' was not found in data.", var_name), call. = FALSE)
+    }
+
+    value <- data[[var_name]]
+    if (is.character(value)) {
+        stop(
+            sprintf("Fixed-effect column '%s' is character; convert it to a factor explicitly.", var_name),
+            call. = FALSE
+        )
+    }
+    if (!(is.numeric(value) || is.integer(value) || is.logical(value) || is.factor(value))) {
+        stop(
+            sprintf(
+                "Fixed-effect column '%s' must be numeric, integer, logical, or factor.",
+                var_name
+            ),
+            call. = FALSE
+        )
+    }
+
+    invisible(TRUE)
+}
+
+validate_supported_formula_subset <- function(formula, data, tf) {
+    if (!is.data.frame(data)) {
+        stop("data must be a data.frame.", call. = FALSE)
+    }
+
+    resp_idx <- attr(tf, "response")
+    if (resp_idx == 0L) {
+        stop("Formula requires a response variable.", call. = FALSE)
+    }
+
+    variables <- attr(tf, "variables")
+    response_expr <- formula_variable_expr(variables, resp_idx)
+    if (!is_bare_formula_name(response_expr)) {
+        stop("Response must be a single data column name.", call. = FALSE)
+    }
+
+    response_name <- as.character(response_expr)
+    if (!(response_name %in% names(data))) {
+        stop(sprintf("Response variable '%s' was not found in data.", response_name), call. = FALSE)
+    }
+    response_value <- data[[response_name]]
+    if (!(is.numeric(response_value) || is.integer(response_value) || is.logical(response_value))) {
+        stop("Response must be numeric, integer, or logical.", call. = FALSE)
+    }
+    y <- as.numeric(response_value)
+    if (any(is.infinite(y))) {
+        stop("Response contains infinite values.", call. = FALSE)
+    }
+
+    f_idx <- attr(tf, "specials")$f
+    if (is.null(f_idx)) {
+        f_idx <- integer()
+    }
+    for (idx in f_idx) {
+        validate_supported_f_call(formula_variable_expr(variables, idx))
+    }
+
+    factors <- attr(tf, "factors")
+    term_labels <- attr(tf, "term.labels")
+    f_term_idx <- integer()
+    fixed_variable_idx <- integer()
+
+    has_factor_terms <- !is.null(factors) && is.matrix(factors) && ncol(factors) > 0L
+
+    if (has_factor_terms && any(factors[resp_idx, ] != 0)) {
+        stop("Response variable cannot also appear on the right-hand side.", call. = FALSE)
+    }
+
+    if (has_factor_terms) {
+        for (term_idx in seq_len(ncol(factors))) {
+            variable_rows <- which(factors[, term_idx] != 0)
+            f_rows <- intersect(variable_rows, f_idx)
+
+            if (length(f_rows) > 0L) {
+                standalone_f <- length(variable_rows) == 1L &&
+                    length(f_rows) == 1L &&
+                    factors[f_rows[[1L]], term_idx] == 1
+                if (!standalone_f) {
+                    stop(
+                        sprintf(
+                            paste(
+                                "Latent f() terms must be standalone additive terms;",
+                                "unsupported term: %s"
+                            ),
+                            term_labels[[term_idx]]
+                        ),
+                        call. = FALSE
+                    )
+                }
+                f_term_idx <- c(f_term_idx, term_idx)
+            } else {
+                fixed_variable_idx <- union(fixed_variable_idx, variable_rows)
+            }
+        }
+    }
+
+    fixed_variable_idx <- setdiff(fixed_variable_idx, resp_idx)
+    for (idx in fixed_variable_idx) {
+        validate_fixed_formula_variable(formula_variable_expr(variables, idx), data)
+    }
+
+    list(
+        response_name = response_name,
+        f_term_idx = f_term_idx
+    )
+}
+
 # Internal helper to assemble the backend specification consumed by Rust.
 build_backend_spec <- function(
     formula,
@@ -10,23 +228,46 @@ build_backend_spec <- function(
 ) {
     # 1. Parse formula to extract response
     tf <- terms(formula, specials = "f")
-    resp_idx <- attr(tf, "response")
-    if (resp_idx == 0) stop("Formula requires a response variable.")
+    formula_info <- validate_supported_formula_subset(formula, data, tf)
 
-    y_var <- as.character(attr(tf, "variables")[[resp_idx + 1]])
+    y_var <- formula_info$response_name
     y <- as.numeric(data[[y_var]])
 
     # 2. Extract fixed terms design matrix
-    t_labels <- attr(tf, "term.labels")
-    f_term_idx <- grep("^f\\(", t_labels)
+    f_term_idx <- formula_info$f_term_idx
     if (length(f_term_idx) > 0) {
         tf_fixed <- drop.terms(tf, f_term_idx, keep.response = FALSE)
     } else {
         tf_fixed <- delete.response(tf)
     }
 
-    mf_fixed <- model.frame(tf_fixed, data = data, na.action = na.pass)
-    X_fixed <- model.matrix(tf_fixed, mf_fixed)
+    mf_fixed <- tryCatch(
+        model.frame(tf_fixed, data = data, na.action = na.pass),
+        error = function(e) {
+            stop(
+                sprintf("Could not build fixed-effects model frame: %s", e$message),
+                call. = FALSE
+            )
+        }
+    )
+    X_fixed <- tryCatch(
+        model.matrix(tf_fixed, mf_fixed),
+        error = function(e) {
+            stop(
+                sprintf("Could not build fixed-effects design matrix: %s", e$message),
+                call. = FALSE
+            )
+        }
+    )
+    if (length(X_fixed) > 0L && any(!is.finite(X_fixed))) {
+        stop(
+            paste(
+                "Fixed-effects design matrix contains non-finite values.",
+                "Check fixed-effect covariates and factor levels."
+            ),
+            call. = FALSE
+        )
+    }
     if (ncol(X_fixed) > 0L) {
         qr_fixed <- qr(X_fixed)
         if (qr_fixed$rank < ncol(X_fixed)) {
@@ -50,6 +291,9 @@ build_backend_spec <- function(
         if (length(formula_offset) != nrow(data)) {
             stop("Formula offset length does not match the number of observations.")
         }
+        if (any(!is.finite(formula_offset))) {
+            stop("Formula offset contains non-finite values.", call. = FALSE)
+        }
     }
     user_offset <- NULL
     if (isTRUE(offset_provided)) {
@@ -70,6 +314,9 @@ build_backend_spec <- function(
         }
         if (!is.null(user_offset)) {
             user_offset <- as.numeric(user_offset)
+            if (any(!is.finite(user_offset))) {
+                stop("offset contains non-finite values.", call. = FALSE)
+            }
         }
     }
     if (!is.null(user_offset) && length(user_offset) != nrow(data)) {
@@ -83,6 +330,12 @@ build_backend_spec <- function(
     }
 
     n_fixed <- ncol(X_fixed)
+    if (n_fixed == 0L && length(f_term_idx) == 0L) {
+        stop(
+            "Formula must include at least one fixed-effect column or standalone f(...) latent term.",
+            call. = FALSE
+        )
+    }
     x_matrix_flat <- as.numeric(X_fixed)
 
     # 3. Setup A Matrix Triplets for Random Effects
@@ -648,7 +901,11 @@ append_benchmark_outputs <- function(fit, res, backend_spec, data, formula, fami
 
 #' Native R Formula Interface for Rusty-INLA
 #'
-#' @param formula A robust R formula `y ~ 1 + f(cov, model="iid")`.
+#' @param formula A robust R formula such as
+#'   `y ~ 1 + x1 * factor_col + offset(log_exposure) + f(cov, model="iid")`.
+#'   The current fixed-effects subset supports bare data columns and simple
+#'   interactions among them, with or without standalone latent `f(...)` terms;
+#'   create transformed columns in `data` first.
 #' @param data A data.frame containing the variables.
 #' @param family The likelihood family.
 #' @param offset Optional offset supplied either as a numeric vector or as an

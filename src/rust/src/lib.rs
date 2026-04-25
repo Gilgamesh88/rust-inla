@@ -9,7 +9,9 @@ use inla_core::likelihood::{
     GammaLikelihood, GaussianLikelihood, LogLikelihood, PoissonLikelihood, TweedieLikelihood,
     ZipLikelihood,
 };
-use inla_core::models::{Ar1Model, Ar2Model, CompoundQFunc, IidModel, QFunc, Rw1Model, Rw2Model};
+use inla_core::models::{
+    Ar1Model, Ar2Model, CompoundQFunc, FixedOnlyModel, IidModel, QFunc, Rw1Model, Rw2Model,
+};
 use std::collections::HashMap;
 
 type BridgeResult<T> = std::result::Result<T, String>;
@@ -179,6 +181,10 @@ fn build_single_qfunc(block: &LatentBlockSpec) -> BridgeResult<Box<dyn QFunc>> {
 }
 
 fn build_qfunc(latent_blocks: &[LatentBlockSpec]) -> BridgeResult<Box<dyn QFunc>> {
+    if latent_blocks.is_empty() {
+        return Ok(Box::new(FixedOnlyModel::new()));
+    }
+
     if latent_blocks.len() == 1 {
         let block = &latent_blocks[0];
         return build_single_qfunc(block);
@@ -233,6 +239,10 @@ fn default_likelihood_theta_init(likelihood_type: &str) -> BridgeResult<Vec<f64>
 fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
     let n_data = spec.y.len();
 
+    if spec.y.iter().any(|value| value.is_infinite()) {
+        return Err("y must not contain infinite values".to_string());
+    }
+
     if let Some(fixed_matrix) = &spec.fixed_matrix {
         let expected = n_data * spec.n_fixed;
         if fixed_matrix.len() != expected {
@@ -241,6 +251,9 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 fixed_matrix.len(),
                 expected
             ));
+        }
+        if fixed_matrix.iter().any(|value| !value.is_finite()) {
+            return Err("fixed_matrix must contain only finite values".to_string());
         }
     } else if spec.n_fixed > 0 {
         return Err("n_fixed > 0 requires a fixed_matrix".to_string());
@@ -270,6 +283,9 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                     ));
                 }
             }
+            if a_x.iter().any(|value| !value.is_finite()) {
+                return Err("A matrix values a_x must contain only finite values".to_string());
+            }
         }
         _ => {
             return Err(
@@ -287,6 +303,9 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 n_data
             ));
         }
+        if offset.iter().any(|value| !value.is_finite()) {
+            return Err("offset must contain only finite values".to_string());
+        }
     }
 
     if let Some(extr_constr) = &spec.extr_constr {
@@ -298,15 +317,21 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 expected
             ));
         }
+        if extr_constr.iter().any(|value| !value.is_finite()) {
+            return Err("extr_constr must contain only finite values".to_string());
+        }
     } else if spec.n_constr > 0 {
         return Err("n_constr > 0 requires extr_constr".to_string());
     }
 
-    if spec.latent_blocks.is_empty() {
+    if spec.n_fixed == 0 && spec.n_latent == 0 {
         return Err(
-            "At least one latent block from f(...) is required by the current Rust bridge"
-                .to_string(),
+            "At least one fixed-effect column or latent f(...) block is required".to_string(),
         );
+    }
+
+    if spec.n_latent == 0 && spec.n_constr > 0 {
+        return Err("extr_constr requires at least one latent node".to_string());
     }
 
     let mut expected_start = 0usize;
@@ -379,6 +404,9 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 expected
             ));
         }
+        if theta_init.iter().any(|value| !value.is_finite()) {
+            return Err("theta_init must contain only finite values".to_string());
+        }
     }
 
     if let Some(latent_init) = &spec.latent_init {
@@ -389,6 +417,9 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 spec.n_latent
             ));
         }
+        if latent_init.iter().any(|value| !value.is_finite()) {
+            return Err("latent_init must contain only finite values".to_string());
+        }
     }
 
     if let Some(fixed_init) = &spec.fixed_init {
@@ -398,6 +429,9 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 fixed_init.len(),
                 spec.n_fixed
             ));
+        }
+        if fixed_init.iter().any(|value| !value.is_finite()) {
+            return Err("fixed_init must contain only finite values".to_string());
         }
     }
 

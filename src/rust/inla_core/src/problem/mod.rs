@@ -298,7 +298,9 @@ impl Problem {
         }
 
         let mut solver = FaerSolver::new();
-        solver.reorder(&mut graph);
+        if graph.n() > 0 {
+            solver.reorder(&mut graph);
+        }
         let a_rows = build_a_rows(model, model.y.len(), model.n_latent);
         let (a_single_j, a_single_x) = extract_singleton_a_rows(&a_rows)
             .map(|(j, x)| (Some(j), Some(x)))
@@ -626,6 +628,142 @@ impl Problem {
             } else {
                 vec![0.0_f64; n_fixed]
             };
+
+            if n_latent == 0 {
+                let mut schur_log_det = 0.0_f64;
+                let mut final_s_mat = vec![0.0_f64; n_fixed * n_fixed];
+                let mut final_s_xtwx_diag = vec![0.0_f64; n_fixed];
+                let final_s_wcv_diag = vec![0.0_f64; n_fixed];
+                let mut iterations = 0_usize;
+                let mut converged = false;
+
+                for _iter in 0..control.max_iter {
+                    iterations += 1;
+                    let beta_old = beta.clone();
+                    let assembly_started = Instant::now();
+
+                    let mut eta_data = vec![0.0_f64; n_data];
+                    for (i, eta_i) in eta_data.iter_mut().enumerate().take(n_data) {
+                        let mut xb = 0.0;
+                        for j in 0..n_fixed {
+                            xb += x_m[i + j * n_data] * beta[j];
+                        }
+                        *eta_i = xb;
+                    }
+                    add_offset(&mut eta_data, model.offset);
+
+                    let mut grad_data = vec![0.0_f64; n_data];
+                    let mut curv_data = vec![0.0_f64; n_data];
+                    model.likelihood.gradient_and_curvature(
+                        &mut grad_data,
+                        &mut curv_data,
+                        &eta_data,
+                        model.y,
+                        theta_lik,
+                    );
+                    clamp_curvature(&mut curv_data);
+
+                    let mut s_mat = vec![0.0_f64; n_fixed * n_fixed];
+                    let mut s_xtwx_diag = vec![0.0_f64; n_fixed];
+                    let s_wcv_diag = vec![0.0_f64; n_fixed];
+                    let mut b_beta = vec![0.0_f64; n_fixed];
+
+                    for i in 0..n_data {
+                        let grad = grad_data[i];
+                        let curv = curv_data[i];
+                        let z_i = eta_data[i] + grad / curv;
+                        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+                        let wz = curv * (z_i - offset_i);
+
+                        for j1 in 0..n_fixed {
+                            let x_i_j1 = x_m[i + j1 * n_data];
+                            b_beta[j1] += x_i_j1 * wz;
+                            for j2 in 0..n_fixed {
+                                s_mat[j1 * n_fixed + j2] +=
+                                    x_i_j1 * curv * x_m[i + j2 * n_data];
+                            }
+                        }
+                    }
+                    for j in 0..n_fixed {
+                        s_mat[j * n_fixed + j] += PRIOR_PREC_BETA;
+                        s_xtwx_diag[j] = s_mat[j * n_fixed + j];
+                    }
+
+                    final_s_mat = s_mat.clone();
+                    final_s_xtwx_diag = s_xtwx_diag.clone();
+                    self.diagnostics.likelihood_assembly_time += assembly_started.elapsed();
+
+                    let s_mat_bkp = s_mat.clone();
+                    schur_log_det = try_dense_cholesky_with_schur_stabilization(
+                        &mut s_mat,
+                        &mut b_beta,
+                        n_fixed,
+                        &s_xtwx_diag,
+                        &s_wcv_diag,
+                    )
+                    .map(|(log_det, _)| log_det)
+                    .map_err(|_| {
+                        crate::error::InlaError::NotPositiveDefiniteContext(format!(
+                            "Fixed-only design precision singular, diag0: {:?}, theta: {:?}",
+                            s_mat_bkp[0], theta,
+                        ))
+                    })?;
+                    beta[..n_fixed].copy_from_slice(&b_beta[..n_fixed]);
+
+                    let mut delta_max = 0.0_f64;
+                    for (a, b_val) in beta.iter().zip(beta_old.iter()) {
+                        delta_max = delta_max.max((a - b_val).abs());
+                    }
+                    if delta_max < control.tol {
+                        converged = true;
+                        break;
+                    }
+                }
+
+                self.diagnostics.latent_mode_iterations_total += iterations;
+                if !converged {
+                    self.diagnostics.latent_mode_max_iter_hits += 1;
+                }
+
+                let fixed_cov = if control.need_fixed_cov {
+                    Some(
+                        dense_spd_inverse_with_schur_stabilization(
+                            &final_s_mat,
+                            n_fixed,
+                            &final_s_xtwx_diag,
+                            &final_s_wcv_diag,
+                        )
+                        .map_err(|_| {
+                            crate::error::InlaError::NotPositiveDefiniteContext(
+                                "Fixed-only design precision inverse failed".to_string(),
+                            )
+                        })?
+                        .0,
+                    )
+                } else {
+                    None
+                };
+                let diag_aug_inv = if control.need_diag_aug_inv {
+                    Some(vec![])
+                } else {
+                    None
+                };
+                let latent_fixed_cov = if control.need_latent_fixed_cov {
+                    Some(vec![])
+                } else {
+                    None
+                };
+
+                return Ok((
+                    beta,
+                    vec![],
+                    0.0,
+                    diag_aug_inv,
+                    fixed_cov,
+                    latent_fixed_cov,
+                    schur_log_det,
+                ));
+            }
 
             let mut log_det_aug = 0.0_f64;
             let mut final_w_cross = vec![0.0_f64; n_latent * n_fixed];

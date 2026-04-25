@@ -20,7 +20,8 @@ Headline result on the active stable suite:
 - External/reference coverage now also includes:
   - Gaussian + `rw2`, with the LIDAR smoothing example numerically close to `R-INLA`
   - synthetic Gaussian + `ar2`, compared against `R-INLA` `model = "ar", order = 2`
-  - synthetic Gaussian + multiple fixed effects + `iid`, covering the first Phase 7A fixed-effects slice
+  - synthetic Gaussian + multiple fixed effects + `iid` + offset, covering the first Phase 7A fixed-effects slice
+  - fixed-effect-only GLMs through the zero-latent backend path
 
 | Likelihood Model | Latent Component | Rusty-INLA | R-INLA | Status |
 | --- | --- | --- | --- | --- |
@@ -34,7 +35,7 @@ The detailed comparison note is tracked in [scratch/BENCHMARK_SUMMARY_2026-04-19
 
 For deeper parity inspection of returned summaries, set `RUSTYINLA_OUTPUT_PROFILE=benchmark` before running the local harnesses. That extended mode compares additional fit-object surfaces such as fixed-effect standard deviations, hyperparameter summaries, and linear-predictor summaries.
 
-For the current implemented subset, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the posterior-state update RFC, the external-example benchmarking guide, the directory-level intervention map, and the recommended path for adding new families or latent models, see [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md](EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
+For the current implemented subset, the Phase 7A fixed-effects formula scope, the uploaded-suite supported-subset manifest, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the posterior-state update RFC, the external-example benchmarking guide, the directory-level intervention map, and the recommended path for adding new families or latent models, see [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [FIXED_EFFECTS_FORMULA_SUBSET.md](FIXED_EFFECTS_FORMULA_SUBSET.md), [SUPPORTED_SUBSET_VALIDATION_MANIFEST.md](SUPPORTED_SUBSET_VALIDATION_MANIFEST.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md](EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
 
 ## Implementation Roadmap (75% Complete)
 
@@ -52,7 +53,15 @@ Our goal is to port the subset of INLA specifically relied upon by the actuarial
 
 Tweedie support remains experimental and is currently excluded from the active parity benchmark sweep until the instability path is better understood.
 
-Phase 7 has now started in a narrow productization slice: multiple fixed-effect columns are validated through the current `model.matrix()` path, rank-deficient fixed designs fail fast with a clear error, and the external reference harness includes a multi-fixed-effect Gaussian + `iid` comparison against `R-INLA`.
+Phase 7 has now started in a narrow productization slice: multiple fixed-effect columns are validated through the current `model.matrix()` path, fixed-effect-only GLMs are supported through the zero-latent backend path, rank-deficient fixed designs fail fast with a clear error, unsupported formula surfaces are rejected before Rust is called, and the external reference harness includes a multi-fixed-effect Gaussian + `iid` + offset comparison against `R-INLA`.
+
+The current fixed-effects subset intentionally supports bare numeric/logical/factor columns, simple interactions among those columns, formula offsets, fixed-effect-only GLMs, and standalone `f(...)` latent terms. Transformed fixed terms such as `log(x)`, `I(x^2)`, `poly(...)`, and `factor(...)` should be materialized in `data` first. See [FIXED_EFFECTS_FORMULA_SUBSET.md](FIXED_EFFECTS_FORMULA_SUBSET.md) for the exact contract.
+
+For the curated uploaded-suite subset, run:
+
+```powershell
+& 'C:\Program Files\R\R-4.5.3\bin\Rscript.exe' tools\run_supported_subset_validation.R
+```
 
 ## Installing Rust
 

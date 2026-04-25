@@ -11,6 +11,12 @@
 f <- function(covariate, model, constr = NULL) {
     if (missing(model)) stop("Model type required.")
     cov_expr <- substitute(covariate)
+    if (!is.name(cov_expr) || identical(as.character(cov_expr), ".")) {
+        stop("f() covariate must be a single untransformed data column name.", call. = FALSE)
+    }
+    if (!is.character(model) || length(model) != 1L || is.na(model)) {
+        stop("model must be a single supported latent model string.", call. = FALSE)
+    }
     default_constr <- switch(
         model,
         rw1 = TRUE,

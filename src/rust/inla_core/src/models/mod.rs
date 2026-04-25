@@ -104,12 +104,50 @@ pub trait QFunc: Send + Sync {
 
 // ── IidModel ──────────────────────────────────────────────────────────────────
 
-/// Modelo de efectos independientes idénticamente distribuidos.
+// FixedOnlyModel
+/// Empty latent model used for fixed-effect-only GLMs.
 ///
-/// Q = τ·I  (diagonal, sin correlación espacial/temporal)
+/// It contributes no latent precision entries and no hyperparameters. The
+/// fixed-effect prior and likelihood still define the posterior.
+pub struct FixedOnlyModel {
+    graph: Graph,
+}
+
+impl FixedOnlyModel {
+    pub fn new() -> Self {
+        Self {
+            graph: Graph::empty(0),
+        }
+    }
+}
+
+impl Default for FixedOnlyModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QFunc for FixedOnlyModel {
+    fn graph(&self) -> &Graph {
+        &self.graph
+    }
+
+    fn eval(&self, _i: usize, _j: usize, _theta: &[f64]) -> f64 {
+        0.0
+    }
+
+    fn n_hyperparams(&self) -> usize {
+        0
+    }
+}
+
+// IidModel
+/// Modelo de efectos independientes identicamente distribuidos.
 ///
-/// Hiperparámetros:
-/// - θ[0] = log τ   (log-precisión marginal)
+/// Q = tau * I (diagonal, sin correlacion espacial/temporal).
+///
+/// Hiperparametros:
+/// - theta[0] = log tau (log-precision marginal)
 pub struct IidModel {
     graph: Graph,
 }

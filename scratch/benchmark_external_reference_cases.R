@@ -18,8 +18,8 @@
 # - Gamma + rw1: no clean public exact gamma+rw1 benchmark dataset was found
 #   on the first pass, so this follows the official INLA gamma parameterization
 #   with an ordered RW1 latent effect.
-# - Gaussian + multiple fixed effects + iid: synthetic reference covering the
-#   Phase 7A fixed-effect subset with a latent random intercept.
+# - Gaussian + multiple fixed effects + iid + offset: synthetic reference
+#   covering the Phase 7A fixed-effect subset with a latent random intercept.
 # - Gaussian + ar2: synthetic comparison against INLA's model="ar", order=2.
 # - ZIP + iid + offset: no clean public exact type1 ZIP + iid + offset dataset
 #   was found on the first pass, so this uses a reproducible synthetic
@@ -321,9 +321,11 @@ build_gaussian_fixed_iid_reference <- function(seed = 20260425L) {
     x1 <- stats::rnorm(n, mean = 0.0, sd = 1.0)
     x2 <- stats::runif(n, min = -1.0, max = 1.0)
     promo <- factor(sample(c("baseline", "promo"), size = n, replace = TRUE))
+    offset_term <- 0.10 * sin(seq_len(n) / 5.0)
     u <- stats::rnorm(n_groups, mean = 0.0, sd = 0.30)
 
-    eta <- 0.75 -
+    eta <- offset_term +
+        0.75 -
         0.55 * x1 +
         0.35 * x2 +
         0.40 * (promo == "promo") +
@@ -335,6 +337,7 @@ build_gaussian_fixed_iid_reference <- function(seed = 20260425L) {
         x1 = x1,
         x2 = x2,
         promo = promo,
+        offset_term = offset_term,
         group = group
     )
 }
@@ -545,14 +548,15 @@ prepare_gaussian_fixed_iid_case <- function(cache_dir) {
 
     prepare_case_record(
         id = "gaussian_multi_fixed_iid_reference",
-        label = "Synthetic Gaussian + multiple fixed effects + iid reference",
+        label = "Synthetic Gaussian + multiple fixed effects + iid + offset reference",
         family = "gaussian",
-        formula = y ~ 1 + x1 * promo + x2 + f(group, model = "iid"),
+        formula = y ~ 1 + x1 * promo + x2 + offset(offset_term) + f(group, model = "iid"),
         data_path = path,
         source_type = "synthetic_exact_family",
         provenance = paste(
             "Synthetic Gaussian reference covering the current",
-            "multiple-fixed-effect subset with an iid latent intercept"
+            "multiple-fixed-effect subset with an iid latent intercept",
+            "and a formula offset"
         ),
         tolerances = list(
             fixed_mean_abs = 0.10,
