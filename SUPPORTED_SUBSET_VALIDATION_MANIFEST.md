@@ -121,7 +121,9 @@ apply the explicit adapters, and run only the supported subset against both
 `tools/run_supported_subset_validation.R` is the first narrow harness in that
 shape. It includes real adapted Germany/Epil cases from part 1, deterministic
 synthetic cases mapped to parts 2 and 3, and fixed-effect-only GLMs, but still
-does not run the full uploaded suites.
+does not run the full uploaded suites. It compares fixed-effect means and SDs,
+random-effect means and SDs, fitted means, and Rusty/R-INLA elapsed times for
+each curated case.
 
 For the Phase 7A validation gate, run
 `tools/run-phase7a-validation.ps1`. It executes the formula contract tests,
@@ -169,6 +171,6 @@ Interpretation for Phase 7A:
   reference-definition difference, not as evidence of multi-latent drift
 - keep the R-INLA comparison in the supported-subset harness because it is
   still the primary parity reference
-- add a future GLM/MAP comparator for fixed-only GLMs so the validation output
-  can distinguish direct fixed-effect numerical accuracy from R-INLA reporting
+- use the fixed-only GLM/MAP comparator in `tests/fixed-only-parity.R` to
+  distinguish direct fixed-effect numerical accuracy from R-INLA reporting
   parity

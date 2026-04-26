@@ -46,7 +46,6 @@ Expected work:
 - add benchmark/reference coverage with multiple fixed columns
 - document the supported fixed-effect formula subset
 - decide whether any fixed-prior controls should be exposed before release
-- fix the current fixed-effect SD underestimation before treating Phase 7A as complete
 - at the end of Phase 7A, adapt and run the external comprehensive validation bundle
   (`inla_test_suite_part1.R`, `inla_test_suite_part2_fremtpl2.R`,
   `inla_test_suite_part3_stress.R`, `run_all_benchmarks.R`,
@@ -57,6 +56,12 @@ Current Phase 7A gate:
 
 - run `tools/run-phase7a-validation.ps1` before treating a fixed-effects
   change as a merge candidate
+- fixed-effect SD underestimation is no longer an open generic blocker: the
+  Rust core has exact dense-reference covariance tests for Gaussian fixed
+  effects with and without latent terms, `tests/fixed-only-parity.R` checks
+  fixed-only SDs against R-INLA and the direct Poisson MAP Hessian, and
+  `tools/run_supported_subset_validation.R` tracks fixed SD drift across the
+  curated supported subset
 - keep the next branch-local validation target focused on supported-subset
   multi-latent Poisson coverage; the first case is
   `stress_multi_re_three_iid`, a deterministic proxy for the uploaded stress

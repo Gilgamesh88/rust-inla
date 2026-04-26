@@ -154,6 +154,7 @@ case_record <- function(id, manifest_source, family, formula, data, tolerances =
         tolerances = modifyList(
             list(
                 fixed_mean_abs = 0.35,
+                fixed_sd_abs = 0.35,
                 random_mean_abs = 0.75,
                 random_sd_abs = 0.75,
                 fitted_mean_rel = 0.35
@@ -557,6 +558,7 @@ evaluate_case <- function(case) {
             rusty_time = rusty_perf$time,
             inla_time = inla_perf$time,
             fixed_mean_max_abs = NA_real_,
+            fixed_sd_max_abs = NA_real_,
             random_mean_max_abs = NA_real_,
             random_sd_max_abs = NA_real_,
             fitted_mean_max_rel = NA_real_,
@@ -568,6 +570,11 @@ evaluate_case <- function(case) {
         named_column(rusty_perf$res$summary.fixed, "mean"),
         named_column(inla_perf$res$summary.fixed, "mean"),
         case$tolerances$fixed_mean_abs
+    )
+    fixed_sd <- compare_named_numeric(
+        named_column(rusty_perf$res$summary.fixed, "sd"),
+        named_column(inla_perf$res$summary.fixed, "sd"),
+        case$tolerances$fixed_sd_abs
     )
     random_mean <- compare_nested_metrics(
         collect_random_metric(rusty_perf$res, "mean"),
@@ -585,7 +592,7 @@ evaluate_case <- function(case) {
         case$tolerances$fitted_mean_rel
     )
 
-    pass_flags <- c(fixed$pass, random_mean$pass, random_sd$pass, fitted$pass)
+    pass_flags <- c(fixed$pass, fixed_sd$pass, random_mean$pass, random_sd$pass, fitted$pass)
     pass_flags <- pass_flags[!is.na(pass_flags)]
     passed <- length(pass_flags) > 0L && all(pass_flags)
 
@@ -598,6 +605,7 @@ evaluate_case <- function(case) {
         rusty_time = rusty_perf$time,
         inla_time = inla_perf$time,
         fixed_mean_max_abs = fixed$max_abs,
+        fixed_sd_max_abs = fixed_sd$max_abs,
         random_mean_max_abs = random_mean$max_abs,
         random_sd_max_abs = random_sd$max_abs,
         fitted_mean_max_rel = fitted$max_rel,

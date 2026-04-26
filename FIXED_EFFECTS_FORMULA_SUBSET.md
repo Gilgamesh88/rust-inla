@@ -83,7 +83,9 @@ The base-R regression script at `tests/fixed-effects-interface.R` covers:
 
 The public parity script at `tests/fixed-only-parity.R` compares
 fixed-effect-only Gaussian, Poisson, and Gamma formulas against R-INLA through
-the package-level `rusty_inla()` interface.
+the package-level `rusty_inla()` interface. It also compares fixed-only means
+against base `glm()` and checks the Poisson fixed-effect means and SDs against
+a direct penalized MAP solve using the current fixed-effect prior precision.
 
 The package-facing error script at
 `tests/fixed-effects-public-api-errors.R` checks representative unsupported
