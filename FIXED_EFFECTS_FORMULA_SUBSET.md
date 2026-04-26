@@ -1,6 +1,7 @@
 # Fixed-Effects Formula Subset
 
-Status: Phase 7A productization slice, 2026-04-25.
+Status: Phase 7A productization slice complete for the MVP supported subset,
+2026-04-26.
 
 This document states the fixed-effects formula subset that `rustyINLA`
 currently supports intentionally. The implementation still uses R's

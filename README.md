@@ -20,7 +20,7 @@ Headline result on the active stable suite:
 - External/reference coverage now also includes:
   - Gaussian + `rw2`, with the LIDAR smoothing example numerically close to `R-INLA`
   - synthetic Gaussian + `ar2`, compared against `R-INLA` `model = "ar", order = 2`
-  - synthetic Gaussian + multiple fixed effects + `iid` + offset, covering the first Phase 7A fixed-effects slice
+  - synthetic Gaussian + multiple fixed effects + `iid` + offset, covering the completed Phase 7A fixed-effects slice
   - fixed-effect-only GLMs through the zero-latent backend path
 
 | Likelihood Model | Latent Component | Rusty-INLA | R-INLA | Status |
@@ -47,15 +47,18 @@ Our goal is to port the subset of INLA specifically relied upon by the actuarial
 - [x] **Phase 4:** Core Likelihoods (Gaussian).
 - [x] **Phase 5:** Actuarial Likelihoods (ZIP Type-1, initial Tweedie prototype).
 - [x] **Phase 6:** Native R Formula Parsing Interface (`y ~ 1 + f(...)`).
-- [ ] **Phase 7:** Generalized Fixed Effects Matrix. (Expanding the parser to handle `$X\beta$` dense covariate matrices).
-- [ ] **Phase 8:** Multi-variate Likelihoods. (Allowing structural covariates to predict zero-inflation probabilities via joint frameworks such as `ZIP Type-2`).
-- [ ] **Phase 9:** Dynamic Arbitrary Priors. (Exposing prior modification arrays to the R frontend).
+- [x] **Phase 7A:** Generalized Fixed Effects Matrix. (Productizing the supported `$X\beta$` dense covariate subset).
+- [ ] **Phase 8:** Prior/control metadata reuse. (Inventorying defaults and designing reusable prior specs before exposing custom-prior or prior-control surfaces).
+- [ ] **Phase 9:** Multi-variate Likelihoods. (Allowing structural covariates to predict zero-inflation probabilities via joint frameworks such as `ZIP Type-2`).
+- [ ] **Phase 10:** Dynamic Arbitrary Priors. (Exposing richer prior modification arrays to the R frontend after the Phase 8 metadata layer exists).
 
 Tweedie support remains experimental and is currently excluded from the active parity benchmark sweep until the instability path is better understood.
 
-Phase 7 has now started in a narrow productization slice: multiple fixed-effect columns are validated through the current `model.matrix()` path, fixed-effect-only GLMs are supported through the zero-latent backend path, rank-deficient fixed designs fail fast with a clear error, unsupported formula surfaces are rejected before Rust is called, and the external reference harness includes a multi-fixed-effect Gaussian + `iid` + offset comparison against `R-INLA`.
+Phase 7A is complete for the MVP supported subset: multiple fixed-effect columns are validated through the current `model.matrix()` path, fixed-effect-only GLMs are supported through the zero-latent backend path, rank-deficient fixed designs fail fast with a clear error, unsupported formula surfaces are rejected before Rust is called, and the external reference harness includes a multi-fixed-effect Gaussian + `iid` + offset comparison against `R-INLA`.
 
 The current fixed-effects subset intentionally supports bare numeric/logical/factor columns, simple interactions among those columns, formula offsets, fixed-effect-only GLMs, and standalone `f(...)` latent terms. Transformed fixed terms such as `log(x)`, `I(x^2)`, `poly(...)`, and `factor(...)` should be materialized in `data` first. See [FIXED_EFFECTS_FORMULA_SUBSET.md](FIXED_EFFECTS_FORMULA_SUBSET.md) for the exact contract.
+
+Custom priors, fixed-prior controls such as `control.fixed`, and broader prior override surfaces are now tracked as Phase 8 prior/control metadata reuse rather than unfinished Phase 7A work.
 
 For the curated uploaded-suite subset, run:
 

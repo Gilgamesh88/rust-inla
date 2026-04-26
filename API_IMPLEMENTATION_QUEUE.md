@@ -43,40 +43,54 @@ These are the best first additions because they improve usability without commit
    - the core already has strong marginal support
    - users gain a lot from `dmarginal` / `pmarginal` / `qmarginal` style helpers
 
-3. expose a constrained `control.fixed`
+### Phase 8: prior/control metadata reuse
+
+These items should be treated as the next prior/control phase, not as leftover
+Phase 7A fixed-effects productization. They are cheap only after the shared
+metadata layer exists.
+
+3. design shared prior/control metadata for defaults and overrides
+   Labels: `Medium`, `High-value`
+   Why:
+   - keeps model defaults and public override semantics in one place
+   - prevents one-off R-side custom-prior paths from becoming the public API
+
+4. expose a constrained `control.fixed` on top of that metadata layer
    Labels: `Cheap` to `Medium`, `High-value`
    Why:
-   - fits current fixed-effect architecture
-   - useful immediately
+   - fits the current fixed-effect architecture once prior metadata is explicit
+   - gives users the first controlled prior-override surface without committing
+     to arbitrary expression/table prior parity
 
 ### Queue 2: best next INLA-like controls
 
-These are the next-best public API improvements once Queue 1 is done.
+These are the next-best public API improvements once Queue 1 and the Phase 8
+prior/control metadata decision are done.
 
-4. constrained `control.compute`
+5. constrained `control.compute`
    Labels: `Medium`, `High-value`
    Why:
    - maps naturally to current output profiles
    - helps users ask for exactly what they want
 
-5. constrained `control.mode`
+6. constrained `control.mode`
    Labels: `Medium`, `High-value`
    Why:
    - the engine already has warm-start and fixed-theta concepts
    - valuable for diagnostics, exact-theta replays, and future updating hooks
 
-6. constrained `control.predictor`
+7. constrained `control.predictor`
    Labels: `Medium`, `High-value`
    Why:
    - aligns well with current fitted/linear-predictor outputs
 
-7. internal-scale hyperparameter outputs
+8. internal-scale hyperparameter outputs
    Labels: `Medium`, `High-value`
    Why:
    - closes a real parity gap without adding a new subsystem
    - useful for diagnostics and future prior/update work
 
-8. better `.args` and fit metadata parity
+9. better `.args` and fit metadata parity
    Labels: `Cheap` to `Medium`, `High-value`
    Why:
    - improves apples-to-apples comparisons
@@ -86,30 +100,30 @@ These are the next-best public API improvements once Queue 1 is done.
 
 These are real features, but they are not the cheapest wins.
 
-9. `summary.lincomb` and `marginals.lincomb`
+10. `summary.lincomb` and `marginals.lincomb`
    Labels: `High-value`, not `Cheap`
    Why:
    - useful and very INLA-like
    - requires new public linear-combination workflow support
 
-10. `waic`, `dic`, residual surfaces
+11. `waic`, `dic`, residual surfaces
    Labels: `Medium` to `High`, `High-value`
    Why:
    - important model-assessment outputs
    - need family-consistent definitions and validation
 
-11. `cpo`, `gcpo`, `po`
+12. `cpo`, `gcpo`, `po`
    Labels: `High`, `High-value`
    Why:
    - very useful in practice
    - needs a predictive-ordinate subsystem and careful validation
 
-12. public graph/Q helper suite
+13. public graph/Q helper suite
    Labels: `Medium` to `High`, `High-value`
    Why:
    - becomes much more valuable once graph-driven models exist
 
-13. full `marginals.linear.predictor` and `marginals.fitted.values`
+14. full `marginals.linear.predictor` and `marginals.fitted.values`
    Labels: `High`, conditionally `High-value`
    Why:
    - scientifically useful
@@ -176,15 +190,16 @@ Why:
 
 If we want the best return for effort, the recommended order is:
 
-1. marginal helper utilities
-2. constrained `control.fixed`
-3. constrained `control.compute`
-4. constrained `control.mode`
-5. constrained `control.predictor`
-6. internal-scale hyperparameter outputs
-7. linear-combination support
-8. model-assessment outputs like `waic` / `dic`
-9. predictive-ordinate outputs
+1. Phase 8 prior/control metadata design
+2. constrained `control.fixed` on that metadata layer
+3. marginal helper utilities
+4. constrained `control.compute`
+5. constrained `control.mode`
+6. constrained `control.predictor`
+7. internal-scale hyperparameter outputs
+8. linear-combination support
+9. model-assessment outputs like `waic` / `dic`
+10. predictive-ordinate outputs
 
 ## 4. Why this order is efficient
 
@@ -194,6 +209,8 @@ This order deliberately:
 - improves user experience early
 - avoids pretending we have SPDE/generic-model ecosystems before we do
 - creates a better base for future state-update or prior-update features
+- keeps custom-prior support separate from the completed Phase 7A fixed-effects
+  contract
 
 ## 5. Related documents
 

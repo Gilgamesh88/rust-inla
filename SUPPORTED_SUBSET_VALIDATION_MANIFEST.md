@@ -24,6 +24,10 @@ expressed with:
 - no custom priors, graph inputs, `scale.model`, `E`, `Ntrials`, or other
   R-INLA-only control arguments
 
+Custom priors and fixed-prior controls such as `control.fixed` are deferred to
+Phase 8 prior/control metadata reuse. They are not Phase 7A completion
+criteria and remain outside the current supported-subset gate.
+
 The fixed-effects subset is intentionally narrower than R formula syntax.
 Supported fixed designs must be generated from bare numeric, integer, logical,
 or factor columns plus simple interactions among those columns. Rank-deficient
@@ -108,8 +112,8 @@ cases whose purpose is unsupported prior/link/control-surface validation.
 `inla_complete_test_suite.R` largely combines the part 1 and freMTPL2 surfaces.
 Use the same inclusion and adapter rules above rather than running it wholesale.
 The complete suite is useful as a future source for generated reference outputs
-after `E`, custom priors, binomial, and graph-based latent models have
-dedicated support.
+after `E`, Phase 8 prior/control metadata, binomial, and graph-based latent
+models have dedicated support.
 
 ## Next Harness Shape
 

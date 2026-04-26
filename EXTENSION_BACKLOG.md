@@ -26,7 +26,10 @@ Why first:
 - a stable base makes every later extension cheaper to validate
 - parity regressions are easier to catch when the supported subset is already frozen
 
-`rw2` and `ar2` are now implemented. The next highest-value pre-release work is the first fixed-effects productization slice from Phase 7.
+`rw2` and `ar2` are now implemented. Phase 7A fixed-effects
+productization is complete for the MVP supported subset; the next pre-release
+phase is prior/control metadata design, so custom prior support is not treated
+as unfinished Phase 7A work.
 
 ## Priority 1: low-friction, high-fit extensions
 
@@ -34,23 +37,23 @@ These are the best next additions because they fit the current abstractions with
 
 ### 1. Phase 7A fixed-effects productization
 
+Status: complete for the MVP supported subset.
+
 Why now:
 
 - arbitrary-width fixed effects already work in the core
 - the R-side design-matrix path already exists through `model.matrix()`
 - making that support explicit is more valuable to beta users than one more latent topology
 
-Expected work:
+Completed work:
 
 - validate rank-deficient or aliased fixed designs explicitly
 - add benchmark/reference coverage with multiple fixed columns
 - document the supported fixed-effect formula subset
-- decide whether any fixed-prior controls should be exposed before release
-- at the end of Phase 7A, adapt and run the external comprehensive validation bundle
-  (`inla_test_suite_part1.R`, `inla_test_suite_part2_fremtpl2.R`,
-  `inla_test_suite_part3_stress.R`, `run_all_benchmarks.R`,
-  `inla_complete_test_suite.R`) against the supported subset instead of
-  running it mid-phase
+- support fixed-effect-only GLMs through the zero-latent backend path
+- add public `rusty_inla()` validation-error tests
+- add GLM/MAP comparators for fixed-only GLMs
+- add fixed-effect SD gates for the fixed-only and curated supported subsets
 
 Current Phase 7A gate:
 
@@ -67,7 +70,40 @@ Current Phase 7A gate:
   `stress_multi_re_three_iid`, a deterministic proxy for the uploaded stress
   `MultiRE_3Effects` surface
 
-### 2. one additional GLM-like likelihood family
+Deferred out of Phase 7A:
+
+- do not expose fixed-prior controls as part of Phase 7A
+- do not add general custom priors as part of Phase 7A
+- adapt the external comprehensive validation bundle
+  (`inla_test_suite_part1.R`, `inla_test_suite_part2_fremtpl2.R`,
+  `inla_test_suite_part3_stress.R`, `run_all_benchmarks.R`,
+  `inla_complete_test_suite.R`) as a later supported-subset harness expansion
+  rather than a Phase 7A completion condition
+
+### 2. Phase 8 prior/control metadata reuse
+
+Why next:
+
+- default priors are already embedded in model and likelihood implementations
+- custom-prior support should reuse those model definitions instead of adding
+  one-off R-side override paths
+- constrained `control.fixed` belongs with prior/control metadata, not with
+  Phase 7A fixed-design validation
+
+Expected work:
+
+- inventory the existing model, likelihood, and fixed-effect prior metadata
+- design a shared prior specification representation for Rust and R bridge
+  code
+- define how model defaults are surfaced, overridden, serialized, and validated
+- decide the first constrained public surface, likely fixed-effect prior
+  controls before arbitrary expression/table priors
+- add reference tests that prove default-prior behavior is unchanged when no
+  overrides are supplied
+- keep expression priors, `rprior`, table priors, and broad R-INLA prior
+  registry parity out of scope until the metadata layer is stable
+
+### 3. one additional GLM-like likelihood family
 
 Candidate examples:
 
@@ -85,19 +121,22 @@ Expected work:
 - register its string name and defaults in the bridge
 - add unit tests, end-to-end tests, and reference comparisons
 
-### If we add exactly one thing before the first public release
+### If we add exactly one more thing before the first public release
 
-Recommended choice:
+Recommended next choice:
 
-- Phase 7A fixed-effects productization
+- Phase 8 prior/control metadata reuse
 
 Why:
 
-- it is the lowest-risk extension that still proves the architecture can grow
-- it reuses the existing chain-graph and latent-model machinery
-- it expands the smoothing subset naturally
-- it is easier to validate cleanly than a new family with richer observation semantics
-- it gives us a stronger "the engine generalizes beyond the initial three latent models" story
+- Phase 7A fixed-effects productization is already complete for the MVP
+  supported subset
+- it keeps custom-prior and prior-control semantics honest before exposing
+  public overrides
+- it protects current default-prior behavior with explicit metadata and
+  reference tests
+- it gives the next API expansion a reusable foundation instead of a one-off
+  wrapper path
 
 Best second choice after that:
 
@@ -106,13 +145,16 @@ Best second choice after that:
 Practical interpretation:
 
 - if we choose one thing for beta usability, choose Phase 7A
-- if we choose one thing for immediate actuarial model breadth after that, choose a GLM-like family
+- if we choose one thing for release honesty after Phase 7A, choose Phase 8
+  prior/control metadata design
+- if we choose one thing for immediate actuarial model breadth after Phase 8,
+  choose a GLM-like family
 
 ## Priority 2: modest API expansion with strong payoff
 
 These features likely need some widening of the backend spec, but not a core-engine rewrite.
 
-### 3. generic graph input for latent models
+### 4. generic graph input for latent models
 
 Why now:
 
@@ -125,7 +167,7 @@ Expected work:
 - validate indexing, symmetry, and constraints in the bridge
 - keep the new input contract simple and explicit
 
-### 4. `besag`-style intrinsic spatial model
+### 5. `besag`-style intrinsic spatial model
 
 Why after generic graph input:
 
@@ -142,7 +184,7 @@ Expected work:
 
 These are useful, but they likely require widening the current single-predictor likelihood contract.
 
-### 5. `zeroinflatedpoisson2` or other multi-part count likelihoods
+### 6. `zeroinflatedpoisson2` or other multi-part count likelihoods
 
 Why later:
 
@@ -155,7 +197,7 @@ Expected work:
 - decide how multiple predictors are represented across the binding and R layers
 - add careful parity validation
 
-### 6. additional family-specific observation inputs
+### 7. additional family-specific observation inputs
 
 Examples:
 
@@ -169,7 +211,7 @@ Why later:
 
 These are important, but they should be treated as explicit milestones rather than normal incremental additions.
 
-### 7. `bym2`
+### 8. `bym2`
 
 Why later:
 
@@ -177,7 +219,7 @@ Why later:
 - scaling conventions
 - more complicated validation story
 
-### 8. `SPDE` and mesh workflows
+### 9. `SPDE` and mesh workflows
 
 Why later:
 
@@ -185,7 +227,7 @@ Why later:
 - mesh-generation and spatial-workflow implications
 - far beyond a local `QFunc` addition
 
-### 9. additional language bindings
+### 10. additional language bindings
 
 Examples:
 
@@ -201,12 +243,13 @@ Why later:
 If development capacity is limited, the most efficient sequence is:
 
 1. keep the current stable subset benchmark-clean
-2. finish Phase 7A fixed-effects productization
-3. add one additional GLM-like family
-4. widen the backend spec for generic graph input
-5. add `besag`
-6. revisit richer multi-part families
-7. treat `bym2`, `SPDE`, and new language bindings as separate milestones
+2. keep Phase 7A fixed-effects productization closed and gated
+3. complete Phase 8 prior/control metadata design
+4. add one additional GLM-like family
+5. widen the backend spec for generic graph input
+6. add `besag`
+7. revisit richer multi-part families
+8. treat `bym2`, `SPDE`, and new language bindings as separate milestones
 
 ## Acceptance rule for any backlog item
 
