@@ -34,16 +34,39 @@ jobs:
       - name: Resolve R executables
         shell: pwsh
         run: |
-          $rExe = Join-Path $env:R_HOME "bin\x64\R.exe"
+          $rscriptExe = $null
+          $rscriptCommand = Get-Command Rscript.exe -ErrorAction SilentlyContinue
+          if ($rscriptCommand) {
+            $rscriptExe = $rscriptCommand.Source
+          }
+          if (-not $rscriptExe -and -not [string]::IsNullOrWhiteSpace($env:R_HOME)) {
+            $rscriptExe = Join-Path $env:R_HOME "bin\x64\Rscript.exe"
+            if (-not (Test-Path $rscriptExe)) {
+              $rscriptExe = Join-Path $env:R_HOME "bin\Rscript.exe"
+            }
+          }
+          if (-not $rscriptExe -and (Test-Path "C:\Program Files\R")) {
+            $rscriptCandidate = Get-ChildItem -Path "C:\Program Files\R" -Filter Rscript.exe -Recurse |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            if ($rscriptCandidate) {
+              $rscriptExe = $rscriptCandidate.FullName
+            }
+          }
+          if (-not $rscriptExe -or -not (Test-Path $rscriptExe)) {
+            throw "Unable to locate Rscript.exe."
+          }
+
+          $rHome = (& $rscriptExe -e "cat(normalizePath(R.home(), winslash = '/', mustWork = TRUE))").Trim()
+          $rExe = Join-Path $rHome "bin\x64\R.exe"
           if (-not (Test-Path $rExe)) {
-            $rExe = Join-Path $env:R_HOME "bin\R.exe"
+            $rExe = Join-Path $rHome "bin\R.exe"
           }
           if (-not (Test-Path $rExe)) {
-            $rExe = (Get-Command R.exe -ErrorAction Stop).Source
+            $rExe = Join-Path (Split-Path $rscriptExe) "R.exe"
           }
-          $rscriptExe = Join-Path (Split-Path $rExe) "Rscript.exe"
-          if (-not (Test-Path $rscriptExe)) {
-            $rscriptExe = (Get-Command Rscript.exe -ErrorAction Stop).Source
+          if (-not (Test-Path $rExe)) {
+            throw "Unable to locate R.exe."
           }
 
           "R_EXE=$rExe" | Out-File -FilePath $env:GITHUB_ENV -Append
