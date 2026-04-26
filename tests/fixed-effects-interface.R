@@ -70,11 +70,62 @@ stopifnot(isTRUE(all.equal(
 stopifnot(isTRUE(all.equal(spec$offset, log(df$exposure), tolerance = 1e-12)))
 stopifnot(identical(spec$n_latent, as.integer(nlevels(df$group))))
 
+rich_df <- data.frame(
+    y = c(1.2, 0.8, 1.6, 1.0, 1.4, 1.9, 0.7, 1.1, 1.8, 1.3, 2.0, 0.9),
+    x1 = c(-1.2, -0.8, -0.3, 0.1, 0.5, 1.0, -1.0, -0.4, 0.2, 0.7, 1.2, -0.1),
+    tier = factor(
+        rep(c("low", "mid", "high"), 4L),
+        levels = c("low", "mid", "high")
+    ),
+    flag = rep(c(TRUE, FALSE), 6L),
+    group = factor(rep(seq_len(4L), each = 3L)),
+    exposure = c(0.9, 1.2, 0.8, 1.5, 1.1, 1.8, 1.0, 1.4, 0.7, 1.6, 1.3, 1.9)
+)
+
+rich_spec <- build_backend_spec(
+    y ~ 1 + x1 + tier + flag + x1:tier + offset(log(exposure)) + f(group, model = "iid"),
+    data = rich_df,
+    family = "gaussian"
+)
+rich_expected_matrix <- model.matrix(
+    ~ 1 + x1 + tier + flag + x1:tier + offset(log(exposure)),
+    data = rich_df
+)
+rich_matrix <- matrix(
+    rich_spec$fixed_matrix,
+    nrow = nrow(rich_df),
+    ncol = rich_spec$n_fixed,
+    dimnames = list(NULL, rich_spec$fixed_names)
+)
+stopifnot(identical(rich_spec$n_fixed, as.integer(ncol(rich_expected_matrix))))
+stopifnot(identical(rich_spec$fixed_names, colnames(rich_expected_matrix)))
+stopifnot(isTRUE(all.equal(
+    unname(rich_matrix),
+    unname(rich_expected_matrix),
+    tolerance = 1e-12,
+    check.attributes = FALSE
+)))
+stopifnot(isTRUE(all.equal(rich_spec$offset, log(rich_df$exposure), tolerance = 1e-12)))
+stopifnot(identical(rich_spec$n_latent, as.integer(nlevels(rich_df$group))))
+
 rank_deficient_df <- transform(df, x_dup = x1)
 expect_error_matching(
     build_backend_spec(
         y ~ 1 + x1 + x_dup + f(group, model = "iid"),
         data = rank_deficient_df,
+        family = "gaussian"
+    ),
+    "rank-deficient"
+)
+
+unused_factor_df <- transform(
+    df,
+    unused = factor(rep("observed", nrow(df)), levels = c("observed", "empty"))
+)
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + unused + f(group, model = "iid"),
+        data = unused_factor_df,
         family = "gaussian"
     ),
     "rank-deficient"
@@ -87,6 +138,27 @@ expect_error_matching(
         family = "gaussian"
     ),
     "Unsupported fixed-effect term"
+)
+
+character_df <- transform(df, char_group = as.character(promo))
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + char_group + f(group, model = "iid"),
+        data = character_df,
+        family = "gaussian"
+    ),
+    "convert it to a factor"
+)
+
+nonfinite_fixed_df <- df
+nonfinite_fixed_df$x1[[2L]] <- Inf
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + x1 + f(group, model = "iid"),
+        data = nonfinite_fixed_df,
+        family = "gaussian"
+    ),
+    "Fixed-effects design matrix contains non-finite"
 )
 
 expect_error_matching(
@@ -109,11 +181,69 @@ expect_error_matching(
 
 expect_error_matching(
     build_backend_spec(
+        y ~ 1 + f(group),
+        data = df,
+        family = "gaussian"
+    ),
+    "f\\(\\) model must be a literal"
+)
+
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + f(group, "iid", model = "iid"),
+        data = df,
+        family = "gaussian"
+    ),
+    "model was supplied both"
+)
+
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + f(group, model = "iid", constr = 1),
+        data = df,
+        family = "gaussian"
+    ),
+    "constr must be a literal"
+)
+
+expect_error_matching(
+    build_backend_spec(
         y ~ 1 + f(group, model = "iid", hyper = list(prec = list(prior = "pc.prec"))),
         data = df,
         family = "gaussian"
     ),
     "Unsupported f\\(\\) argument"
+)
+
+nonfinite_formula_offset_df <- df
+nonfinite_formula_offset_df$exposure[[1L]] <- 0
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + x1 + offset(log(exposure)) + f(group, model = "iid"),
+        data = nonfinite_formula_offset_df,
+        family = "gaussian"
+    ),
+    "Formula offset contains non-finite"
+)
+
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + x1 + f(group, model = "iid"),
+        data = df,
+        family = "gaussian",
+        offset = c(0, Inf, rep(0, nrow(df) - 2L))
+    ),
+    "offset contains non-finite"
+)
+
+expect_error_matching(
+    build_backend_spec(
+        y ~ 1 + x1 + f(group, model = "iid"),
+        data = df,
+        family = "gaussian",
+        offset = c(0, 0)
+    ),
+    "offset length does not match"
 )
 
 fixed_only_spec <- build_backend_spec(

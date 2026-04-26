@@ -24,6 +24,13 @@ expressed with:
 - no custom priors, graph inputs, `scale.model`, `E`, `Ntrials`, or other
   R-INLA-only control arguments
 
+The fixed-effects subset is intentionally narrower than R formula syntax.
+Supported fixed designs must be generated from bare numeric, integer, logical,
+or factor columns plus simple interactions among those columns. Rank-deficient
+designs, transformed fixed terms, character columns, unused factor levels that
+create aliased columns, non-finite design values, and non-finite offsets are
+rejected before Rust is called.
+
 Some R-INLA cases are structurally useful but need a small adapter before they
 are fair rustyINLA validations:
 
@@ -115,3 +122,8 @@ apply the explicit adapters, and run only the supported subset against both
 shape. It includes real adapted Germany/Epil cases from part 1, deterministic
 synthetic cases mapped to parts 2 and 3, and fixed-effect-only GLMs, but still
 does not run the full uploaded suites.
+
+`tests/fixed-effects-interface.R` is the focused Phase 7A formula-contract
+regression harness. It checks multi-level factors, logical columns, simple
+interactions, offsets with latent terms, rank-deficient designs, unsupported
+fixed transforms, invalid `f()` surfaces, and fixed-effect-only formulas.

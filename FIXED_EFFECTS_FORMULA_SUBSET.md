@@ -16,10 +16,14 @@ now validates a narrower public contract before building the backend spec.
   `1`, `0`, or `-1`.
 - Fixed-effect columns that are already present in `data` and are numeric,
   integer, logical, or factor.
-- Multi-column factor expansions produced by `model.matrix()`.
+- Logical fixed-effect columns, encoded through the normal `model.matrix()`
+  treatment.
+- Multi-column factor expansions produced by `model.matrix()`, including
+  factors with three or more levels.
 - Simple fixed-effect interactions among bare data columns, including `:`,
   `*`, and formula expansions such as `(x1 + x2)^2` when they reduce to bare
-  columns and their interactions.
+  columns and their interactions. Interactions can include factors when the
+  resulting design remains full rank.
 - Formula offsets through `offset(...)`.
 - The explicit `offset = ...` argument to `rusty_inla()`, provided it evaluates
   to a finite numeric vector with one value per observation.
@@ -35,6 +39,8 @@ now validates a narrower public contract before building the backend spec.
 - Character fixed-effect columns. Convert them to factors explicitly.
 - Rank-deficient or aliased fixed-effect designs.
 - Non-finite fixed-effect design values or offsets.
+- Fixed-effect factors with unused levels that create aliased/all-zero design
+  columns.
 - Latent `f()` terms inside interactions, such as `x:f(group, model = "iid")`.
 - Transformed latent covariates, such as `f(log(time), model = "rw1")` or
   `f(x + z, model = "iid")`.
@@ -59,13 +65,18 @@ latent `f(...)` block.
 The base-R regression script at `tests/fixed-effects-interface.R` covers:
 
 - multiple fixed columns
-- factor expansion
+- multi-level factor expansion
+- logical fixed columns
 - a simple fixed interaction
 - formula offsets mixed with a latent term
 - rank-deficient fixed designs
+- rank-deficient factor expansions from unused levels
+- character fixed columns
+- non-finite fixed design values and offsets
 - transformed fixed terms
 - latent `f()` interactions
 - transformed latent covariates
+- missing, duplicated, or invalid literal `f()` arguments
 - unsupported `f()` arguments
 - fixed-effect-only formulas
 - formulas with no fixed or latent terms
