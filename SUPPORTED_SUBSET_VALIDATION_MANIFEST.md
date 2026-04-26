@@ -145,3 +145,30 @@ The next branch-local validation target has started as
 a deterministic supported-subset proxy for the uploaded stress
 `MultiRE_3Effects` surface: Poisson likelihood, fixed effects, formula offset,
 and three additive `iid` latent terms.
+
+## Fixed-Effect Reference Interpretation
+
+The `stress_multi_re_three_iid` case currently shows a small fixed-effect
+difference against R-INLA, with a maximum absolute fixed-effect difference of
+about `0.0173` in the latest Phase 7A gate. A targeted decomposition showed
+that this is not introduced by the three latent `iid` terms: the same scale of
+fixed-effect difference is already present in the fixed-only Poisson GLM on the
+same synthetic data, and adding one, two, or three `iid` terms changes it only
+minimally.
+
+For that synthetic fixed-only Poisson slice, `rustyINLA` matches base
+`glm(..., family = poisson())` and an independent penalized MAP solve using
+the current fixed-effect prior precision to numerical precision. R-INLA's
+reported `summary.fixed` values are consistently offset from that direct
+GLM/MAP target, even when using formula offsets, explicit `offset = ...`, or
+`E = exposure`.
+
+Interpretation for Phase 7A:
+
+- treat the `stress_multi_re_three_iid` fixed-effect difference as a known
+  reference-definition difference, not as evidence of multi-latent drift
+- keep the R-INLA comparison in the supported-subset harness because it is
+  still the primary parity reference
+- add a future GLM/MAP comparator for fixed-only GLMs so the validation output
+  can distinguish direct fixed-effect numerical accuracy from R-INLA reporting
+  parity
