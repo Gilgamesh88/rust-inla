@@ -123,6 +123,12 @@ shape. It includes real adapted Germany/Epil cases from part 1, deterministic
 synthetic cases mapped to parts 2 and 3, and fixed-effect-only GLMs, but still
 does not run the full uploaded suites.
 
+For the Phase 7A validation gate, run
+`tools/run-phase7a-validation.ps1`. It executes the formula contract tests,
+the public `rusty_inla()` validation-error tests, the fixed-only R-INLA parity
+script, and the curated supported-subset validation with worktree package
+loading forced.
+
 `tests/fixed-effects-interface.R` is the focused Phase 7A formula-contract
 regression harness. It checks multi-level factors, logical columns, simple
 interactions, offsets with latent terms, rank-deficient designs, unsupported
@@ -133,3 +139,9 @@ through the package-level `rusty_inla()` entry point for representative
 unsupported fixed terms, rank-deficient fixed-only GLMs, character columns,
 non-finite fixed values, non-finite explicit offsets, empty formulas, and
 unsupported `f()` arguments.
+
+The next branch-local validation target has started as
+`stress_multi_re_three_iid` in `tools/run_supported_subset_validation.R`. It is
+a deterministic supported-subset proxy for the uploaded stress
+`MultiRE_3Effects` surface: Poisson likelihood, fixed effects, formula offset,
+and three additive `iid` latent terms.

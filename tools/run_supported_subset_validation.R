@@ -225,6 +225,36 @@ make_poisson_two_iid <- function(seed = 1703L) {
     )
 }
 
+make_poisson_three_iid <- function(seed = 1706L) {
+    set.seed(seed)
+    n_group <- 10L
+    n_area <- 6L
+    n_period <- 5L
+    reps <- 12L
+    n <- n_group * reps
+    group <- factor(rep(seq_len(n_group), each = reps))
+    area <- factor(rep(seq_len(n_area), length.out = n))
+    period <- factor(rep(seq_len(n_period), each = n_area, length.out = n))
+    x1 <- stats::rnorm(n)
+    promo <- factor(sample(c("base", "promo"), n, replace = TRUE))
+    exposure <- stats::runif(n, 0.5, 2.0)
+    u_group <- stats::rnorm(n_group, 0.0, 0.20)
+    u_area <- stats::rnorm(n_area, 0.0, 0.15)
+    u_period <- stats::rnorm(n_period, 0.0, 0.10)
+    eta <- -0.65 + 0.25 * x1 + 0.25 * (promo == "promo") +
+        u_group[as.integer(group)] + u_area[as.integer(area)] +
+        u_period[as.integer(period)] + log(exposure)
+    data.frame(
+        y = stats::rpois(n, lambda = exp(eta)),
+        x1 = x1,
+        promo = promo,
+        exposure = exposure,
+        group = group,
+        area = area,
+        period = period
+    )
+}
+
 make_gamma_iid_fixed <- function(seed = 1704L) {
     set.seed(seed)
     n_groups <- 15L
@@ -454,6 +484,16 @@ build_cases <- function() {
             formula = y ~ 1 + promo + offset(log(exposure)) +
                 f(group, model = "iid") + f(area, model = "iid"),
             data = make_poisson_two_iid(),
+            tolerances = list(random_mean_abs = 1.00, random_sd_abs = 1.00, fitted_mean_rel = 0.45)
+        ),
+        case_record(
+            id = "stress_multi_re_three_iid",
+            manifest_source = "uploaded stress: MultiRE_3Effects synthetic supported subset",
+            family = "poisson",
+            formula = y ~ 1 + x1 + promo + offset(log(exposure)) +
+                f(group, model = "iid") + f(area, model = "iid") +
+                f(period, model = "iid"),
+            data = make_poisson_three_iid(),
             tolerances = list(random_mean_abs = 1.00, random_sd_abs = 1.00, fitted_mean_rel = 0.45)
         ),
         case_record(

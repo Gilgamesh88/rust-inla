@@ -89,3 +89,7 @@ The package-facing error script at
 `tests/fixed-effects-public-api-errors.R` checks representative unsupported
 fixed-effect and formula surfaces through `rusty_inla()` itself, so user-facing
 errors stay clean.
+
+The combined Phase 7A gate is `tools/run-phase7a-validation.ps1`; it runs the
+formula-contract, public-error, fixed-only parity, and curated supported-subset
+scripts before fixed-effects commits are treated as merge candidates.

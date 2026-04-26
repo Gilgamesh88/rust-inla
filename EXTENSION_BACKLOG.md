@@ -53,6 +53,15 @@ Expected work:
   `inla_complete_test_suite.R`) against the supported subset instead of
   running it mid-phase
 
+Current Phase 7A gate:
+
+- run `tools/run-phase7a-validation.ps1` before treating a fixed-effects
+  change as a merge candidate
+- keep the next branch-local validation target focused on supported-subset
+  multi-latent Poisson coverage; the first case is
+  `stress_multi_re_three_iid`, a deterministic proxy for the uploaded stress
+  `MultiRE_3Effects` surface
+
 ### 2. one additional GLM-like likelihood family
 
 Candidate examples:
