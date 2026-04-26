@@ -1,3 +1,21 @@
 src/rust/vendor
 src/Makevars
 src/Makevars.win
+
+# Local session state and transient diagnostics
+.Rhistory
+STARTUP_SESSION.md
+last_failed_matrix.txt
+src/rust/inla_core/last_failed_matrix.txt
+scratch/SESSION_CONTEXT_*.md
+
+# Local build support and installed package libraries
+scratch/build_support/
+scratch/rlib/
+
+# Generated benchmark artifacts
+scratch/*.csv
+scratch/plots/
+
+# Downloaded or cached external reference data
+scratch/external_reference_data/

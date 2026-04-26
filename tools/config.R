@@ -58,6 +58,10 @@ cfg <- if (is_debug) "debug" else "release"
 # used to replace @LIBDIR@
 .libdir <- paste(c(target_libpath, cfg), collapse = "/")
 
+# Explicit R paths for downstream Cargo/extendr build scripts.
+.r_home <- normalizePath(R.home(), winslash = "/", mustWork = TRUE)
+.r_include_dir <- normalizePath(R.home("include"), winslash = "/", mustWork = TRUE)
+
 # use this to replace @TARGET@
 # we specify the target _only_ on webR
 # there may be use cases later where this can be adapted or expanded
@@ -101,6 +105,8 @@ new_txt <- gsub("@CRAN_FLAGS@", .cran_flags, mv_txt) |>
   gsub("@PROFILE@", .profile, x = _) |>
   gsub("@CLEAN_TARGET@", .clean_targets, x = _) |>
   gsub("@LIBDIR@", .libdir, x = _) |>
+  gsub("@R_HOME@", .r_home, x = _) |>
+  gsub("@R_INCLUDE_DIR@", .r_include_dir, x = _) |>
   gsub("@TARGET@", .target, x = _) |>
   gsub("@PANIC_EXPORTS@", .panic_exports, x = _)
 
