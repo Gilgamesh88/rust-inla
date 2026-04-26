@@ -300,7 +300,7 @@ Rule of thumb:
 2. Register the family name in [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:436).
 3. Add default likelihood theta initialization in [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:199).
 4. Add unit tests for log-likelihood, gradient, curvature, and prior behavior.
-5. Add at least one end-to-end or benchmark-style comparison against `R-INLA` or a trusted reference.
+5. Add at least one end-to-end or benchmark-style comparison against `R-INLA` or a trusted reference, including timing, memory, and parameter-accuracy metrics for the affected outputs.
 6. Update supported-scope documentation.
 
 ### To add a new latent model
@@ -310,7 +310,7 @@ Rule of thumb:
 3. Register the model name in [R/f.R](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/R/f.R) and [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:155).
 4. Add default model theta initialization in [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs:180).
 5. If the model needs new front-end inputs, widen [R/interface.R](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/R/interface.R) and the bridge parser.
-6. Add model-level tests, end-to-end tests, and benchmark/reference cases.
+6. Add model-level tests, end-to-end tests, and benchmark/reference cases with timing, memory, and parameter-accuracy metrics for the affected outputs.
 7. Update supported-scope documentation.
 
 ## 9. Recommended path for future development

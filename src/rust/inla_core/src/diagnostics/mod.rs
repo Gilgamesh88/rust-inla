@@ -28,6 +28,9 @@ pub struct RunDiagnostics {
     pub latent_mode_solve_calls: usize,
     pub latent_mode_iterations_total: usize,
     pub latent_mode_max_iter_hits: usize,
+    pub latent_mode_restarts: usize,
+    pub latent_mode_step_ramp_solves: usize,
+    pub latent_mode_step_factor_min: f64,
     pub latent_mode_solve_time: Duration,
     pub likelihood_assembly_time: Duration,
     pub optimizer_time: Duration,
@@ -40,6 +43,17 @@ impl RunDiagnostics {
         match phase {
             LaplacePhase::Optimize => self.laplace_eval_calls_optimizer += 1,
             LaplacePhase::Ccd => self.laplace_eval_calls_ccd += 1,
+        }
+    }
+
+    pub fn record_mode_step_factor(&mut self, step_factor: f64) {
+        if !step_factor.is_finite() {
+            return;
+        }
+        if self.latent_mode_step_factor_min == 0.0 {
+            self.latent_mode_step_factor_min = step_factor;
+        } else {
+            self.latent_mode_step_factor_min = self.latent_mode_step_factor_min.min(step_factor);
         }
     }
 }
@@ -58,6 +72,9 @@ pub struct RunDiagnosticsSummary {
     pub latent_mode_solve_calls: usize,
     pub latent_mode_iterations_total: usize,
     pub latent_mode_max_iter_hits: usize,
+    pub latent_mode_restarts: usize,
+    pub latent_mode_step_ramp_solves: usize,
+    pub latent_mode_step_factor_min: f64,
     pub factorization_count: usize,
     pub selected_inverse_count: usize,
     pub optimizer_time_sec: f64,
@@ -83,6 +100,13 @@ impl RunDiagnosticsSummary {
             latent_mode_solve_calls: run.latent_mode_solve_calls,
             latent_mode_iterations_total: run.latent_mode_iterations_total,
             latent_mode_max_iter_hits: run.latent_mode_max_iter_hits,
+            latent_mode_restarts: run.latent_mode_restarts,
+            latent_mode_step_ramp_solves: run.latent_mode_step_ramp_solves,
+            latent_mode_step_factor_min: if run.latent_mode_step_factor_min > 0.0 {
+                run.latent_mode_step_factor_min
+            } else {
+                1.0
+            },
             factorization_count: solver.factorization_count,
             selected_inverse_count: solver.selected_inverse_count,
             optimizer_time_sec: run.optimizer_time.as_secs_f64(),

@@ -1,4 +1,6 @@
 #' Execute rust-inla backend from R.
+#'
+#' @useDynLib rustyINLA, .registration = TRUE
 
 # nolint start
 

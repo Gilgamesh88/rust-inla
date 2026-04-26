@@ -97,11 +97,26 @@ What it does:
 2. Run the external reference harness second.
 3. Treat internal parity as the release gate.
 4. Treat external examples as public-facing validation and semantic anchoring.
+5. Before asking to commit or open a PR for solver, likelihood, covariance,
+   optimizer, package-loading, or benchmark-harness changes, present the
+   relevant benchmark timings, memory numbers, and parameter-accuracy metrics.
 
 Why this order:
 
 - internal benchmarks are closer to our real MVP subset
 - external examples are more useful for communication and broader validation
+
+Timing comparisons must say which build/load path produced the numbers.
+Optimized package or release-DLL timings are the merge gate for performance;
+debug-DLL timings are useful for diagnostics but should not be used as the
+only evidence for a performance decision.
+
+Parameter-accuracy comparisons are part of the same pre-commit gate. For each
+affected benchmark or reference case, report the relevant `R-INLA` parity
+metrics: fixed-effect means and SDs, random-effect means and SDs, hyperparameter
+means and SDs, fitted means, and log marginal likelihood. If a metric is not
+applicable to the case, label it as such rather than omitting the accuracy
+check.
 
 ## 5. What to compare
 
@@ -109,9 +124,10 @@ For each example, compare these first:
 
 - model formula and family semantics
 - latent-effect interpretation
-- number and meaning of hyperparameters
-- fitted means
+- fixed-effect means and SDs
 - random-effect means and SDs
+- hyperparameter means and SDs
+- fitted means
 - log marginal likelihood
 
 Then compare these second:

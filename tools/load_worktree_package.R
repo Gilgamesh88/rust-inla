@@ -24,7 +24,7 @@ load_rustyinla_for_benchmarks <- function(repo_root = getwd()) {
     ))
 
     if (!force_worktree && length(dll_candidates) == 0 && requireNamespace("rustyINLA", quietly = TRUE)) {
-        suppressPackageStartupMessages(library(rustyINLA, character.only = TRUE))
+        suppressPackageStartupMessages(library("rustyINLA", character.only = TRUE))
         return(invisible("installed"))
     }
     if (length(dll_candidates) == 0) {
