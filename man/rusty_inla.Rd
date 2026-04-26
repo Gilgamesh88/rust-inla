@@ -4,14 +4,34 @@
 \alias{rusty_inla}
 \title{Native R Formula Interface for Rusty-INLA}
 \usage{
-rusty_inla(formula, data, family)
+rusty_inla(
+  formula,
+  data,
+  family,
+  offset = NULL,
+  output_profile = c("thin", "benchmark")
+)
 }
 \arguments{
-\item{formula}{A robust R formula \code{y ~ 1 + f(cov, model="iid")}.}
+\item{formula}{A robust R formula such as
+\code{y ~ 1 + x1 * factor_col + offset(log_exposure) + f(cov, model="iid")}.
+The current fixed-effects subset supports bare data columns and simple
+interactions among them, with or without standalone latent \code{f(...)} terms;
+create transformed columns in \code{data} first.}
 
 \item{data}{A data.frame containing the variables.}
 
 \item{family}{The likelihood family.}
+
+\item{offset}{Optional offset supplied either as a numeric vector or as an
+expression evaluated in \code{data}, for example \code{offset = log(exposure)}.
+Formula-based offsets through \code{offset(...)} are also supported and are
+added to this argument when both are present.}
+
+\item{output_profile}{Output payload profile. Use \code{"thin"} for the current
+lightweight default or \code{"benchmark"} to add parity-oriented outputs such
+as marginal curves and linear-predictor summaries for fairer memory
+comparisons against \code{R-INLA}.}
 }
 \description{
 Native R Formula Interface for Rusty-INLA

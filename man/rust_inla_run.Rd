@@ -4,23 +4,10 @@
 \alias{rust_inla_run}
 \title{Execute rust-inla backend from R.}
 \usage{
-rust_inla_run(
-  data,
-  model_type,
-  likelihood_type,
-  intercept,
-  n_latent_arg,
-  x_idx_arg
-)
+rust_inla_run(spec)
 }
 \arguments{
-\item{data}{A numeric array of length N (the response y).}
-
-\item{model_type}{String identifier ("iid", "rw1", "ar1").}
-
-\item{likelihood_type}{String identifier ("gaussian", "poisson", "gamma").}
-
-\item{intercept}{Boolean to estimate global beta0.}
+\item{spec}{A named backend specification list built by \code{build_backend_spec()}.}
 }
 \description{
 Execute rust-inla backend from R.
