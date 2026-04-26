@@ -256,8 +256,173 @@ make_gaussian_ar1_fixed <- function(seed = 1705L) {
     )
 }
 
+load_inla_dataset <- function(name) {
+    env <- new.env(parent = emptyenv())
+    utils::data(list = name, package = "INLA", envir = env)
+    if (!exists(name, envir = env, inherits = FALSE)) {
+        stop(sprintf("INLA dataset '%s' was not found.", name), call. = FALSE)
+    }
+    get(name, envir = env, inherits = FALSE)
+}
+
+make_suite_part1_germany <- function() {
+    Germany <- load_inla_dataset("Germany")
+    data.frame(
+        Y = Germany$Y,
+        E = Germany$E,
+        x = Germany$x,
+        region_iid = factor(Germany$region)
+    )
+}
+
+make_suite_part1_epil <- function() {
+    Epil <- load_inla_dataset("Epil")
+    data.frame(
+        y = Epil$y,
+        Trt = Epil$Trt,
+        Base = Epil$Base,
+        Age = Epil$Age,
+        V4 = Epil$V4,
+        Ind = factor(Epil$Ind),
+        rand = factor(Epil$rand)
+    )
+}
+
+make_suite_part2_fremtpl_synthetic <- function(seed = 2701L, n = 3000L) {
+    set.seed(seed)
+    df <- data.frame(
+        IDpol = seq_len(n),
+        ClaimNb = stats::rpois(n, 0.05),
+        Exposure = stats::runif(n, 0.1, 1.0),
+        Area = sample(
+            LETTERS[1:6],
+            n,
+            replace = TRUE,
+            prob = c(0.15, 0.2, 0.25, 0.2, 0.1, 0.1)
+        ),
+        VehPower = sample(4:15, n, replace = TRUE),
+        VehAge = sample(0:20, n, replace = TRUE),
+        DrivAge = sample(
+            18:90,
+            n,
+            replace = TRUE,
+            prob = stats::dnorm(18:90, mean = 45, sd = 15)
+        ),
+        BonusMalus = pmax(50, pmin(230, stats::rnorm(n, 100, 20))),
+        VehBrand = sample(paste0("B", 1:11), n, replace = TRUE),
+        VehGas = sample(c("Regular", "Diesel"), n, replace = TRUE, prob = c(0.4, 0.6)),
+        Density = round(exp(stats::rnorm(n, 5, 1.5))),
+        Region = sample(paste0("R", 1:22), n, replace = TRUE)
+    )
+
+    df$ClaimNb <- pmin(df$ClaimNb, 4)
+    df$Exposure <- pmin(df$Exposure, 1.0)
+    has_claim <- df$ClaimNb > 0
+    df$TotalClaim <- 0.0
+    df$TotalClaim[has_claim] <- stats::rgamma(
+        sum(has_claim),
+        shape = 2,
+        rate = 2 / 2000
+    ) * df$ClaimNb[has_claim]
+    df$NumClaims <- df$ClaimNb
+
+    df$Area <- factor(df$Area)
+    df$VehPower <- factor(pmin(as.numeric(as.character(df$VehPower)), 12))
+    df$VehBrand <- factor(df$VehBrand)
+    df$Region <- factor(df$Region)
+    df$VehGas <- factor(df$VehGas)
+    df$log_exposure <- log(df$Exposure)
+    df$log_density <- log(df$Density + 1)
+    df$obs_id <- seq_len(nrow(df))
+    df$HasClaim <- as.integer(df$ClaimNb > 0)
+    df$Area_num <- as.integer(df$Area)
+    df$Region_num <- as.integer(df$Region)
+    df
+}
+
+make_suite_part3_scale <- function(seed = 3701L, n = 500L) {
+    set.seed(seed)
+    x1 <- stats::rnorm(n)
+    x2 <- stats::rnorm(n)
+    group <- sample(seq_len(min(50L, n %/% 10L)), n, replace = TRUE)
+    time <- rep(seq_len(min(100L, n %/% 10L)), length.out = n)
+    lambda <- exp(1 + 0.3 * x1 - 0.2 * x2)
+    mu_gamma <- exp(5 + 0.2 * x1)
+
+    data.frame(
+        y_pois = stats::rpois(n, lambda),
+        y_gamma = stats::rgamma(n, shape = 2, rate = 2 / mu_gamma),
+        x1 = x1,
+        x2 = x2,
+        group = factor(group),
+        time = time,
+        obs_id = seq_len(n)
+    )
+}
+
 build_cases <- function() {
+    suite_part2 <- make_suite_part2_fremtpl_synthetic()
+    suite_part2_sev <- suite_part2[suite_part2$TotalClaim > 0, , drop = FALSE]
+    suite_part2_sev$sev_id <- seq_len(nrow(suite_part2_sev))
+
     list(
+        case_record(
+            id = "suite_part1_germany_poisson_glm",
+            manifest_source = "uploaded part1: Germany_Poisson_GLM adapted E to offset",
+            family = "poisson",
+            formula = Y ~ 1 + x + offset(log(E)),
+            data = make_suite_part1_germany(),
+            tolerances = list(fixed_mean_abs = 0.10, fitted_mean_rel = 0.10)
+        ),
+        case_record(
+            id = "suite_part1_germany_poisson_iid",
+            manifest_source = "uploaded part1: Germany_Poisson_IID adapted E to offset",
+            family = "poisson",
+            formula = Y ~ 1 + x + offset(log(E)) + f(region_iid, model = "iid"),
+            data = make_suite_part1_germany(),
+            tolerances = list(fixed_mean_abs = 0.15, random_mean_abs = 0.80, random_sd_abs = 0.80)
+        ),
+        case_record(
+            id = "suite_part1_epil_poisson_glm",
+            manifest_source = "uploaded part1: Epil_Poisson_GLM",
+            family = "poisson",
+            formula = y ~ 1 + Trt + Base + Age + V4,
+            data = make_suite_part1_epil(),
+            tolerances = list(fixed_mean_abs = 0.20, fitted_mean_rel = 0.20)
+        ),
+        case_record(
+            id = "suite_part1_epil_poisson_iid",
+            manifest_source = "uploaded part1: Epil_Poisson_IID",
+            family = "poisson",
+            formula = y ~ 1 + Trt + Base + Age + V4 + f(Ind, model = "iid"),
+            data = make_suite_part1_epil(),
+            tolerances = list(fixed_mean_abs = 0.25, random_mean_abs = 0.75, random_sd_abs = 0.75)
+        ),
+        case_record(
+            id = "suite_part2_f01_poisson_offset",
+            manifest_source = "uploaded part2: F01_Poisson_Offset synthetic fallback",
+            family = "poisson",
+            formula = ClaimNb ~ 1 + DrivAge + VehAge + BonusMalus +
+                log_density + offset(log_exposure),
+            data = suite_part2,
+            tolerances = list(fixed_mean_abs = 0.25, fitted_mean_rel = 0.20)
+        ),
+        case_record(
+            id = "suite_part2_s01_gamma_glm",
+            manifest_source = "uploaded part2: S01_Gamma_GLM synthetic fallback",
+            family = "gamma",
+            formula = TotalClaim ~ 1 + DrivAge + VehAge + BonusMalus + log_density,
+            data = suite_part2_sev,
+            tolerances = list(fixed_mean_abs = 0.35, fitted_mean_rel = 0.25)
+        ),
+        case_record(
+            id = "suite_part3_scale_poisson_glm",
+            manifest_source = "uploaded part3: Scale_*_Poisson_GLM",
+            family = "poisson",
+            formula = y_pois ~ 1 + x1 + x2,
+            data = make_suite_part3_scale(),
+            tolerances = list(fixed_mean_abs = 0.12, fitted_mean_rel = 0.10)
+        ),
         case_record(
             id = "fixed_only_poisson_offset_interaction",
             manifest_source = "new fixed-only GLM subset decision",

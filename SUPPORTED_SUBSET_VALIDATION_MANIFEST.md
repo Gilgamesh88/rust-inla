@@ -41,7 +41,7 @@ are fair rustyINLA validations:
 | `FixedOnly_Gamma` | Candidate | Fixed-effect-only Gamma GLM with supported fixed columns. |
 | `Germany_Poisson_IID` | Adaptable | Supported Poisson + `iid` with fixed `x`; convert `E` to formula offset. |
 | `Epil_Poisson_IID` | Candidate | Multi-column fixed effects plus `iid`. |
-| `Epil_Poisson_IID2` | Candidate | Multi-column fixed effects plus two `iid` terms. |
+| `Epil_Poisson_IID2` | Deferred | Structurally relevant two-`iid` case, but the exact uploaded data currently hits a sparse augmented-precision singularity; keep synthetic two-`iid` coverage for now. |
 | `Simulated_Gaussian_AR1` | Candidate | Gaussian + `ar1`; uses supported `constr = FALSE`. |
 | `Simulated_Poisson_AR1` | Candidate | Poisson + `ar1`; uses supported `constr = FALSE`. |
 | `Simulated_Gaussian_AR2` | Adaptable | Convert R-INLA `model = "ar", order = 2` to rustyINLA `model = "ar2"`. |
@@ -112,6 +112,6 @@ apply the explicit adapters, and run only the supported subset against both
 `rustyINLA` and R-INLA.
 
 `tools/run_supported_subset_validation.R` is the first narrow harness in that
-shape. It uses deterministic synthetic cases mapped to the candidate rows
-above, including fixed-effect-only GLMs, but still does not run the full
-uploaded suites.
+shape. It includes real adapted Germany/Epil cases from part 1, deterministic
+synthetic cases mapped to parts 2 and 3, and fixed-effect-only GLMs, but still
+does not run the full uploaded suites.

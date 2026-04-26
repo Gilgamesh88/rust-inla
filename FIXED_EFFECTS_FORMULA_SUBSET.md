@@ -69,3 +69,7 @@ The base-R regression script at `tests/fixed-effects-interface.R` covers:
 - unsupported `f()` arguments
 - fixed-effect-only formulas
 - formulas with no fixed or latent terms
+
+The public parity script at `tests/fixed-only-parity.R` compares
+fixed-effect-only Gaussian, Poisson, and Gamma formulas against R-INLA through
+the package-level `rusty_inla()` interface.
