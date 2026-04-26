@@ -127,3 +127,9 @@ does not run the full uploaded suites.
 regression harness. It checks multi-level factors, logical columns, simple
 interactions, offsets with latent terms, rank-deficient designs, unsupported
 fixed transforms, invalid `f()` surfaces, and fixed-effect-only formulas.
+
+`tests/fixed-effects-public-api-errors.R` checks the same validation boundary
+through the package-level `rusty_inla()` entry point for representative
+unsupported fixed terms, rank-deficient fixed-only GLMs, character columns,
+non-finite fixed values, non-finite explicit offsets, empty formulas, and
+unsupported `f()` arguments.

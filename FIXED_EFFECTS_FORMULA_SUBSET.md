@@ -84,3 +84,8 @@ The base-R regression script at `tests/fixed-effects-interface.R` covers:
 The public parity script at `tests/fixed-only-parity.R` compares
 fixed-effect-only Gaussian, Poisson, and Gamma formulas against R-INLA through
 the package-level `rusty_inla()` interface.
+
+The package-facing error script at
+`tests/fixed-effects-public-api-errors.R` checks representative unsupported
+fixed-effect and formula surfaces through `rusty_inla()` itself, so user-facing
+errors stay clean.
