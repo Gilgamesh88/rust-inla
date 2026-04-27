@@ -82,6 +82,9 @@ Deferred out of Phase 7A:
 
 ### 2. Phase 8 prior/control metadata reuse
 
+Status: Phase 8A active and Phase 8B started. See
+[PHASE8_ROADMAP.md](PHASE8_ROADMAP.md).
+
 Why next:
 
 - default priors are already embedded in model and likelihood implementations
@@ -92,6 +95,16 @@ Why next:
 
 Expected work:
 
+- Phase 8A: stabilize the one-`iid` fixed-plus-`iid` cross evidence state and
+  keep benchmark/accuracy gates attached to every commit candidate
+- Phase 8B: formalize that reusable update states store old-data evidence, not
+  posterior objects blindly reused as priors
+- Phase 8C: extract theta-mixture old-data evidence over CCD/theta support
+- Phase 8D: add a theta-dependent old-evidence objective with log constants
+- Phase 8E: validate against joint refits on fixed effects, random effects,
+  fitted values, theta marginals, tails, time, and memory
+- Phase 8F: defer broader latent structures (`rw1`, `rw2`, `ar1`, `ar2`) until
+  the one-`iid` path is benchmark-clean
 - inventory the existing model, likelihood, and fixed-effect prior metadata
 - design a shared prior specification representation for Rust and R bridge
   code

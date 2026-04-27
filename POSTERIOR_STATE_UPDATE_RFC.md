@@ -2,6 +2,13 @@
 
 This note proposes a `rustyINLA`-native design for approximate posterior-state updating.
 
+The staged implementation roadmap is tracked in
+[PHASE8_ROADMAP.md](PHASE8_ROADMAP.md). In short: Phase 8A stabilizes the
+one-`iid` fixed-cross evidence state, Phase 8B formalizes old-data evidence
+semantics, Phase 8C and 8D build theta-mixture evidence and a theta-dependent
+objective, Phase 8E validates against joint refits, and Phase 8F defers broader
+latent structures.
+
 The core idea is:
 
 - do not try to copy `R-INLA` as-is here
@@ -213,6 +220,9 @@ The fixed-plus-`iid` evidence version supports only:
 - fixed-`iid` cross Gaussian old-data evidence in the cross-block mode
 - new observed `iid` levels, expanded with zero old evidence
 - original model priors in the new fit, plus old-data evidence factors
+- explicit state semantics:
+  `old_data_likelihood_evidence`, `not_posterior_as_prior`, and
+  `original_model_priors_remain_active_in_update`
 
 These versions should not support:
 
@@ -272,6 +282,8 @@ Current experimental implementation:
 - `rusty_update_state(fit, scope = "fixed_iid_gaussian")` extracts a reusable
   Gaussian evidence object with dense fixed-effect precision/linear terms,
   diagonal `iid` precision/linear terms, and fixed-`iid` cross precision terms
+- the state object records versioned old-data evidence semantics so update
+  fits can distinguish evidence reuse from posterior-as-prior reuse
 - `rusty_inla(..., control.update = list(state = state,
   mode = "fixed_iid_cross_gaussian_evidence"))` adds those old-data evidence
   factors to the new fit while keeping the original model priors
@@ -279,6 +291,9 @@ Current experimental implementation:
   diagnostic comparator, and should not be treated as the preferred update path
 - for levels absent from the old state but present in the new data, the R
   bridge expands the `iid` evidence with precision `0` and linear term `0`
+- signature validation reports the concrete mismatch, such as changed family,
+  changed fixed-effect columns, changed iid covariate name, or non-`iid` latent
+  model
 
 ### Phase 4: restricted latent-state reuse
 
@@ -433,14 +448,21 @@ So the recommended release posture is:
 
 ## 12. Best next engineering steps
 
-1. expose constrained `control.mode`
-2. expose internal-scale hyperparameter outputs cleanly
-3. define the `posterior_state` S3 object
-4. implement hyperparameter-only approximate state reuse
-5. validate against full refits
+1. Phase 8A: stabilize the committed one-`iid` fixed-cross evidence state and
+   keep diagonal evidence as a diagnostic comparator only.
+2. Phase 8B: formalize old-data evidence semantics so state extraction,
+   validation, and docs all say the same thing.
+3. Phase 8C: extract theta-mixture evidence blocks over the old CCD/theta
+   support.
+4. Phase 8D: add a theta-dependent objective with old-evidence log constants.
+5. Phase 8E: validate theta-mixture updates against joint refits, including
+   means, SDs, theta marginals, tails, time, and memory.
+6. Phase 8F: defer broader latent structures until the one-`iid` path is
+   benchmark-clean.
 
 ## 13. Related documents
 
+- [PHASE8_ROADMAP.md](PHASE8_ROADMAP.md)
 - [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md)
 - [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md)
 - [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md)

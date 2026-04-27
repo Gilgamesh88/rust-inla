@@ -35,7 +35,7 @@ The detailed comparison note is tracked in [scratch/BENCHMARK_SUMMARY_2026-04-19
 
 For deeper parity inspection of returned summaries, set `RUSTYINLA_OUTPUT_PROFILE=benchmark` before running the local harnesses. That extended mode compares additional fit-object surfaces such as fixed-effect standard deviations, hyperparameter summaries, and linear-predictor summaries.
 
-For the current implemented subset, the Phase 7A fixed-effects formula scope, the uploaded-suite supported-subset manifest, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the posterior-state update RFC, the external-example benchmarking guide, the directory-level intervention map, and the recommended path for adding new families or latent models, see [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [FIXED_EFFECTS_FORMULA_SUBSET.md](FIXED_EFFECTS_FORMULA_SUBSET.md), [SUPPORTED_SUBSET_VALIDATION_MANIFEST.md](SUPPORTED_SUBSET_VALIDATION_MANIFEST.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md](EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
+For the current implemented subset, the Phase 7A fixed-effects formula scope, the uploaded-suite supported-subset manifest, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the Phase 8 sequential-update roadmap, the posterior-state update RFC, the external-example benchmarking guide, the directory-level intervention map, and the recommended path for adding new families or latent models, see [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [FIXED_EFFECTS_FORMULA_SUBSET.md](FIXED_EFFECTS_FORMULA_SUBSET.md), [SUPPORTED_SUBSET_VALIDATION_MANIFEST.md](SUPPORTED_SUBSET_VALIDATION_MANIFEST.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [PHASE8_ROADMAP.md](PHASE8_ROADMAP.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md](EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
 
 ## Implementation Roadmap (75% Complete)
 
@@ -48,7 +48,7 @@ Our goal is to port the subset of INLA specifically relied upon by the actuarial
 - [x] **Phase 5:** Actuarial Likelihoods (ZIP Type-1, initial Tweedie prototype).
 - [x] **Phase 6:** Native R Formula Parsing Interface (`y ~ 1 + f(...)`).
 - [x] **Phase 7A:** Generalized Fixed Effects Matrix. (Productizing the supported `$X\beta$` dense covariate subset).
-- [ ] **Phase 8:** Prior/control metadata reuse. (Inventorying defaults and designing reusable prior specs before exposing custom-prior or prior-control surfaces).
+- [ ] **Phase 8:** Prior/control metadata reuse and sequential update states. (Phase 8A is the active one-`iid` fixed-cross evidence path; later 8C-8E steps build toward theta-mixture, full-Bayes-like updating.)
 - [ ] **Phase 9:** Multi-variate Likelihoods. (Allowing structural covariates to predict zero-inflation probabilities via joint frameworks such as `ZIP Type-2`).
 - [ ] **Phase 10:** Dynamic Arbitrary Priors. (Exposing richer prior modification arrays to the R frontend after the Phase 8 metadata layer exists).
 
@@ -76,6 +76,16 @@ the ordinary zero-mean `iid` prior and update from new data. This path remains
 experimental because the old evidence is still a local Gaussian approximation
 and hyperparameter uncertainty is simplified, but the cross block directly
 addresses the SD narrowing seen in the diagonal-only diagnostic mode.
+
+The active Phase 8 breakdown is tracked in [PHASE8_ROADMAP.md](PHASE8_ROADMAP.md):
+8A stabilizes fixed-plus-`iid` cross evidence, 8B formalizes old-data evidence
+semantics, 8C and 8D add theta-mixture evidence and a theta-dependent objective,
+8E defines joint-refit validation gates, and 8F defers broader latent structures
+until the one-`iid` workflow is benchmark-clean.
+
+The current 8B contract is explicit: `rusty_update_state()` stores old-data
+likelihood evidence, not a posterior-as-prior object, and update fits keep the
+original model priors active while adding those old-data evidence factors.
 
 For the curated uploaded-suite subset, run:
 

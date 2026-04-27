@@ -655,22 +655,108 @@ same_fixed_signature <- function(lhs, rhs) {
     identical(as.character(lhs$fixed_names), as.character(rhs$fixed_names))
 }
 
-same_iid_update_signature <- function(state_signature, backend_signature) {
+format_signature_values <- function(values) {
+    values <- as.character(values)
+    if (length(values) == 0L) {
+        return("<none>")
+    }
+    paste(values, collapse = ", ")
+}
+
+iid_update_signature_mismatch <- function(state_signature, backend_signature) {
     if (!identical(state_signature$family, backend_signature$family)) {
-        return(FALSE)
+        return(sprintf(
+            "family mismatch: state uses '%s', update uses '%s'",
+            state_signature$family,
+            backend_signature$family
+        ))
     }
     if (!same_fixed_signature(state_signature, backend_signature)) {
-        return(FALSE)
+        return(sprintf(
+            "fixed-effect columns mismatch: state has [%s], update has [%s]",
+            format_signature_values(state_signature$fixed_names),
+            format_signature_values(backend_signature$fixed_names)
+        ))
     }
-    if (length(state_signature$latent_blocks) != 1L ||
-        length(backend_signature$latent_blocks) != 1L) {
-        return(FALSE)
+    if (length(state_signature$latent_blocks) != 1L) {
+        return(sprintf(
+            "state latent-block count is %d; expected exactly one iid block",
+            length(state_signature$latent_blocks)
+        ))
+    }
+    if (length(backend_signature$latent_blocks) != 1L) {
+        return(sprintf(
+            "update latent-block count is %d; expected exactly one iid block",
+            length(backend_signature$latent_blocks)
+        ))
     }
     old_block <- state_signature$latent_blocks[[1L]]
     new_block <- backend_signature$latent_blocks[[1L]]
-    identical(old_block$model, "iid") &&
-        identical(new_block$model, "iid") &&
-        identical(old_block$covariate_name, new_block$covariate_name)
+    if (!identical(old_block$model, "iid") || !identical(new_block$model, "iid")) {
+        return(sprintf(
+            "latent model mismatch: state uses '%s', update uses '%s'; only iid is supported",
+            old_block$model,
+            new_block$model
+        ))
+    }
+    if (!identical(old_block$covariate_name, new_block$covariate_name)) {
+        return(sprintf(
+            "iid covariate mismatch: state uses '%s', update uses '%s'",
+            old_block$covariate_name,
+            new_block$covariate_name
+        ))
+    }
+    NULL
+}
+
+same_iid_update_signature <- function(state_signature, backend_signature) {
+    is.null(iid_update_signature_mismatch(state_signature, backend_signature))
+}
+
+fixed_iid_update_state_semantics <- function() {
+    list(
+        kind = "old_data_likelihood_evidence",
+        approximation_family = "local_gaussian_taylor_at_source_mode",
+        prior_policy = "original_model_priors_remain_active_in_update",
+        posterior_reuse = "not_posterior_as_prior",
+        theta_policy = "source_theta_mode_only",
+        compatible_update_modes = c(
+            "fixed_iid_gaussian_evidence",
+            "fixed_iid_cross_gaussian_evidence"
+        )
+    )
+}
+
+validate_fixed_iid_update_state_semantics <- function(state, mode) {
+    if (is.null(state$version) || length(state$version) != 1L ||
+        !is.finite(as.numeric(state$version)) || as.integer(state$version) < 2L) {
+        stop(
+            "rusty_update_state object must be version 2 or newer; recreate it with rusty_update_state().",
+            call. = FALSE
+        )
+    }
+    semantics <- state$semantics
+    if (is.null(semantics) || !is.list(semantics)) {
+        stop(
+            "rusty_update_state object is missing old-data evidence semantics; recreate it with rusty_update_state().",
+            call. = FALSE
+        )
+    }
+    if (!identical(semantics$kind, "old_data_likelihood_evidence")) {
+        stop("rusty_update_state semantics must be old_data_likelihood_evidence.", call. = FALSE)
+    }
+    if (!identical(semantics$prior_policy, "original_model_priors_remain_active_in_update")) {
+        stop(
+            "Unsupported update-state prior policy; fixed/iid evidence states must keep original model priors active in the update.",
+            call. = FALSE
+        )
+    }
+    if (!identical(semantics$posterior_reuse, "not_posterior_as_prior")) {
+        stop("rusty_update_state must store old-data evidence, not a posterior-as-prior object.", call. = FALSE)
+    }
+    if (!(mode %in% as.character(semantics$compatible_update_modes))) {
+        stop(sprintf("Update-state mode '%s' is not compatible with this state.", mode), call. = FALSE)
+    }
 }
 
 apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, control.update, mode) {
@@ -693,14 +779,17 @@ apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, c
         stop("Only fixed_iid Gaussian evidence update states are supported.", call. = FALSE)
     }
     include_cross <- identical(mode, "fixed_iid_cross_gaussian_evidence")
+    validate_fixed_iid_update_state_semantics(state, mode)
 
     backend_signature <- build_backend_signature(backend_spec, family)
-    if (!same_iid_update_signature(state$signature, backend_signature)) {
+    mismatch <- iid_update_signature_mismatch(state$signature, backend_signature)
+    if (!is.null(mismatch)) {
         stop(
             paste(
-                "Fixed/iid update-state signature mismatch.",
-                "The first experiment requires the same family, fixed-effect columns,",
-                "iid covariate name, and iid latent model."
+                sprintf("Fixed/iid update-state signature mismatch: %s.", mismatch),
+                "Required contract: same family, same fixed-effect columns,",
+                "same iid covariate name, and exactly one iid latent model.",
+                "New iid levels are allowed and receive zero old evidence."
             ),
             call. = FALSE
         )
@@ -755,9 +844,16 @@ apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, c
     }
     backend_spec$posterior_update_metadata <- list(
         mode = mode,
+        state_version = as.integer(state$version),
         scope = state$scope,
         approximation = state$approximation,
+        evidence_semantics = state$semantics$kind,
+        evidence_approximation = state$semantics$approximation_family,
+        prior_policy = state$semantics$prior_policy,
+        posterior_reuse = state$semantics$posterior_reuse,
+        theta_policy = state$semantics$theta_policy,
         source_family = state$signature$family,
+        source_n_obs = state$source$n_obs,
         source_fixed_names = state$fixed$names,
         source_iid_covariate_name = state$iid$covariate_name,
         born_iid_levels = born_levels,
@@ -814,12 +910,13 @@ apply_control_update_to_backend_spec <- function(backend_spec, family, control.u
 
     backend_signature <- build_backend_signature(backend_spec, family)
     validate_iid_posterior_state_scope(backend_signature, length(state$theta_prior_mean))
-    if (!same_iid_update_signature(state$signature, backend_signature)) {
+    mismatch <- iid_update_signature_mismatch(state$signature, backend_signature)
+    if (!is.null(mismatch)) {
         stop(
             paste(
-                "Posterior-state update signature mismatch.",
-                "The first experiment requires the same family, fixed-effect columns,",
-                "iid covariate name, and iid latent model."
+                sprintf("Posterior-state update signature mismatch: %s.", mismatch),
+                "Required contract: same family, same fixed-effect columns,",
+                "same iid covariate name, and exactly one iid latent model."
             ),
             call. = FALSE
         )
@@ -975,10 +1072,11 @@ project_psd_matrix <- function(mat, label, tolerance = 1e-7) {
 
 #' Extract an experimental fixed+iid update-state object
 #'
-#' This state compresses the old fit into Gaussian old-data evidence terms:
-#' a dense fixed-effect block, a diagonal `iid` block, and the fixed-iid
-#' cross block. The evidence is a local Taylor approximation to the old
-#' likelihood at the old posterior mode.
+#' This state stores old-data evidence, not a posterior-as-prior object. It
+#' compresses the old likelihood into Gaussian evidence terms: a dense
+#' fixed-effect block, a diagonal `iid` block, and the fixed-iid cross block.
+#' The evidence is a local Taylor approximation at the old posterior mode; the
+#' original model priors remain active in the later update fit.
 #'
 #' @param fit A `rusty_inla` fit with exactly one `iid` latent block.
 #' @param scope Currently only `"fixed_iid_gaussian"`.
@@ -990,7 +1088,8 @@ rusty_update_state <- function(fit, scope = c("fixed_iid_gaussian"), min_varianc
         stop("fit must be a rusty_inla object.", call. = FALSE)
     }
     if (is.null(fit$backend_signature) || is.null(fit$internal.gaussian) ||
-        is.null(fit$internal.hyperpar) || is.null(fit$mode)) {
+        is.null(fit$internal.hyperpar) || is.null(fit$internal.design) ||
+        is.null(fit$mode)) {
         stop("fit does not contain the internal metadata needed for update-state extraction.", call. = FALSE)
     }
     validate_iid_posterior_state_scope(fit$backend_signature, length(fit$internal.hyperpar$theta_mode))
@@ -1056,7 +1155,16 @@ rusty_update_state <- function(fit, scope = c("fixed_iid_gaussian"), min_varianc
         version = 2L,
         scope = scope,
         approximation = "fixed_iid_cross_gaussian_evidence",
+        semantics = fixed_iid_update_state_semantics(),
         signature = fit$backend_signature,
+        source = list(
+            n_obs = as.integer(fit$internal.design$n_data),
+            family = fit$backend_signature$family,
+            fixed_names = fixed_names,
+            iid_covariate_name = cov_name,
+            iid_model = block$model,
+            theta_mode = theta_mode
+        ),
         theta_mode = theta_mode,
         fixed = list(
             names = fixed_names,
@@ -1106,8 +1214,15 @@ print.rusty_posterior_state <- function(x, ...) {
 #' @export
 print.rusty_update_state <- function(x, ...) {
     cat("Experimental rustyINLA update state\n")
+    cat(sprintf("Version: %s\n", x$version))
     cat(sprintf("Scope: %s\n", x$scope))
     cat(sprintf("Approximation: %s\n", x$approximation))
+    if (!is.null(x$semantics$kind)) {
+        cat(sprintf("Semantics: %s\n", x$semantics$kind))
+    }
+    if (!is.null(x$semantics$prior_policy)) {
+        cat(sprintf("Prior policy: %s\n", x$semantics$prior_policy))
+    }
     cat(sprintf("Fixed effects: %d\n", length(x$fixed$names)))
     cat(sprintf("iid block: %s with %d levels\n", x$iid$covariate_name, length(x$iid$levels)))
     cat("Caveat: local Gaussian old-data evidence; hyperparameter uncertainty is still simplified.\n")

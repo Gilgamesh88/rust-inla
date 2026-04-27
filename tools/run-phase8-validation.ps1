@@ -60,4 +60,19 @@ finally {
 }
 
 Write-Host ''
+Write-Host '==> Phase 8 fixed+iid cross evidence contract'
+Write-Host "    $Rscript tests\posterior-state-fixed-iid-contract.R"
+
+Push-Location $repoRoot
+try {
+    & $Rscript 'tests\posterior-state-fixed-iid-contract.R'
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ''
 Write-Host 'Phase 8 validation gate passed.'

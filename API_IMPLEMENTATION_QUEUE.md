@@ -49,6 +49,12 @@ These items should be treated as the next prior/control phase, not as leftover
 Phase 7A fixed-effects productization. They are cheap only after the shared
 metadata layer exists.
 
+The staged Phase 8 path is tracked in
+[PHASE8_ROADMAP.md](PHASE8_ROADMAP.md): 8A stabilizes the one-`iid`
+fixed-cross evidence state, 8B formalizes old-data evidence semantics, 8C and
+8D build theta-mixture evidence and a theta-dependent objective, 8E validates
+against joint refits, and 8F defers broader latent structures.
+
 3. design shared prior/control metadata for defaults and overrides
    Labels: `Medium`, `High-value`
    Why:
