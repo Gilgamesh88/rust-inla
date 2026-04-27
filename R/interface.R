@@ -365,13 +365,14 @@ build_backend_spec <- function(
             if (is.factor(cov_data)) {
                 c_idx <- as.numeric(cov_data)
                 level_values <- levels(cov_data)
+                n_latent_cov <- length(level_values)
             } else {
                 cov_factor <- as.factor(cov_data)
                 c_idx <- as.numeric(cov_factor)
                 level_values <- type.convert(levels(cov_factor), as.is = TRUE)
+                n_latent_cov <- max(c_idx, na.rm=TRUE)
             }
 
-            n_latent_cov <- max(c_idx, na.rm=TRUE)
             if (identical(m_type, "rw2") && n_latent_cov < 3L) {
                 stop("rw2 requires at least 3 unique levels.", call. = FALSE)
             }
@@ -455,6 +456,662 @@ build_backend_spec <- function(
         n_constr = as.integer(n_constr),
         latent_blocks = latent_blocks
     )
+}
+
+build_backend_signature <- function(backend_spec, family) {
+    list(
+        family = as.character(family)[[1L]],
+        fixed_names = backend_spec$fixed_names,
+        n_fixed = as.integer(backend_spec$n_fixed),
+        n_latent = as.integer(backend_spec$n_latent),
+        latent_blocks = lapply(backend_spec$latent_blocks, function(block) {
+            list(
+                covariate_name = block$covariate_name,
+                model = block$model,
+                n_levels = as.integer(block$n_levels),
+                level_values = block$level_values,
+                structure_values = block$structure_values
+            )
+        })
+    )
+}
+
+build_internal_design <- function(backend_spec, n_data) {
+    list(
+        n_data = as.integer(n_data),
+        fixed_matrix = backend_spec$fixed_matrix,
+        fixed_names = backend_spec$fixed_names,
+        n_fixed = as.integer(backend_spec$n_fixed),
+        n_latent = as.integer(backend_spec$n_latent),
+        a_i = backend_spec$a_i,
+        a_j = backend_spec$a_j,
+        a_x = backend_spec$a_x,
+        offset = if (is.null(backend_spec$offset)) rep(0.0, n_data) else backend_spec$offset,
+        latent_blocks = backend_spec$latent_blocks
+    )
+}
+
+validate_iid_posterior_state_scope <- function(signature, n_theta) {
+    blocks <- signature$latent_blocks
+    if (length(blocks) != 1L || !identical(blocks[[1L]]$model, "iid")) {
+        stop(
+            paste(
+                "Experimental posterior-state updates currently support only",
+                "one iid latent block."
+            ),
+            call. = FALSE
+        )
+    }
+    if (n_theta < 1L) {
+        stop("Posterior-state update requires at least one iid hyperparameter.", call. = FALSE)
+    }
+    invisible(TRUE)
+}
+
+sum_by_index <- function(values, index, n) {
+    out <- numeric(n)
+    if (length(values) == 0L) {
+        return(out)
+    }
+    grouped <- rowsum(as.numeric(values), group = as.integer(index), reorder = FALSE)
+    out[as.integer(rownames(grouped))] <- as.numeric(grouped[, 1L])
+    out
+}
+
+fixed_iid_likelihood_evidence <- function(fit) {
+    design <- fit$internal.design
+    if (is.null(design)) {
+        stop("fit does not contain the internal design needed for update-state extraction.", call. = FALSE)
+    }
+
+    n_data <- as.integer(design$n_data)
+    n_fixed <- as.integer(design$n_fixed)
+    n_latent <- as.integer(design$n_latent)
+    if (n_data <= 0L || n_fixed <= 0L || n_latent <= 0L) {
+        stop("fixed+iid update-state extraction requires positive data, fixed, and latent dimensions.", call. = FALSE)
+    }
+    if (is.null(design$fixed_matrix) || length(design$fixed_matrix) != n_data * n_fixed) {
+        stop("fit fixed-effect design is not available for update-state extraction.", call. = FALSE)
+    }
+    if (is.null(design$a_i) || is.null(design$a_j) || is.null(design$a_x)) {
+        stop("fit latent mapping is not available for update-state extraction.", call. = FALSE)
+    }
+    if (length(design$a_i) != length(design$a_j) || length(design$a_i) != length(design$a_x)) {
+        stop("fit latent mapping is internally inconsistent.", call. = FALSE)
+    }
+
+    eta <- as.numeric(fit$mode$eta)
+    grad <- as.numeric(fit$mode$grad)
+    curvature <- as.numeric(fit$mode$curvature)
+    offset <- as.numeric(design$offset)
+    if (length(eta) != n_data || length(grad) != n_data ||
+        length(curvature) != n_data || length(offset) != n_data) {
+        stop("fit mode quantities do not match the stored design.", call. = FALSE)
+    }
+    if (any(!is.finite(eta)) || any(!is.finite(grad)) ||
+        any(!is.finite(curvature)) || any(!is.finite(offset))) {
+        stop("fit mode quantities contain non-finite values.", call. = FALSE)
+    }
+
+    curvature <- pmax(curvature, sqrt(.Machine$double.eps))
+    X <- matrix(
+        as.numeric(design$fixed_matrix),
+        nrow = n_data,
+        ncol = n_fixed,
+        dimnames = list(NULL, design$fixed_names)
+    )
+    centered_mode <- eta - offset
+    weighted_pseudo <- curvature * centered_mode + grad
+
+    fixed_precision <- crossprod(X, X * curvature)
+    fixed_precision <- (fixed_precision + t(fixed_precision)) / 2.0
+    fixed_linear <- as.numeric(crossprod(X, weighted_pseudo))
+    names(fixed_linear) <- design$fixed_names
+    dimnames(fixed_precision) <- list(design$fixed_names, design$fixed_names)
+
+    a_rows <- as.integer(design$a_i) + 1L
+    a_cols <- as.integer(design$a_j) + 1L
+    a_x <- as.numeric(design$a_x)
+    if (any(a_rows < 1L | a_rows > n_data) || any(a_cols < 1L | a_cols > n_latent) ||
+        any(!is.finite(a_x))) {
+        stop("fit latent mapping contains invalid entries.", call. = FALSE)
+    }
+
+    row_curvature <- curvature[a_rows]
+    latent_precision <- sum_by_index(a_x * row_curvature * a_x, a_cols, n_latent)
+    latent_linear <- sum_by_index(a_x * weighted_pseudo[a_rows], a_cols, n_latent)
+    latent_fixed_precision <- matrix(
+        0.0,
+        nrow = n_latent,
+        ncol = n_fixed,
+        dimnames = list(NULL, design$fixed_names)
+    )
+    for (j in seq_len(n_fixed)) {
+        latent_fixed_precision[, j] <- sum_by_index(
+            a_x * row_curvature * X[a_rows, j],
+            a_cols,
+            n_latent
+        )
+    }
+
+    list(
+        fixed_precision = fixed_precision,
+        fixed_linear = fixed_linear,
+        latent_precision = latent_precision,
+        latent_linear = latent_linear,
+        latent_fixed_precision = latent_fixed_precision
+    )
+}
+
+weighted_mean_var <- function(values, weights) {
+    keep <- is.finite(values) & is.finite(weights) & weights > 0
+    values <- as.numeric(values[keep])
+    weights <- as.numeric(weights[keep])
+    if (length(values) == 0L) {
+        return(list(mean = NA_real_, var = NA_real_))
+    }
+    weights <- weights / sum(weights)
+    mean <- sum(weights * values)
+    var <- sum(weights * (values - mean)^2)
+    list(mean = mean, var = max(var, 0.0))
+}
+
+build_internal_hyperparameter_state <- function(res, backend_spec, family) {
+    theta_opt <- if (is.null(res$theta_opt)) numeric() else as.numeric(res$theta_opt)
+    n_theta <- length(theta_opt)
+    if (n_theta == 0L) {
+        return(NULL)
+    }
+
+    specs <- resolve_hyperparameter_specs(backend_spec, family, n_theta)
+    theta_names <- vapply(specs, `[[`, character(1), "name")
+    ccd_weights <- if (is.null(res$ccd_weights)) numeric() else as.numeric(res$ccd_weights)
+    ccd_thetas <- if (is.null(res$ccd_thetas)) numeric() else as.numeric(res$ccd_thetas)
+
+    theta_matrix <- NULL
+    if (length(ccd_weights) > 0L &&
+        length(ccd_thetas) > 0L &&
+        length(ccd_thetas) %% n_theta == 0L) {
+        candidate <- matrix(ccd_thetas, ncol = n_theta, byrow = TRUE)
+        if (nrow(candidate) == length(ccd_weights)) {
+            theta_matrix <- candidate
+        }
+    }
+
+    list(
+        theta_names = theta_names,
+        theta_mode = theta_opt,
+        ccd_thetas = theta_matrix,
+        ccd_weights = ccd_weights,
+        ccd_base_weights = if (is.null(res$ccd_base_weights)) numeric() else as.numeric(res$ccd_base_weights),
+        ccd_log_mlik = if (is.null(res$ccd_log_mlik)) numeric() else as.numeric(res$ccd_log_mlik),
+        ccd_log_weight = if (is.null(res$ccd_log_weight)) numeric() else as.numeric(res$ccd_log_weight),
+        ccd_hessian_eigenvalues = if (is.null(res$ccd_hessian_eigenvalues)) numeric() else as.numeric(res$ccd_hessian_eigenvalues),
+        internal_scale = TRUE
+    )
+}
+
+same_fixed_signature <- function(lhs, rhs) {
+    identical(as.character(lhs$fixed_names), as.character(rhs$fixed_names))
+}
+
+same_iid_update_signature <- function(state_signature, backend_signature) {
+    if (!identical(state_signature$family, backend_signature$family)) {
+        return(FALSE)
+    }
+    if (!same_fixed_signature(state_signature, backend_signature)) {
+        return(FALSE)
+    }
+    if (length(state_signature$latent_blocks) != 1L ||
+        length(backend_signature$latent_blocks) != 1L) {
+        return(FALSE)
+    }
+    old_block <- state_signature$latent_blocks[[1L]]
+    new_block <- backend_signature$latent_blocks[[1L]]
+    identical(old_block$model, "iid") &&
+        identical(new_block$model, "iid") &&
+        identical(old_block$covariate_name, new_block$covariate_name)
+}
+
+apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, control.update, mode) {
+    state <- control.update$state
+    if (is.null(state)) {
+        state <- control.update$posterior_state
+    }
+    if (is.null(state)) {
+        stop("control.update requires state for fixed_iid_gaussian_evidence.", call. = FALSE)
+    }
+    if (!inherits(state, "rusty_update_state")) {
+        stop("control.update state must come from rusty_update_state().", call. = FALSE)
+    }
+    supported_approximations <- c(
+        "fixed_iid_gaussian_evidence",
+        "fixed_iid_cross_gaussian_evidence"
+    )
+    if (!identical(state$scope, "fixed_iid_gaussian") ||
+        !(state$approximation %in% supported_approximations)) {
+        stop("Only fixed_iid Gaussian evidence update states are supported.", call. = FALSE)
+    }
+    include_cross <- identical(mode, "fixed_iid_cross_gaussian_evidence")
+
+    backend_signature <- build_backend_signature(backend_spec, family)
+    if (!same_iid_update_signature(state$signature, backend_signature)) {
+        stop(
+            paste(
+                "Fixed/iid update-state signature mismatch.",
+                "The first experiment requires the same family, fixed-effect columns,",
+                "iid covariate name, and iid latent model."
+            ),
+            call. = FALSE
+        )
+    }
+    validate_iid_posterior_state_scope(backend_signature, length(state$theta_mode))
+
+    fixed_precision <- as.matrix(state$fixed$evidence_precision)
+    fixed_linear <- as.numeric(state$fixed$evidence_linear)
+    if (nrow(fixed_precision) != backend_spec$n_fixed ||
+        ncol(fixed_precision) != backend_spec$n_fixed ||
+        length(fixed_linear) != backend_spec$n_fixed) {
+        stop("Fixed update-state evidence dimensions do not match the new fixed-effect design.", call. = FALSE)
+    }
+
+    new_block <- backend_signature$latent_blocks[[1L]]
+    new_levels <- as.character(new_block$level_values)
+    if (length(new_levels) != as.integer(new_block$n_levels)) {
+        new_levels <- as.character(seq_len(as.integer(new_block$n_levels)))
+    }
+    old_levels <- as.character(state$iid$levels)
+    level_match <- match(new_levels, old_levels)
+    latent_precision <- rep(0.0, length(new_levels))
+    latent_linear <- rep(0.0, length(new_levels))
+    matched <- which(!is.na(level_match))
+    if (length(matched) > 0L) {
+        latent_precision[matched] <- as.numeric(state$iid$evidence_precision_diag[level_match[matched]])
+        latent_linear[matched] <- as.numeric(state$iid$evidence_linear[level_match[matched]])
+    }
+    latent_fixed_cross <- NULL
+    if (include_cross) {
+        if (is.null(state$iid_fixed_cross_precision)) {
+            stop("Fixed/iid cross evidence mode requires a state with iid_fixed_cross_precision.", call. = FALSE)
+        }
+        cross_precision <- as.matrix(state$iid_fixed_cross_precision)
+        if (nrow(cross_precision) != length(old_levels) ||
+            ncol(cross_precision) != backend_spec$n_fixed) {
+            stop("Fixed/iid cross evidence dimensions do not match the update-state signature.", call. = FALSE)
+        }
+        latent_fixed_cross <- matrix(0.0, nrow = length(new_levels), ncol = backend_spec$n_fixed)
+        if (length(matched) > 0L) {
+            latent_fixed_cross[matched, ] <- cross_precision[level_match[matched], , drop = FALSE]
+        }
+    }
+    born_levels <- new_levels[is.na(level_match)]
+
+    backend_spec$fixed_state_precision <- as.numeric(t(fixed_precision))
+    backend_spec$fixed_state_linear <- fixed_linear
+    backend_spec$latent_state_precision_diag <- latent_precision
+    backend_spec$latent_state_linear <- latent_linear
+    if (include_cross) {
+        backend_spec$latent_fixed_state_precision <- as.numeric(latent_fixed_cross)
+    }
+    backend_spec$posterior_update_metadata <- list(
+        mode = mode,
+        scope = state$scope,
+        approximation = state$approximation,
+        source_family = state$signature$family,
+        source_fixed_names = state$fixed$names,
+        source_iid_covariate_name = state$iid$covariate_name,
+        born_iid_levels = born_levels,
+        caveat = paste(
+            "Experimental fixed+iid Gaussian old-data evidence update;",
+            if (include_cross) {
+                "uses dense fixed evidence, diagonal iid evidence, and the fixed-iid cross block."
+            } else {
+                "uses dense fixed evidence and diagonal iid evidence, but omits the fixed-iid cross block."
+            }
+        )
+    )
+    backend_spec
+}
+
+apply_control_update_to_backend_spec <- function(backend_spec, family, control.update) {
+    if (is.null(control.update)) {
+        return(backend_spec)
+    }
+    if (!is.list(control.update)) {
+        stop("control.update must be a list.", call. = FALSE)
+    }
+
+    mode <- control.update$mode
+    if (is.null(mode)) {
+        mode <- "iid_hyper_gaussian"
+    }
+    if (mode %in% c("fixed_iid_gaussian_evidence", "fixed_iid_cross_gaussian_evidence")) {
+        return(apply_fixed_iid_update_state_to_backend_spec(
+            backend_spec = backend_spec,
+            family = family,
+            control.update = control.update,
+            mode = mode
+        ))
+    }
+    if (!identical(mode, "iid_hyper_gaussian")) {
+        stop(
+            "control.update mode must be 'iid_hyper_gaussian', 'fixed_iid_gaussian_evidence', or 'fixed_iid_cross_gaussian_evidence' for the current experiments.",
+            call. = FALSE
+        )
+    }
+
+    state <- control.update$posterior_state
+    if (is.null(state)) {
+        stop("control.update requires posterior_state.", call. = FALSE)
+    }
+    if (!inherits(state, "rusty_posterior_state")) {
+        stop("control.update$posterior_state must come from rusty_posterior_state().", call. = FALSE)
+    }
+    if (!identical(state$scope, "iid_hyper") ||
+        !identical(state$approximation, "gaussian_internal_theta")) {
+        stop("Only iid_hyper Gaussian internal-theta posterior states are supported.", call. = FALSE)
+    }
+
+    backend_signature <- build_backend_signature(backend_spec, family)
+    validate_iid_posterior_state_scope(backend_signature, length(state$theta_prior_mean))
+    if (!same_iid_update_signature(state$signature, backend_signature)) {
+        stop(
+            paste(
+                "Posterior-state update signature mismatch.",
+                "The first experiment requires the same family, fixed-effect columns,",
+                "iid covariate name, and iid latent model."
+            ),
+            call. = FALSE
+        )
+    }
+
+    mean <- as.numeric(state$theta_prior_mean)
+    precision <- as.numeric(state$theta_prior_precision)
+    mask <- as.integer(state$theta_prior_mask)
+    if (length(mean) != length(precision) || length(mean) != length(mask)) {
+        stop("Posterior-state prior vectors have inconsistent lengths.", call. = FALSE)
+    }
+    if (length(mask) == 0L || mask[[1L]] != 1L || any(mask[-1L] != 0L)) {
+        stop("The iid experiment can override only the first model hyperparameter.", call. = FALSE)
+    }
+    if (any(!is.finite(mean)) || any(!is.finite(precision)) || any(precision[mask == 1L] <= 0)) {
+        stop("Posterior-state prior mean and precision must be finite and positive.", call. = FALSE)
+    }
+
+    backend_spec$theta_prior_mean <- mean
+    backend_spec$theta_prior_precision <- precision
+    backend_spec$theta_prior_mask <- mask
+    backend_spec$posterior_update_metadata <- list(
+        mode = mode,
+        scope = state$scope,
+        approximation = state$approximation,
+        source_family = state$signature$family,
+        source_theta_names = state$theta_names,
+        source_theta_prior_mean = mean,
+        source_theta_prior_precision = precision,
+        caveat = paste(
+            "Experimental iid hyperparameter posterior-as-prior update;",
+            "does not reuse fixed-effect covariance or latent random-effect state."
+        )
+    )
+    backend_spec
+}
+
+#' Extract an experimental posterior-state object for sequential updates
+#'
+#' This first experimental state supports only one `iid` latent block. It
+#' approximates the previous fit's internal log-precision posterior with a
+#' Gaussian prior for a later `control.update` call.
+#'
+#' @param fit A `rusty_inla` fit.
+#' @param scope Currently only `"iid_hyper"`.
+#' @param min_variance Lower bound for the internal-theta posterior variance.
+#' @export
+rusty_posterior_state <- function(fit, scope = c("iid_hyper"), min_variance = 1e-8) {
+    scope <- match.arg(scope)
+    if (!inherits(fit, "rusty_inla")) {
+        stop("fit must be a rusty_inla object.", call. = FALSE)
+    }
+    if (is.null(fit$backend_signature) || is.null(fit$internal.hyperpar)) {
+        stop("fit does not contain the internal metadata needed for posterior-state extraction.", call. = FALSE)
+    }
+
+    internal <- fit$internal.hyperpar
+    theta_mode <- as.numeric(internal$theta_mode)
+    validate_iid_posterior_state_scope(fit$backend_signature, length(theta_mode))
+
+    theta_matrix <- internal$ccd_thetas
+    weights <- as.numeric(internal$ccd_weights)
+    if (is.null(theta_matrix) || nrow(theta_matrix) == 0L || length(weights) != nrow(theta_matrix)) {
+        stop(
+            "fit does not contain a usable CCD theta grid for posterior-state extraction.",
+            call. = FALSE
+        )
+    }
+
+    first_theta <- as.numeric(theta_matrix[, 1L])
+    moments <- weighted_mean_var(first_theta, weights)
+    if (!is.finite(moments$mean) || !is.finite(moments$var)) {
+        stop("Could not compute a finite iid hyperparameter posterior approximation.", call. = FALSE)
+    }
+
+    variance <- max(moments$var, as.numeric(min_variance))
+    n_theta <- length(theta_mode)
+    prior_mean <- theta_mode
+    prior_precision <- rep(0.0, n_theta)
+    prior_mask <- rep(0L, n_theta)
+    prior_mean[[1L]] <- moments$mean
+    prior_precision[[1L]] <- 1.0 / variance
+    prior_mask[[1L]] <- 1L
+
+    state <- list(
+        scope = scope,
+        approximation = "gaussian_internal_theta",
+        signature = fit$backend_signature,
+        theta_names = internal$theta_names,
+        theta_mode = theta_mode,
+        theta_prior_mean = prior_mean,
+        theta_prior_precision = prior_precision,
+        theta_prior_mask = prior_mask,
+        ccd_hessian_eigenvalues = internal$ccd_hessian_eigenvalues,
+        summary = list(
+            iid_log_precision_mean = prior_mean[[1L]],
+            iid_log_precision_sd = sqrt(variance),
+            iid_log_precision_precision = prior_precision[[1L]]
+        ),
+        caveats = c(
+            "Experimental iid hyperparameter posterior-as-prior approximation.",
+            "Uses a one-dimensional Gaussian approximation on the internal log-precision scale.",
+            "Does not reuse latent random effects, fixed-effect covariance, or full joint posterior state."
+        )
+    )
+    class(state) <- "rusty_posterior_state"
+    state
+}
+
+invert_spd_matrix <- function(cov, label, jitter_scale = 1e-10) {
+    cov <- (as.matrix(cov) + t(as.matrix(cov))) / 2.0
+    n <- nrow(cov)
+    if (n == 0L) {
+        return(cov)
+    }
+    scale <- max(abs(diag(cov)), 1.0, na.rm = TRUE)
+    for (attempt in 0:8) {
+        jitter <- if (attempt == 0L) 0.0 else jitter_scale * (10.0 ^ (attempt - 1L)) * scale
+        candidate <- cov
+        if (jitter > 0.0) {
+            diag(candidate) <- diag(candidate) + jitter
+        }
+        chol_candidate <- tryCatch(chol(candidate), error = function(e) NULL)
+        if (!is.null(chol_candidate)) {
+            return(chol2inv(chol_candidate))
+        }
+    }
+    stop(sprintf("Could not invert %s covariance for update-state extraction.", label), call. = FALSE)
+}
+
+project_psd_matrix <- function(mat, label, tolerance = 1e-7) {
+    mat <- (as.matrix(mat) + t(as.matrix(mat))) / 2.0
+    if (nrow(mat) == 0L) {
+        return(mat)
+    }
+    eig <- eigen(mat, symmetric = TRUE)
+    scale <- max(abs(eig$values), 1.0, na.rm = TRUE)
+    min_value <- min(eig$values)
+    if (min_value < -tolerance * scale) {
+        stop(
+            sprintf(
+                "%s evidence precision is not positive semidefinite; minimum eigenvalue %.6g.",
+                label,
+                min_value
+            ),
+            call. = FALSE
+        )
+    }
+    values <- pmax(eig$values, 0.0)
+    projected <- eig$vectors %*% (values * t(eig$vectors))
+    (projected + t(projected)) / 2.0
+}
+
+#' Extract an experimental fixed+iid update-state object
+#'
+#' This state compresses the old fit into Gaussian old-data evidence terms:
+#' a dense fixed-effect block, a diagonal `iid` block, and the fixed-iid
+#' cross block. The evidence is a local Taylor approximation to the old
+#' likelihood at the old posterior mode.
+#'
+#' @param fit A `rusty_inla` fit with exactly one `iid` latent block.
+#' @param scope Currently only `"fixed_iid_gaussian"`.
+#' @param min_variance Lower bound for conditional variances.
+#' @export
+rusty_update_state <- function(fit, scope = c("fixed_iid_gaussian"), min_variance = 1e-10) {
+    scope <- match.arg(scope)
+    if (!inherits(fit, "rusty_inla")) {
+        stop("fit must be a rusty_inla object.", call. = FALSE)
+    }
+    if (is.null(fit$backend_signature) || is.null(fit$internal.gaussian) ||
+        is.null(fit$internal.hyperpar) || is.null(fit$mode)) {
+        stop("fit does not contain the internal metadata needed for update-state extraction.", call. = FALSE)
+    }
+    validate_iid_posterior_state_scope(fit$backend_signature, length(fit$internal.hyperpar$theta_mode))
+    if (length(fit$backend_signature$fixed_names) == 0L) {
+        stop("fixed_iid_gaussian update states require at least one fixed-effect column.", call. = FALSE)
+    }
+
+    block <- fit$backend_signature$latent_blocks[[1L]]
+    cov_name <- block$covariate_name
+    random_df <- fit$summary.random[[cov_name]]
+    if (is.null(random_df) || nrow(random_df) != as.integer(block$n_levels)) {
+        stop("fit random-effect summary does not match the iid backend signature.", call. = FALSE)
+    }
+
+    evidence <- fixed_iid_likelihood_evidence(fit)
+
+    fixed_names <- as.character(fit$backend_signature$fixed_names)
+    fixed_mode <- as.numeric(fit$internal.gaussian$fixed_mode)
+    fixed_cov <- as.matrix(fit$internal.gaussian$fixed_cov_theta_opt)
+    if (length(fixed_mode) != length(fixed_names) ||
+        nrow(fixed_cov) != length(fixed_names) ||
+        ncol(fixed_cov) != length(fixed_names)) {
+        stop("fit fixed-effect conditional covariance is not available for update-state extraction.", call. = FALSE)
+    }
+    names(fixed_mode) <- fixed_names
+    dimnames(fixed_cov) <- list(fixed_names, fixed_names)
+
+    fixed_prior_precision <- fit$internal.gaussian$fixed_prior_precision
+    if (is.null(fixed_prior_precision)) {
+        fixed_prior_precision <- 0.001
+    }
+    fixed_prior_precision <- as.numeric(fixed_prior_precision)
+    fixed_evidence_precision <- as.matrix(evidence$fixed_precision)
+    dimnames(fixed_evidence_precision) <- list(fixed_names, fixed_names)
+    fixed_evidence_linear <- as.numeric(evidence$fixed_linear)
+    names(fixed_evidence_linear) <- fixed_names
+
+    theta_mode <- as.numeric(fit$internal.hyperpar$theta_mode)
+    tau_old <- exp(theta_mode[[1L]])
+    latent_mode <- as.numeric(fit$internal.gaussian$latent_mode)
+    latent_var <- pmax(as.numeric(fit$internal.gaussian$latent_var_theta_opt), as.numeric(min_variance))
+    if (length(latent_mode) != nrow(random_df) || length(latent_var) != nrow(random_df)) {
+        stop("fit iid conditional state is not available for update-state extraction.", call. = FALSE)
+    }
+    iid_levels <- rownames(random_df)
+    if (is.null(iid_levels)) {
+        iid_levels <- as.character(random_df$ID)
+    }
+    iid_evidence_precision <- pmax(as.numeric(evidence$latent_precision), 0.0)
+    iid_evidence_linear <- as.numeric(evidence$latent_linear)
+    iid_fixed_cross_precision <- as.matrix(evidence$latent_fixed_precision)
+    if (length(iid_evidence_precision) != length(iid_levels) ||
+        length(iid_evidence_linear) != length(iid_levels) ||
+        nrow(iid_fixed_cross_precision) != length(iid_levels) ||
+        ncol(iid_fixed_cross_precision) != length(fixed_names)) {
+        stop("Local likelihood evidence dimensions do not match the fit signature.", call. = FALSE)
+    }
+    names(iid_evidence_precision) <- iid_levels
+    names(iid_evidence_linear) <- iid_levels
+    dimnames(iid_fixed_cross_precision) <- list(iid_levels, fixed_names)
+
+    state <- list(
+        version = 2L,
+        scope = scope,
+        approximation = "fixed_iid_cross_gaussian_evidence",
+        signature = fit$backend_signature,
+        theta_mode = theta_mode,
+        fixed = list(
+            names = fixed_names,
+            mode = fixed_mode,
+            covariance_theta_opt = fixed_cov,
+            prior_precision = fixed_prior_precision,
+            evidence_precision = fixed_evidence_precision,
+            evidence_linear = fixed_evidence_linear
+        ),
+        iid = list(
+            covariate_name = cov_name,
+            levels = iid_levels,
+            mode = latent_mode,
+            variance_theta_opt = latent_var,
+            tau_at_source_theta = tau_old,
+            evidence_precision_diag = iid_evidence_precision,
+            evidence_linear = iid_evidence_linear,
+            dropped_negative_precision = 0L
+        ),
+        iid_fixed_cross_precision = iid_fixed_cross_precision,
+        caveats = c(
+            "Experimental fixed+iid Gaussian old-data likelihood evidence approximation.",
+            "Uses dense fixed-effect evidence, diagonal iid evidence, and the fixed-iid cross block.",
+            "The old evidence is local at the old posterior mode and still simplifies hyperparameter uncertainty.",
+            "New iid levels receive zero old evidence and start from the ordinary zero-mean iid prior."
+        )
+    )
+    class(state) <- "rusty_update_state"
+    state
+}
+
+#' @export
+print.rusty_posterior_state <- function(x, ...) {
+    cat("Experimental rustyINLA posterior state\n")
+    cat(sprintf("Scope: %s\n", x$scope))
+    cat(sprintf("Approximation: %s\n", x$approximation))
+    if (!is.null(x$summary)) {
+        cat(sprintf(
+            "iid log-precision prior: mean = %.6f, sd = %.6f\n",
+            x$summary$iid_log_precision_mean,
+            x$summary$iid_log_precision_sd
+        ))
+    }
+    invisible(x)
+}
+
+#' @export
+print.rusty_update_state <- function(x, ...) {
+    cat("Experimental rustyINLA update state\n")
+    cat(sprintf("Scope: %s\n", x$scope))
+    cat(sprintf("Approximation: %s\n", x$approximation))
+    cat(sprintf("Fixed effects: %d\n", length(x$fixed$names)))
+    cat(sprintf("iid block: %s with %d levels\n", x$iid$covariate_name, length(x$iid$levels)))
+    cat("Caveat: local Gaussian old-data evidence; hyperparameter uncertainty is still simplified.\n")
+    invisible(x)
 }
 
 gaussian_marginal_grid <- function(mean, sd, n = 75L, sds = 4.0) {
@@ -916,13 +1573,18 @@ append_benchmark_outputs <- function(fit, res, backend_spec, data, formula, fami
 #'   lightweight default or `"benchmark"` to add parity-oriented outputs such
 #'   as marginal curves and linear-predictor summaries for fairer memory
 #'   comparisons against `R-INLA`.
+#' @param control.update Experimental posterior-state update control. The
+#'   current Phase 8 experiments support
+#'   `list(posterior_state = rusty_posterior_state(fit), mode = "iid_hyper_gaussian")`
+#'   and `list(state = rusty_update_state(fit), mode = "fixed_iid_cross_gaussian_evidence")`.
 #' @export
 rusty_inla <- function(
     formula,
     data,
     family,
     offset = NULL,
-    output_profile = c("thin", "benchmark")
+    output_profile = c("thin", "benchmark"),
+    control.update = NULL
 ) {
     fit_start_time <- safe_elapsed_time()
     output_profile <- match.arg(output_profile)
@@ -934,6 +1596,11 @@ rusty_inla <- function(
         offset_expr = substitute(offset),
         offset_env = parent.frame(),
         offset_provided = !missing(offset)
+    )
+    backend_spec <- apply_control_update_to_backend_spec(
+        backend_spec = backend_spec,
+        family = family,
+        control.update = control.update
     )
     after_spec_time <- safe_elapsed_time()
 
@@ -964,8 +1631,18 @@ rusty_inla <- function(
             check.names = FALSE
         ),
         summary.random = list(),
-        output_profile = output_profile
+        output_profile = output_profile,
+        backend_signature = build_backend_signature(backend_spec, family),
+        internal.hyperpar = build_internal_hyperparameter_state(
+            res = res,
+            backend_spec = backend_spec,
+            family = family
+        ),
+        internal.design = build_internal_design(backend_spec, nrow(data))
     )
+    if (!is.null(backend_spec$posterior_update_metadata)) {
+        fit$posterior_state_used <- backend_spec$posterior_update_metadata
+    }
 
     # NEW: Extract Bayesian Marginal Fitted Values from the backend
     if (!is.null(res$fitted_mean)) {
@@ -1047,6 +1724,19 @@ rusty_inla <- function(
             curvature = res$mode_curvature
         )
     }
+    fit$internal.gaussian <- list(
+        fixed_mode = if (is.null(res$mode_beta)) numeric() else as.numeric(res$mode_beta),
+        fixed_cov_theta_opt = matrix(
+            if (is.null(res$fixed_cov_theta_opt)) numeric() else as.numeric(res$fixed_cov_theta_opt),
+            nrow = backend_spec$n_fixed,
+            ncol = backend_spec$n_fixed,
+            byrow = TRUE,
+            dimnames = list(backend_spec$fixed_names, backend_spec$fixed_names)
+        ),
+        fixed_prior_precision = 0.001,
+        latent_mode = if (is.null(res$mode_x)) numeric() else as.numeric(res$mode_x),
+        latent_var_theta_opt = if (is.null(res$latent_var_theta_opt)) numeric() else as.numeric(res$latent_var_theta_opt)
+    )
 
     if (identical(output_profile, "benchmark")) {
         fit <- append_benchmark_outputs(

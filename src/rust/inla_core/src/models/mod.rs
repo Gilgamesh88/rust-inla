@@ -150,12 +150,21 @@ impl QFunc for FixedOnlyModel {
 /// - theta[0] = log tau (log-precision marginal)
 pub struct IidModel {
     graph: Graph,
+    log_precision_prior: Option<(f64, f64)>,
 }
 
 impl IidModel {
     pub fn new(n: usize) -> Self {
         Self {
             graph: Graph::iid(n),
+            log_precision_prior: None,
+        }
+    }
+
+    pub fn new_with_log_precision_prior(n: usize, mean: f64, precision: f64) -> Self {
+        Self {
+            graph: Graph::iid(n),
+            log_precision_prior: Some((mean, precision)),
         }
     }
 }
@@ -185,7 +194,10 @@ impl QFunc for IidModel {
     }
 
     fn log_prior(&self, theta: &[f64]) -> f64 {
-        loggamma_on_log_scale(theta[0], 1.0, 5e-5)
+        match self.log_precision_prior {
+            Some((mean, precision)) => gaussian_prior_kernel(theta[0], mean, precision),
+            None => loggamma_on_log_scale(theta[0], 1.0, 5e-5),
+        }
     }
 }
 
@@ -858,6 +870,15 @@ mod tests {
     }
 
     // ── Rw1Model ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn iid_custom_log_precision_prior_uses_gaussian_kernel() {
+        let m = IidModel::new_with_log_precision_prior(3, 1.2, 4.0);
+        let theta = [1.2];
+        let expected = gaussian_prior_kernel(theta[0], 1.2, 4.0);
+        assert_abs_diff_eq!(m.log_prior(&theta), expected, epsilon = 1e-12);
+        assert!(m.log_prior(&[1.2]) > m.log_prior(&[2.2]));
+    }
 
     #[test]
     fn rw1_graph_is_tridiagonal() {

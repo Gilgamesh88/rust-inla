@@ -22,6 +22,7 @@ pub struct LaplaceDecomposition {
     pub latent_q_form: f64,
     pub fixed_q_form: f64,
     pub final_q_form: f64,
+    pub state_log_factor: f64,
     pub log_mlik: f64,
     pub neg_log_mlik: f64,
 }
@@ -169,6 +170,65 @@ fn gaussian_integrated_data_term(
     )
 }
 
+fn has_state_evidence(model: &InlaModel<'_>) -> bool {
+    model.fixed_state_precision.is_some()
+        || model.fixed_state_linear.is_some()
+        || model.latent_state_precision_diag.is_some()
+        || model.latent_state_linear.is_some()
+        || model.latent_fixed_state_precision.is_some()
+}
+
+fn state_log_factor(model: &InlaModel<'_>, x: &[f64], beta: &[f64]) -> f64 {
+    let mut value = 0.0_f64;
+
+    if let Some(linear) = model.latent_state_linear {
+        value += x
+            .iter()
+            .zip(linear.iter())
+            .map(|(x_i, h_i)| x_i * h_i)
+            .sum::<f64>();
+    }
+    if let Some(precision) = model.latent_state_precision_diag {
+        value -= 0.5
+            * x.iter()
+                .zip(precision.iter())
+                .map(|(x_i, h_i)| x_i * h_i * x_i)
+                .sum::<f64>();
+    }
+
+    if let Some(linear) = model.fixed_state_linear {
+        value += beta
+            .iter()
+            .zip(linear.iter())
+            .map(|(beta_i, h_i)| beta_i * h_i)
+            .sum::<f64>();
+    }
+    if let Some(precision) = model.fixed_state_precision {
+        let k = model.n_fixed;
+        let mut qf = 0.0_f64;
+        for j1 in 0..k {
+            for j2 in 0..k {
+                qf += beta[j1] * precision[j1 * k + j2] * beta[j2];
+            }
+        }
+        value -= 0.5 * qf;
+    }
+
+    if let Some(precision) = model.latent_fixed_state_precision {
+        let n = model.n_latent;
+        let k = model.n_fixed;
+        let mut qf = 0.0_f64;
+        for j in 0..k {
+            for i in 0..n {
+                qf += x[i] * precision[i + j * n] * beta[j];
+            }
+        }
+        value -= qf;
+    }
+
+    value
+}
+
 pub(crate) fn laplace_eval(
     problem: &mut Problem,
     model: &InlaModel<'_>,
@@ -236,12 +296,19 @@ pub(crate) fn laplace_eval(
     let final_log_det_q = log_det_q + fixed_log_det_penalty;
     let final_log_det_aug = log_det_aug + schur_complement_adjustment;
     let final_q_form = latent_q_form + fixed_q_form;
+    let state_log_factor = state_log_factor(model, &x_hat, &beta_out);
 
-    let log_mlik =
-        if let Some(data_term) = gaussian_integrated_data_term(model, theta_lik, &eta_for_lik) {
+    let gaussian_data_term = if has_state_evidence(model) {
+        None
+    } else {
+        gaussian_integrated_data_term(model, theta_lik, &eta_for_lik)
+    };
+    let log_mlik = if let Some(data_term) = gaussian_data_term {
             0.5 * (final_log_det_q - final_log_det_aug) + data_term + log_prior
         } else {
-            0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form + log_prior
+            0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form
+                + state_log_factor
+                + log_prior
         };
 
     let decomposition = LaplaceDecomposition {
@@ -258,6 +325,7 @@ pub(crate) fn laplace_eval(
         latent_q_form,
         fixed_q_form,
         final_q_form,
+        state_log_factor,
         log_mlik,
         neg_log_mlik: -log_mlik,
     };
@@ -791,6 +859,11 @@ mod tests {
             offset: Some(&offset),
             extr_constr: None,
             n_constr: 0,
+            fixed_state_precision: None,
+            fixed_state_linear: None,
+            latent_state_precision_diag: None,
+            latent_state_linear: None,
+            latent_fixed_state_precision: None,
         };
 
         let eta = build_linear_predictor(&model, &x, &beta).unwrap();
@@ -829,6 +902,11 @@ mod tests {
             offset: Some(&offset),
             extr_constr: None,
             n_constr: 0,
+            fixed_state_precision: None,
+            fixed_state_linear: None,
+            latent_state_precision_diag: None,
+            latent_state_linear: None,
+            latent_fixed_state_precision: None,
         };
 
         let mut problem = Problem::new(&model);

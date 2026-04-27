@@ -74,6 +74,11 @@ The safest first version is a hyperparameter-state update, because:
 - it is closer to the CCD/Laplace approximation we already export
 - it is easier to validate
 
+The first Phase 8 experiment narrows this further to one `iid` latent block:
+reuse the previous fit's internal log-precision posterior as a Gaussian prior
+for the next fit's `iid` precision. This is intentionally not full latent-state
+reuse.
+
 ### Principle 4: require same model structure first
 
 Version 1 should only support updates where these are unchanged:
@@ -156,11 +161,13 @@ Purpose:
 Example shape:
 
 ```r
+state <- rusty_posterior_state(fit1, scope = "iid_hyper")
+
 fit2 <- rusty_inla(
   ...,
   control.update = list(
     posterior_state = state,
-    mode = "hyper"
+    mode = "iid_hyper_gaussian"
   )
 )
 ```
@@ -168,27 +175,54 @@ fit2 <- rusty_inla(
 Possible update modes:
 
 - `"warm_start"`: initialization only
-- `"hyper"`: reuse hyperparameter approximation
+- `"iid_hyper_gaussian"`: Phase 8 experimental mode; replace the default
+  prior for the first `iid` log-precision hyperparameter with a Gaussian
+  approximation to the previous posterior on the internal theta scale
+- `"fixed_iid_gaussian_evidence"`: Phase 8 experimental mode; reuse a
+  `rusty_update_state()` object containing dense fixed-effect old-data
+  evidence and diagonal `iid` old-data evidence; retained as a diagnostic
+  comparator
+- `"fixed_iid_cross_gaussian_evidence"`: Phase 8 experimental mode; reuse a
+  `rusty_update_state()` object containing dense fixed-effect evidence,
+  diagonal `iid` evidence, and the fixed-`iid` cross block
+- later maybe `"hyper"` for broader hyperparameter-state reuse
 - later maybe `"hyper_and_latent"` for restricted same-structure models
 
 ## 6. Version 1 scope
 
-Version 1 should support only:
+The hyperparameter-only version supports only:
 
+- one `iid` latent block
 - same family
-- same hyperparameter meaning
-- same latent topology
-- same fixed-effect interpretation
-- approximate hyperparameter-state reuse
-- optional warm-start reuse for latent mode
+- same fixed-effect column names and interpretation
+- same `iid` covariate name
+- new observed levels of that `iid` covariate may appear, because the current
+  state reuses only the shared precision hyperparameter, not per-level latent
+  means
+- approximate reuse of the `iid` log-precision posterior only
+- validation against a full refit on old plus new data
 
-Version 1 should not support:
+The fixed-plus-`iid` evidence version supports only:
+
+- one `iid` latent block
+- same family
+- same fixed-effect column names and interpretation
+- same `iid` covariate name
+- dense fixed-effect Gaussian old-data evidence
+- diagonal `iid` level Gaussian old-data evidence
+- fixed-`iid` cross Gaussian old-data evidence in the cross-block mode
+- new observed `iid` levels, expanded with zero old evidence
+- original model priors in the new fit, plus old-data evidence factors
+
+These versions should not support:
 
 - changing from one family to another
 - changing latent topology
 - changing graph structure
 - changing the meaning of fixed-effect columns
 - arbitrary posterior-as-prior updates for the full latent field
+- joint hyperparameter covariance beyond the one-dimensional `iid` precision
+  approximation
 
 ## 7. Internal implementation path
 
@@ -222,6 +256,30 @@ Allow the next run to:
 
 This should be described as an approximation layer, not exact Bayes.
 
+Current experimental implementation:
+
+- `rusty_posterior_state(fit, scope = "iid_hyper")` extracts a one-dimensional
+  Gaussian approximation to the previous `iid` log-precision posterior from the
+  internal CCD grid
+- `rusty_inla(..., control.update = list(posterior_state = state,
+  mode = "iid_hyper_gaussian"))` applies that Gaussian approximation as the
+  next model's `iid` log-precision prior
+- the implementation rejects non-`iid` latent structures, family changes,
+  fixed-effect signature changes, and `iid` covariate-name changes
+- because no latent means are reused, a newly observed `iid` level enters with
+  the usual prior mean `0` and the carried-forward precision prior; the new
+  level can move away from `0` when the new data provide enough information
+- `rusty_update_state(fit, scope = "fixed_iid_gaussian")` extracts a reusable
+  Gaussian evidence object with dense fixed-effect precision/linear terms,
+  diagonal `iid` precision/linear terms, and fixed-`iid` cross precision terms
+- `rusty_inla(..., control.update = list(state = state,
+  mode = "fixed_iid_cross_gaussian_evidence"))` adds those old-data evidence
+  factors to the new fit while keeping the original model priors
+- `mode = "fixed_iid_gaussian_evidence"` remains available as a diagonal-only
+  diagnostic comparator, and should not be treated as the preferred update path
+- for levels absent from the old state but present in the new data, the R
+  bridge expands the `iid` evidence with precision `0` and linear term `0`
+
 ### Phase 4: restricted latent-state reuse
 
 Only after the above is validated should we consider:
@@ -254,6 +312,71 @@ Acceptance rule:
 
 - approximate update must be close to the corresponding full refit
 - if not, the feature should fall back to warm-start-only behavior
+
+The first focused regression is
+`tests/posterior-state-iid-experimental.R`, wrapped by
+`tools/run-phase8-validation.ps1`. It compares an old fit, a new-data default
+fit, a new-data posterior-state update, and a full joint refit. The initial
+deterministic case shows the posterior-state update pulling the `iid`
+log-precision mode toward the previous posterior and much closer to the full
+joint fit than the new-data-only fit.
+
+The focused regression also includes a born-level diagnostic: the old fit sees
+only groups `A` and `B`, while the update fit sees a new group `C`. Since the
+current state carries only the `iid` precision posterior, group `C` is not
+fixed to zero. It starts with a zero-mean iid prior and updates from its own
+data; in the deterministic diagnostic its posterior mean moved to about
+`1.10` on the log scale. If the previous precision posterior is very tight,
+new levels will shrink strongly toward zero unless the new data are strong
+enough to overcome that prior.
+
+The fixed-plus-`iid` evidence regression is
+`tests/posterior-state-fixed-iid-evidence.R`, also wrapped by
+`tools/run-phase8-validation.ps1`. It fits old data with groups `1` through
+`4`, updates on new data that include a born group `5`, and compares against a
+full joint refit. The current deterministic run keeps the diagonal-only mode
+as a comparator and treats the cross-block mode as the real update target. In
+that run, fixed-effect maximum absolute drift moved from `0.182334` for
+new-data-only to `0.140508` for diagonal evidence and `0.002104` for
+cross-block evidence. Random-effect maximum absolute drift moved from
+`0.463243` to `0.181983` to `0.004527`, and fitted new-row maximum relative
+drift moved from `0.308039` to `0.048803` to `0.003383`. Minimum posterior SD
+ratios versus the joint refit moved from `0.182454` to `0.993448` for fixed
+effects and from `0.244942` to `0.993159` for random effects. Those SD ratios
+are part of the gate because diagonal evidence can make the approximation too
+narrow or internally inconsistent.
+
+The first actuarial-scale diagnostic is
+`tools/run_phase8_vehbrand_update.R`. It uses `freMTPL2freq`, splits the data
+into an old first two-thirds and a new final one-third by `IDpol`, fits
+`ClaimNb ~ 1 + offset(log(Exposure)) + f(VehBrand, model = "iid")`, then
+compares:
+
+- new data only with default priors
+- new data with the old `iid` posterior state as prior
+- new data with diagonal fixed-plus-`iid` Gaussian evidence
+- new data with cross-block fixed-plus-`iid` Gaussian evidence
+- diagnostic point-offset fits that reuse old fixed and/or VehBrand posterior
+  means as offsets
+- a full joint refit on old plus new data
+
+This is a pseudo-period split because `freMTPL2freq` does not expose an
+explicit time variable in the current benchmark setup. It is useful for
+actuarial scale and stable rating-factor semantics, but it is not a true
+calendar-year update. The current split has no newly born `VehBrand` level.
+
+The current run improved the internal `iid` log-precision distance to the
+joint refit from `1.452517` for new-data-only to `0.345385` for the
+hyperparameter-only update and `0.010236` for the cross-block fixed-plus-`iid`
+evidence update. Fitted new-row relative drift improved from `0.026080` to
+`0.022881` with the hyperparameter update and `0.000186` with cross-block
+evidence. Minimum SD ratios versus the joint refit were `0.992582` for fixed
+effects and `0.974102` for random effects in the cross-block row. The
+diagonal-only row is now explicitly diagnostic: in this VehBrand split it drove
+the log-precision far from the joint fit and narrowed SDs, which is exactly the
+failure mode the cross block fixes. Point-offset rows remain diagnostics only:
+they can improve fitted values but treat old posterior means as known offsets
+and do not carry uncertainty.
 
 ## 9. Why this is easier in `rustyINLA` than in current R-INLA practice
 

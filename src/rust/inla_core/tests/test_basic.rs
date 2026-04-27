@@ -131,6 +131,11 @@ fn test_synthetic_fremtpl2_poisson() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut prob = Problem::new(&model);
@@ -147,6 +152,74 @@ fn test_synthetic_fremtpl2_poisson() {
 
     assert!(beta.len() == 1);
     assert!(x.len() == 2);
+}
+
+#[test]
+fn test_fixed_iid_state_cross_evidence_matches_dense_gaussian_system() {
+    let y = vec![0.8, -0.4, 1.1];
+    let fixed_matrix = vec![1.0, 1.0, 1.0];
+    let offset = vec![0.0; y.len()];
+    let a_i = vec![0, 1, 2];
+    let a_j = vec![0, 1, 0];
+    let a_x = vec![1.0, 1.0, 1.0];
+    let fixed_state_precision = vec![0.9];
+    let fixed_state_linear = vec![0.2];
+    let latent_state_precision_diag = vec![0.4, 0.3];
+    let latent_state_linear = vec![-0.1, 0.15];
+    let latent_fixed_state_precision = vec![0.25, -0.05];
+
+    let iid = IidModel::new(2);
+    let likelihood = GaussianLikelihood {};
+    let theta = vec![0.3, 0.2];
+    let model = InlaModel {
+        y: &y,
+        offset: Some(&offset),
+        qfunc: &iid,
+        likelihood: &likelihood,
+        a_i: Some(&a_i),
+        a_j: Some(&a_j),
+        a_x: Some(&a_x),
+        n_fixed: 1,
+        fixed_matrix: Some(&fixed_matrix),
+        n_latent: 2,
+        theta_init: theta.clone(),
+        latent_init: vec![],
+        fixed_init: vec![],
+        extr_constr: None,
+        n_constr: 0,
+        fixed_state_precision: Some(&fixed_state_precision),
+        fixed_state_linear: Some(&fixed_state_linear),
+        latent_state_precision_diag: Some(&latent_state_precision_diag),
+        latent_state_linear: Some(&latent_state_linear),
+        latent_fixed_state_precision: Some(&latent_fixed_state_precision),
+    };
+
+    let mut problem = Problem::new(&model);
+    let (beta, x, _, _, _) = problem
+        .find_mode_with_fixed_effects(&model, &theta, &[], &[], 50, 1e-8)
+        .unwrap();
+
+    let tau_latent = theta[0].exp();
+    let tau_obs = theta[1].exp();
+    let mut dense = vec![0.0_f64; 9];
+    dense[0] = tau_latent + 2.0 * tau_obs + latent_state_precision_diag[0];
+    dense[4] = tau_latent + tau_obs + latent_state_precision_diag[1];
+    dense[8] = 3.0 * tau_obs + fixed_state_precision[0] + inla_core::problem::PRIOR_PREC_BETA;
+    dense[2] = 2.0 * tau_obs + latent_fixed_state_precision[0];
+    dense[6] = dense[2];
+    dense[5] = tau_obs + latent_fixed_state_precision[1];
+    dense[7] = dense[5];
+
+    let rhs = vec![
+        tau_obs * (y[0] + y[2]) + latent_state_linear[0],
+        tau_obs * y[1] + latent_state_linear[1],
+        tau_obs * y.iter().sum::<f64>() + fixed_state_linear[0],
+    ];
+    let expected = dense_cholesky_solve(dense, rhs, 3);
+
+    assert!((x[0] - expected[0]).abs() < 1e-8);
+    assert!((x[1] - expected[1]).abs() < 1e-8);
+    assert!((beta[0] - expected[2]).abs() < 1e-8);
 }
 
 #[test]
@@ -180,6 +253,11 @@ fn test_compound_latent_blocks_with_offset_run_end_to_end() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
@@ -222,6 +300,11 @@ fn test_gamma_iid_run_end_to_end() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
@@ -275,6 +358,11 @@ fn test_gaussian_multi_fixed_iid_run_end_to_end() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
@@ -331,6 +419,11 @@ fn test_fixed_only_poisson_run_end_to_end() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
@@ -382,6 +475,11 @@ fn test_fixed_only_gaussian_covariance_matches_dense_gls_reference() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut problem = Problem::new(&model);
@@ -480,6 +578,11 @@ fn test_gaussian_multi_fixed_iid_problem_returns_exact_fixed_covariance() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut problem = Problem::new(&model);
@@ -597,6 +700,11 @@ fn test_gaussian_multi_fixed_skip_ccd_fixed_sds_match_conditional_covariance() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let params = InlaParams {
@@ -754,6 +862,11 @@ fn test_gaussian_benchmark_style_fixed_covariance_matches_dense_gls_reference() 
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut problem = Problem::new(&model);
@@ -799,6 +912,11 @@ fn test_rw1_constraint_changes_latent_covariance_diagonal() {
         fixed_init: vec![],
         extr_constr: Some(&extr_constr),
         n_constr: 1,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
     let model_unconstrained = InlaModel {
         y: &y,
@@ -816,6 +934,11 @@ fn test_rw1_constraint_changes_latent_covariance_diagonal() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut problem_constrained = Problem::new(&model_constrained);
@@ -871,6 +994,11 @@ fn test_rw2_gaussian_with_intrinsic_constraints_runs_end_to_end() {
         fixed_init: vec![],
         extr_constr: Some(&extr_constr),
         n_constr: 2,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
@@ -926,6 +1054,11 @@ fn test_ar2_gaussian_runs_end_to_end() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();
@@ -967,6 +1100,11 @@ fn test_latent_only_rw2_gaussian_mode_matches_dense_posterior() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut problem = Problem::new(&model);
@@ -1028,6 +1166,11 @@ fn test_latent_only_irregular_rw2_gaussian_mode_matches_dense_posterior() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut problem = Problem::new(&model);
@@ -1093,6 +1236,11 @@ fn test_latent_only_ar2_gaussian_mode_matches_dense_posterior() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let mut problem = Problem::new(&model);
@@ -1157,6 +1305,11 @@ fn test_ccd_exports_keep_log_mlik_separate_from_log_weight() {
         fixed_init: vec![],
         extr_constr: None,
         n_constr: 0,
+        fixed_state_precision: None,
+        fixed_state_linear: None,
+        latent_state_precision_diag: None,
+        latent_state_linear: None,
+        latent_fixed_state_precision: None,
     };
 
     let res = InlaEngine::run(&model, &InlaParams::default()).unwrap();

@@ -74,6 +74,58 @@ fn add_offset(eta_data: &mut [f64], offset: Option<&[f64]>) {
     }
 }
 
+fn add_latent_state_evidence(
+    model: &crate::inference::InlaModel<'_>,
+    atwa_diag: &mut [f64],
+    b_x: &mut [f64],
+) {
+    if let Some(precision) = model.latent_state_precision_diag {
+        for (target, value) in atwa_diag.iter_mut().zip(precision.iter()) {
+            *target += *value;
+        }
+    }
+    if let Some(linear) = model.latent_state_linear {
+        for (target, value) in b_x.iter_mut().zip(linear.iter()) {
+            *target += *value;
+        }
+    }
+}
+
+fn add_fixed_state_evidence(
+    model: &crate::inference::InlaModel<'_>,
+    s_mat: &mut [f64],
+    b_beta: &mut [f64],
+    n_fixed: usize,
+) {
+    if let Some(precision) = model.fixed_state_precision {
+        for j1 in 0..n_fixed {
+            for j2 in 0..n_fixed {
+                s_mat[j1 * n_fixed + j2] += precision[j1 * n_fixed + j2];
+            }
+        }
+    }
+    if let Some(linear) = model.fixed_state_linear {
+        for (target, value) in b_beta.iter_mut().zip(linear.iter()) {
+            *target += *value;
+        }
+    }
+}
+
+fn add_latent_fixed_state_evidence(
+    model: &crate::inference::InlaModel<'_>,
+    w_cross: &mut [f64],
+    n_latent: usize,
+    n_fixed: usize,
+) {
+    if let Some(precision) = model.latent_fixed_state_precision {
+        for j in 0..n_fixed {
+            for i in 0..n_latent {
+                w_cross[i + j * n_latent] += precision[i + j * n_latent];
+            }
+        }
+    }
+}
+
 fn extract_singleton_a_rows(a_rows: &[Vec<(usize, f64)>]) -> Option<(Vec<usize>, Vec<f64>)> {
     let mut a_j = Vec::with_capacity(a_rows.len());
     let mut a_x = Vec::with_capacity(a_rows.len());
@@ -544,6 +596,7 @@ impl Problem {
                         let wz = curv * (z_i - offset_i);
                         b_x[k] += ax * wz;
                     }
+                    add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
                     (b_x, AtwaStorage::Diagonal(atwa_diag))
                 } else {
                     let mut b_x = vec![0.0_f64; n_latent];
@@ -569,6 +622,7 @@ impl Problem {
                             atwa_offdiag_values[slot] += w * coeff;
                         }
                     }
+                    add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
                     let atwa_offdiag = build_atwa_offdiag(&self.a_pair_keys, atwa_offdiag_values);
                     (
                         b_x,
@@ -793,6 +847,9 @@ impl Problem {
                     }
                     for j in 0..n_fixed {
                         s_mat[j * n_fixed + j] += PRIOR_PREC_BETA;
+                    }
+                    add_fixed_state_evidence(model, &mut s_mat, &mut b_beta, n_fixed);
+                    for j in 0..n_fixed {
                         s_xtwx_diag[j] = s_mat[j * n_fixed + j];
                     }
 
@@ -942,7 +999,7 @@ impl Problem {
                     clamp_curvature(&mut curv_data);
                     final_w_data = curv_data.clone();
 
-                    let (atwa, w_cross, b_beta, b_x) = if let (Some(a_single_j), Some(a_single_x)) =
+                    let (atwa, w_cross, mut b_beta, b_x) = if let (Some(a_single_j), Some(a_single_x)) =
                         (&self.a_single_j, &self.a_single_x)
                     {
                         let mut atwa_diag = vec![0.0_f64; n_latent];
@@ -966,6 +1023,13 @@ impl Problem {
                                 b_beta[j] += x_ij * wz;
                             }
                         }
+                        add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
+                        add_latent_fixed_state_evidence(
+                            model,
+                            &mut w_cross,
+                            n_latent,
+                            n_fixed,
+                        );
                         (AtwaStorage::Diagonal(atwa_diag), w_cross, b_beta, b_x)
                     } else {
                         let mut atwa_diag = vec![0.0_f64; n_latent];
@@ -1003,6 +1067,13 @@ impl Problem {
                                 atwa_offdiag_values[slot] += curv * coeff;
                             }
                         }
+                        add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
+                        add_latent_fixed_state_evidence(
+                            model,
+                            &mut w_cross,
+                            n_latent,
+                            n_fixed,
+                        );
                         let atwa_offdiag =
                             build_atwa_offdiag(&self.a_pair_keys, atwa_offdiag_values);
                         (
@@ -1098,6 +1169,10 @@ impl Problem {
                                 s_wcv_diag[j1] = wcv;
                             }
                         }
+                    }
+                    add_fixed_state_evidence(model, &mut s_mat, &mut b_beta, n_fixed);
+                    for j in 0..n_fixed {
+                        s_xtwx_diag[j] = s_mat[j * n_fixed + j];
                     }
 
                     let mut b_s = vec![0.0_f64; n_fixed];
@@ -1258,6 +1333,11 @@ impl Problem {
                         s_wcv_diag[j1] = wcv;
                     }
                 }
+            }
+            let mut unused_fixed_linear = vec![0.0_f64; n_fixed];
+            add_fixed_state_evidence(model, &mut s_mat, &mut unused_fixed_linear, n_fixed);
+            for j in 0..n_fixed {
+                s_xtwx_diag[j] = s_mat[j * n_fixed + j];
             }
 
             let mut fixed_cov = None;

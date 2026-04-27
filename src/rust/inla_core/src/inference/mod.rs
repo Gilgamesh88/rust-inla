@@ -24,6 +24,11 @@ pub struct InlaModel<'a> {
     pub offset: Option<&'a [f64]>,
     pub extr_constr: Option<&'a [f64]>,
     pub n_constr: usize,
+    pub fixed_state_precision: Option<&'a [f64]>,
+    pub fixed_state_linear: Option<&'a [f64]>,
+    pub latent_state_precision_diag: Option<&'a [f64]>,
+    pub latent_state_linear: Option<&'a [f64]>,
+    pub latent_fixed_state_precision: Option<&'a [f64]>,
 }
 
 pub struct InlaParams {
@@ -56,6 +61,7 @@ pub struct InlaResult {
     pub fixed_means: Vec<f64>,
     pub fixed_sds: Vec<f64>,
     pub fixed_var_theta_opt: Vec<f64>,
+    pub fixed_cov_theta_opt: Vec<f64>,
     pub ccd_thetas: Vec<f64>,
     pub ccd_base_weights: Vec<f64>,
     pub ccd_weights: Vec<f64>,
@@ -91,6 +97,7 @@ impl InlaEngine {
         let k = model.n_fixed;
 
         let mut fixed_var_theta_opt = vec![0.0_f64; k];
+        let mut fixed_cov_theta_opt = vec![0.0_f64; k * k];
         let latent_var_theta_opt = if k > 0 {
             let (_, _, _, diag_aug_inv, fixed_cov, _, _) = problem
                 .find_mode_with_fixed_effects_with_cov(
@@ -109,6 +116,7 @@ impl InlaEngine {
             for j in 0..k {
                 fixed_var_theta_opt[j] = fixed_cov[j * k + j];
             }
+            fixed_cov_theta_opt = fixed_cov;
             diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect()
         } else {
             let (_, _, diag_aug_inv) = problem
@@ -434,6 +442,7 @@ impl InlaEngine {
             fixed_means: mixed_fixed_mean,
             fixed_sds,
             fixed_var_theta_opt,
+            fixed_cov_theta_opt,
             ccd_thetas,
             ccd_base_weights,
             ccd_weights,

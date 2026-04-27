@@ -60,6 +60,23 @@ The current fixed-effects subset intentionally supports bare numeric/logical/fac
 
 Custom priors, fixed-prior controls such as `control.fixed`, and broader prior override surfaces are now tracked as Phase 8 prior/control metadata reuse rather than unfinished Phase 7A work.
 
+The first Phase 8 experiment is intentionally narrow: `rusty_posterior_state()`
+can extract an `iid` hyperparameter posterior state, and `control.update` can
+reuse that state as a Gaussian prior for a later one-`iid` fit. This is an
+experimental posterior-as-prior path for testing sequential Bayesian updating,
+not full latent-state reuse.
+
+The second Phase 8 experiment adds `rusty_update_state()` for a stricter
+fixed-plus-`iid` workflow: it extracts dense fixed-effect Gaussian evidence and
+diagonal `iid` level evidence plus the fixed-`iid` cross block from an old fit,
+then reuses that object in
+`control.update = list(state = state, mode = "fixed_iid_cross_gaussian_evidence")`.
+New `iid` levels are allowed and receive zero old evidence, so they start from
+the ordinary zero-mean `iid` prior and update from new data. This path remains
+experimental because the old evidence is still a local Gaussian approximation
+and hyperparameter uncertainty is simplified, but the cross block directly
+addresses the SD narrowing seen in the diagonal-only diagnostic mode.
+
 For the curated uploaded-suite subset, run:
 
 ```powershell

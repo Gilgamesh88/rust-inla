@@ -39,6 +39,14 @@ struct BackendSpec {
     theta_init: Option<Vec<f64>>,
     latent_init: Option<Vec<f64>>,
     fixed_init: Option<Vec<f64>>,
+    theta_prior_mean: Option<Vec<f64>>,
+    theta_prior_precision: Option<Vec<f64>>,
+    theta_prior_mask: Option<Vec<usize>>,
+    fixed_state_precision: Option<Vec<f64>>,
+    fixed_state_linear: Option<Vec<f64>>,
+    latent_state_precision_diag: Option<Vec<f64>>,
+    latent_state_linear: Option<Vec<f64>>,
+    latent_fixed_state_precision: Option<Vec<f64>>,
     optimizer_max_evals: Option<usize>,
     skip_ccd: Option<bool>,
 }
@@ -164,9 +172,28 @@ fn parse_latent_blocks(obj: &Robj) -> BridgeResult<Vec<LatentBlockSpec>> {
         .collect()
 }
 
-fn build_single_qfunc(block: &LatentBlockSpec) -> BridgeResult<Box<dyn QFunc>> {
+fn iid_log_precision_prior_override(spec: &BackendSpec) -> Option<(f64, f64)> {
+    let mean = spec.theta_prior_mean.as_ref()?;
+    let precision = spec.theta_prior_precision.as_ref()?;
+    let mask = spec.theta_prior_mask.as_ref()?;
+    if mask.first().copied() == Some(1usize) {
+        Some((mean[0], precision[0]))
+    } else {
+        None
+    }
+}
+
+fn build_single_qfunc(
+    block: &LatentBlockSpec,
+    iid_prior_override: Option<(f64, f64)>,
+) -> BridgeResult<Box<dyn QFunc>> {
     match block.model_type.as_str() {
-        "iid" => Ok(Box::new(IidModel::new(block.n_levels))),
+        "iid" => Ok(Box::new(match iid_prior_override {
+            Some((mean, precision)) => {
+                IidModel::new_with_log_precision_prior(block.n_levels, mean, precision)
+            }
+            None => IidModel::new(block.n_levels),
+        })),
         "rw1" => Ok(Box::new(Rw1Model::new(block.n_levels))),
         "rw2" => match block.structure_values.as_deref() {
             Some(values) => {
@@ -180,19 +207,21 @@ fn build_single_qfunc(block: &LatentBlockSpec) -> BridgeResult<Box<dyn QFunc>> {
     }
 }
 
-fn build_qfunc(latent_blocks: &[LatentBlockSpec]) -> BridgeResult<Box<dyn QFunc>> {
+fn build_qfunc(spec: &BackendSpec) -> BridgeResult<Box<dyn QFunc>> {
+    let latent_blocks = &spec.latent_blocks;
     if latent_blocks.is_empty() {
         return Ok(Box::new(FixedOnlyModel::new()));
     }
 
+    let iid_prior_override = iid_log_precision_prior_override(spec);
     if latent_blocks.len() == 1 {
         let block = &latent_blocks[0];
-        return build_single_qfunc(block);
+        return build_single_qfunc(block, iid_prior_override);
     }
 
     let mut blocks = Vec::with_capacity(latent_blocks.len());
     for block in latent_blocks {
-        blocks.push((block.start, build_single_qfunc(block)?));
+        blocks.push((block.start, build_single_qfunc(block, None)?));
     }
     Ok(Box::new(CompoundQFunc::new(blocks)))
 }
@@ -234,6 +263,26 @@ fn default_likelihood_theta_init(likelihood_type: &str) -> BridgeResult<Vec<f64>
             likelihood_type
         )),
     }
+}
+
+fn expected_theta_len(spec: &BackendSpec) -> usize {
+    spec.latent_blocks
+        .iter()
+        .map(|block| match block.model_type.as_str() {
+            "iid" | "rw1" | "rw2" => 1usize,
+            "ar1" => 2usize,
+            "ar2" => 3usize,
+            _ => 0usize,
+        })
+        .sum::<usize>()
+        + match spec.likelihood_type.as_str() {
+            "gaussian" => 1usize,
+            "poisson" => 0usize,
+            "gamma" => 1usize,
+            "zeroinflatedpoisson1" => 1usize,
+            "tweedie" => 2usize,
+            _ => 0usize,
+        }
 }
 
 fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
@@ -378,25 +427,8 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
         ));
     }
 
+    let expected = expected_theta_len(spec);
     if let Some(theta_init) = &spec.theta_init {
-        let expected = spec
-            .latent_blocks
-            .iter()
-            .map(|block| match block.model_type.as_str() {
-                "iid" | "rw1" | "rw2" => 1usize,
-                "ar1" => 2usize,
-                "ar2" => 3usize,
-                _ => 0usize,
-            })
-            .sum::<usize>()
-            + match spec.likelihood_type.as_str() {
-                "gaussian" => 1usize,
-                "poisson" => 0usize,
-                "gamma" => 1usize,
-                "zeroinflatedpoisson1" => 1usize,
-                "tweedie" => 2usize,
-                _ => 0usize,
-            };
         if theta_init.len() != expected {
             return Err(format!(
                 "theta_init length {} does not match expected hyperparameter length {}",
@@ -406,6 +438,160 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
         }
         if theta_init.iter().any(|value| !value.is_finite()) {
             return Err("theta_init must contain only finite values".to_string());
+        }
+    }
+
+    match (
+        &spec.theta_prior_mean,
+        &spec.theta_prior_precision,
+        &spec.theta_prior_mask,
+    ) {
+        (None, None, None) => {}
+        (Some(mean), Some(precision), Some(mask)) => {
+            if mean.len() != expected || precision.len() != expected || mask.len() != expected {
+                return Err(format!(
+                    "theta prior override length must match expected hyperparameter length {expected}"
+                ));
+            }
+            if mean.iter().any(|value| !value.is_finite()) {
+                return Err("theta_prior_mean must contain only finite values".to_string());
+            }
+            if precision.iter().any(|value| !value.is_finite() || *value < 0.0) {
+                return Err(
+                    "theta_prior_precision must contain finite non-negative values".to_string(),
+                );
+            }
+            if mask.iter().any(|value| *value > 1usize) {
+                return Err("theta_prior_mask entries must be 0 or 1".to_string());
+            }
+
+            let active: Vec<usize> = mask
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, value)| if *value == 1 { Some(idx) } else { None })
+                .collect();
+            if active != vec![0usize] {
+                return Err(
+                    "experimental theta prior override can replace only the first iid hyperparameter"
+                        .to_string(),
+                );
+            }
+            if precision[0] <= 0.0 {
+                return Err(
+                    "active theta_prior_precision entries must be strictly positive".to_string(),
+                );
+            }
+            if spec.latent_blocks.len() != 1 || spec.latent_blocks[0].model_type != "iid" {
+                return Err(
+                    "experimental theta prior override currently supports exactly one iid latent block"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "theta prior override requires theta_prior_mean, theta_prior_precision, and theta_prior_mask together"
+                    .to_string(),
+            )
+        }
+    }
+
+    match (&spec.fixed_state_precision, &spec.fixed_state_linear) {
+        (None, None) => {}
+        (Some(precision), Some(linear)) => {
+            let expected_precision = spec.n_fixed * spec.n_fixed;
+            if precision.len() != expected_precision || linear.len() != spec.n_fixed {
+                return Err(format!(
+                    "fixed state evidence must have precision length {} and linear length {}",
+                    expected_precision, spec.n_fixed
+                ));
+            }
+            if precision.iter().any(|value| !value.is_finite())
+                || linear.iter().any(|value| !value.is_finite())
+            {
+                return Err("fixed state evidence must contain only finite values".to_string());
+            }
+            for j in 0..spec.n_fixed {
+                if precision[j * spec.n_fixed + j] < 0.0 {
+                    return Err(
+                        "fixed state evidence precision must have non-negative diagonal entries"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        _ => return Err(
+            "fixed state evidence requires fixed_state_precision and fixed_state_linear together"
+                .to_string(),
+        ),
+    }
+
+    match (
+        &spec.latent_state_precision_diag,
+        &spec.latent_state_linear,
+    ) {
+        (None, None) => {}
+        (Some(precision), Some(linear)) => {
+            if precision.len() != spec.n_latent || linear.len() != spec.n_latent {
+                return Err(format!(
+                    "latent state evidence must have precision and linear lengths matching n_latent = {}",
+                    spec.n_latent
+                ));
+            }
+            if precision
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+                || linear.iter().any(|value| !value.is_finite())
+            {
+                return Err(
+                    "latent state evidence must contain finite values and non-negative precision"
+                        .to_string(),
+                );
+            }
+            if spec.latent_blocks.len() != 1 || spec.latent_blocks[0].model_type != "iid" {
+                return Err(
+                    "latent state evidence currently supports exactly one iid latent block"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "latent state evidence requires latent_state_precision_diag and latent_state_linear together"
+                    .to_string(),
+            )
+        }
+    }
+
+    if let Some(precision) = &spec.latent_fixed_state_precision {
+        let expected = spec.n_latent * spec.n_fixed;
+        if precision.len() != expected {
+            return Err(format!(
+                "latent-fixed state evidence precision length {} does not match n_latent * n_fixed = {}",
+                precision.len(),
+                expected
+            ));
+        }
+        if precision.iter().any(|value| !value.is_finite()) {
+            return Err(
+                "latent-fixed state evidence precision must contain only finite values".to_string(),
+            );
+        }
+        if spec.fixed_state_precision.is_none()
+            || spec.fixed_state_linear.is_none()
+            || spec.latent_state_precision_diag.is_none()
+            || spec.latent_state_linear.is_none()
+        {
+            return Err(
+                "latent-fixed state evidence requires fixed and latent state evidence blocks"
+                    .to_string(),
+            );
+        }
+        if spec.n_fixed == 0 || spec.n_latent == 0 {
+            return Err(
+                "latent-fixed state evidence requires positive fixed and latent dimensions"
+                    .to_string(),
+            );
         }
     }
 
@@ -481,6 +667,46 @@ fn parse_backend_spec(spec_arg: Robj) -> BridgeResult<BackendSpec> {
             .map(|obj| parse_optional_real_vec(obj, "fixed_init"))
             .transpose()?
             .flatten(),
+        theta_prior_mean: spec_map
+            .get("theta_prior_mean")
+            .map(|obj| parse_optional_real_vec(obj, "theta_prior_mean"))
+            .transpose()?
+            .flatten(),
+        theta_prior_precision: spec_map
+            .get("theta_prior_precision")
+            .map(|obj| parse_optional_real_vec(obj, "theta_prior_precision"))
+            .transpose()?
+            .flatten(),
+        theta_prior_mask: spec_map
+            .get("theta_prior_mask")
+            .map(|obj| parse_optional_usize_vec(obj, "theta_prior_mask"))
+            .transpose()?
+            .flatten(),
+        fixed_state_precision: spec_map
+            .get("fixed_state_precision")
+            .map(|obj| parse_optional_real_vec(obj, "fixed_state_precision"))
+            .transpose()?
+            .flatten(),
+        fixed_state_linear: spec_map
+            .get("fixed_state_linear")
+            .map(|obj| parse_optional_real_vec(obj, "fixed_state_linear"))
+            .transpose()?
+            .flatten(),
+        latent_state_precision_diag: spec_map
+            .get("latent_state_precision_diag")
+            .map(|obj| parse_optional_real_vec(obj, "latent_state_precision_diag"))
+            .transpose()?
+            .flatten(),
+        latent_state_linear: spec_map
+            .get("latent_state_linear")
+            .map(|obj| parse_optional_real_vec(obj, "latent_state_linear"))
+            .transpose()?
+            .flatten(),
+        latent_fixed_state_precision: spec_map
+            .get("latent_fixed_state_precision")
+            .map(|obj| parse_optional_real_vec(obj, "latent_fixed_state_precision"))
+            .transpose()?
+            .flatten(),
         optimizer_max_evals: spec_map
             .get("optimizer_max_evals")
             .map(|obj| parse_optional_usize(obj, "optimizer_max_evals"))
@@ -508,7 +734,7 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
         Err(err) => return r!(format!("Error: {err}")),
     };
 
-    let qfunc = match build_qfunc(&spec.latent_blocks) {
+    let qfunc = match build_qfunc(&spec) {
         Ok(qfunc) => qfunc,
         Err(err) => return r!(format!("Error: {err}")),
     };
@@ -560,6 +786,11 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
         offset: spec.offset.as_deref(),
         extr_constr: spec.extr_constr.as_deref(),
         n_constr: spec.n_constr,
+        fixed_state_precision: spec.fixed_state_precision.as_deref(),
+        fixed_state_linear: spec.fixed_state_linear.as_deref(),
+        latent_state_precision_diag: spec.latent_state_precision_diag.as_deref(),
+        latent_state_linear: spec.latent_state_linear.as_deref(),
+        latent_fixed_state_precision: spec.latent_fixed_state_precision.as_deref(),
     };
 
     let mut params = InlaParams::default();
@@ -627,6 +858,7 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
                 fixed_means = res.fixed_means,
                 fixed_sds = res.fixed_sds,
                 fixed_var_theta_opt = res.fixed_var_theta_opt,
+                fixed_cov_theta_opt = res.fixed_cov_theta_opt,
                 marg_means = marg_means,
                 marg_vars = marg_vars,
                 // Predictions mapped to the Response (μ) Scale natively!
@@ -671,6 +903,7 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
                     latent_q_form = res.laplace_terms.latent_q_form,
                     fixed_q_form = res.laplace_terms.fixed_q_form,
                     final_q_form = res.laplace_terms.final_q_form,
+                    state_log_factor = res.laplace_terms.state_log_factor,
                     log_mlik = res.laplace_terms.log_mlik,
                     neg_log_mlik = res.laplace_terms.neg_log_mlik
                 ),

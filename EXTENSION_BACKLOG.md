@@ -95,6 +95,15 @@ Expected work:
 - inventory the existing model, likelihood, and fixed-effect prior metadata
 - design a shared prior specification representation for Rust and R bridge
   code
+- keep the first posterior-state implementation restricted to one `iid` latent
+  block, using a Gaussian approximation to the previous internal
+  log-precision posterior as the next fit's prior
+- keep the first fixed-plus-`iid` update-state implementation restricted to
+  dense fixed Gaussian evidence plus diagonal `iid` Gaussian evidence and the
+  fixed-`iid` cross block, with new levels expanded as zero old evidence and
+  posterior SD ratios checked against joint refits
+- keep the diagonal fixed-plus-`iid` evidence mode as a diagnostic comparator
+  only; the cross-block mode is the mergeable Phase 8 target
 - define how model defaults are surfaced, overridden, serialized, and validated
 - decide the first constrained public surface, likely fixed-effect prior
   controls before arbitrary expression/table priors
