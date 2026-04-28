@@ -90,4 +90,49 @@ finally {
 }
 
 Write-Host ''
+Write-Host '==> Phase 8 theta-dependent evidence objective'
+Write-Host "    $Rscript tests\posterior-state-theta-objective.R"
+
+Push-Location $repoRoot
+try {
+    & $Rscript 'tests\posterior-state-theta-objective.R'
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ''
+Write-Host '==> Phase 8 composed rolling update state'
+Write-Host "    $Rscript tests\posterior-state-composition.R"
+
+Push-Location $repoRoot
+try {
+    & $Rscript 'tests\posterior-state-composition.R'
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ''
+Write-Host '==> Phase 8 dormant iid level carry'
+Write-Host "    $Rscript tests\posterior-state-dormant-iid-levels.R"
+
+Push-Location $repoRoot
+try {
+    & $Rscript 'tests\posterior-state-dormant-iid-levels.R'
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ''
 Write-Host 'Phase 8 validation gate passed.'

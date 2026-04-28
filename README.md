@@ -87,13 +87,21 @@ The current 8B contract is explicit: `rusty_update_state()` stores old-data
 likelihood evidence, not a posterior-as-prior object, and update fits keep the
 original model priors active while adding those old-data evidence factors.
 
-The first 8C slice is extraction-only but now uses the actual old CCD/theta
-support when available: `rusty_update_state()` carries a `theta_evidence`
-container with support-point theta values, normalized weights, log marginal
-likelihoods, local Gaussian log constants, and the fixed/`iid` evidence blocks
-(`H_beta_beta`, `h_beta`, `H_u_u_diag`, `h_u`, and `H_u_beta`). The active
-solver still uses the Phase 8A source-mode evidence fields until the later
-theta-dependent objective is implemented.
+The 8C slice uses the actual old CCD/theta support when available:
+`rusty_update_state()` carries a `theta_evidence` container with support-point
+theta values, normalized weights, log marginal likelihoods, local Gaussian log
+constants, and the fixed/`iid` evidence blocks (`H_beta_beta`, `h_beta`,
+`H_u_u_diag`, `h_u`, and `H_u_beta`). The 8D opt-in mode
+`fixed_iid_cross_theta_evidence` consumes that container with one-dimensional
+linear interpolation across theta support points; the older
+`fixed_iid_cross_gaussian_evidence` mode remains the frozen source-mode
+comparator. For rolling updates, `rusty_compose_update_state(previous_state,
+fit)` carries compressed evidence forward by adding the previous state to the
+current period's extracted likelihood evidence; this is the supported
+experimental path for year-by-year diagnostics. Factor `iid` levels that are
+present in the update state but absent from the current period are carried as
+dormant latent parameters, so actuarial tables can keep old brand parameters
+through zero-exposure periods and update them again when exposure returns.
 
 For the curated uploaded-suite subset, run:
 

@@ -8,6 +8,37 @@ use crate::models::QFunc;
 use crate::optimizer::{self, LaplaceDecomposition, OptimizerParams};
 use crate::problem::Problem;
 
+pub struct ThetaStateEvidence<'a> {
+    pub n_support: usize,
+    pub support: &'a [f64],
+    pub fixed_precision: &'a [f64],
+    pub fixed_linear: &'a [f64],
+    pub latent_precision_diag: &'a [f64],
+    pub latent_linear: &'a [f64],
+    pub latent_fixed_precision: &'a [f64],
+    pub log_constant: &'a [f64],
+}
+
+pub struct SelectedStateEvidence {
+    pub fixed_precision: Option<Vec<f64>>,
+    pub fixed_linear: Option<Vec<f64>>,
+    pub latent_precision_diag: Option<Vec<f64>>,
+    pub latent_linear: Option<Vec<f64>>,
+    pub latent_fixed_precision: Option<Vec<f64>>,
+    pub log_constant: f64,
+}
+
+impl SelectedStateEvidence {
+    pub fn has_any(&self) -> bool {
+        self.fixed_precision.is_some()
+            || self.fixed_linear.is_some()
+            || self.latent_precision_diag.is_some()
+            || self.latent_linear.is_some()
+            || self.latent_fixed_precision.is_some()
+            || self.log_constant != 0.0
+    }
+}
+
 pub struct InlaModel<'a> {
     pub qfunc: &'a dyn QFunc,
     pub likelihood: &'a dyn LogLikelihood,
@@ -29,6 +60,151 @@ pub struct InlaModel<'a> {
     pub latent_state_precision_diag: Option<&'a [f64]>,
     pub latent_state_linear: Option<&'a [f64]>,
     pub latent_fixed_state_precision: Option<&'a [f64]>,
+    pub theta_state_evidence: Option<ThetaStateEvidence<'a>>,
+}
+
+impl<'a> InlaModel<'a> {
+    fn theta_state_blend(&self, theta: &[f64], state: &ThetaStateEvidence<'_>) -> (usize, usize, f64) {
+        if state.n_support == 0 || theta.is_empty() {
+            return (0, 0, 0.0);
+        }
+
+        let n_theta = theta.len();
+        if n_theta == 1 {
+            let theta_value = theta[0];
+            let mut order: Vec<usize> = (0..state.n_support).collect();
+            order.sort_by(|&lhs, &rhs| {
+                state.support[lhs]
+                    .partial_cmp(&state.support[rhs])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let first = order[0];
+            let last = order[state.n_support - 1];
+            if theta_value <= state.support[first] {
+                return (first, first, 0.0);
+            }
+            if theta_value >= state.support[last] {
+                return (last, last, 0.0);
+            }
+
+            for pair in order.windows(2) {
+                let left = pair[0];
+                let right = pair[1];
+                let theta_left = state.support[left];
+                let theta_right = state.support[right];
+                if theta_value >= theta_left && theta_value <= theta_right {
+                    let denom = theta_right - theta_left;
+                    let right_weight = if denom.abs() <= f64::EPSILON {
+                        0.0
+                    } else {
+                        ((theta_value - theta_left) / denom).clamp(0.0, 1.0)
+                    };
+                    return (left, right, right_weight);
+                }
+            }
+        }
+
+        let mut best = 0usize;
+        let mut best_dist = f64::INFINITY;
+        for support_idx in 0..state.n_support {
+            let mut dist = 0.0_f64;
+            for (theta_idx, theta_value) in theta.iter().enumerate().take(n_theta) {
+                let diff = *theta_value - state.support[support_idx * n_theta + theta_idx];
+                dist += diff * diff;
+            }
+            if dist < best_dist {
+                best_dist = dist;
+                best = support_idx;
+            }
+        }
+        (best, best, 0.0)
+    }
+
+    fn blend_theta_state_slice(
+        source: &[f64],
+        per_support: usize,
+        left: usize,
+        right: usize,
+        right_weight: f64,
+    ) -> Vec<f64> {
+        let left_start = left * per_support;
+        let right_start = right * per_support;
+        let left_slice = &source[left_start..left_start + per_support];
+        if left == right || right_weight <= 0.0 {
+            return left_slice.to_vec();
+        }
+        let right_slice = &source[right_start..right_start + per_support];
+        let left_weight = 1.0 - right_weight;
+        left_slice
+            .iter()
+            .zip(right_slice.iter())
+            .map(|(lhs, rhs)| left_weight * *lhs + right_weight * *rhs)
+            .collect()
+    }
+
+    pub fn selected_state_evidence(&self, theta: &[f64]) -> SelectedStateEvidence {
+        if let Some(theta_state) = &self.theta_state_evidence {
+            let (left, right, right_weight) = self.theta_state_blend(theta, theta_state);
+            let log_constant = if left == right || right_weight <= 0.0 {
+                theta_state.log_constant[left]
+            } else {
+                (1.0 - right_weight) * theta_state.log_constant[left]
+                    + right_weight * theta_state.log_constant[right]
+            };
+            return SelectedStateEvidence {
+                fixed_precision: Some(Self::blend_theta_state_slice(
+                    theta_state.fixed_precision,
+                    self.n_fixed * self.n_fixed,
+                    left,
+                    right,
+                    right_weight,
+                )),
+                fixed_linear: Some(Self::blend_theta_state_slice(
+                    theta_state.fixed_linear,
+                    self.n_fixed,
+                    left,
+                    right,
+                    right_weight,
+                )),
+                latent_precision_diag: Some(Self::blend_theta_state_slice(
+                    theta_state.latent_precision_diag,
+                    self.n_latent,
+                    left,
+                    right,
+                    right_weight,
+                )),
+                latent_linear: Some(Self::blend_theta_state_slice(
+                    theta_state.latent_linear,
+                    self.n_latent,
+                    left,
+                    right,
+                    right_weight,
+                )),
+                latent_fixed_precision: Some(Self::blend_theta_state_slice(
+                    theta_state.latent_fixed_precision,
+                    self.n_latent * self.n_fixed,
+                    left,
+                    right,
+                    right_weight,
+                )),
+                log_constant,
+            };
+        }
+
+        SelectedStateEvidence {
+            fixed_precision: self.fixed_state_precision.map(|values| values.to_vec()),
+            fixed_linear: self.fixed_state_linear.map(|values| values.to_vec()),
+            latent_precision_diag: self
+                .latent_state_precision_diag
+                .map(|values| values.to_vec()),
+            latent_linear: self.latent_state_linear.map(|values| values.to_vec()),
+            latent_fixed_precision: self
+                .latent_fixed_state_precision
+                .map(|values| values.to_vec()),
+            log_constant: 0.0,
+        }
+    }
 }
 
 pub struct InlaParams {

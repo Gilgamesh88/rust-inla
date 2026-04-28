@@ -3,6 +3,7 @@ use std::{collections::HashMap, time::Instant};
 use crate::diagnostics::{LaplacePhase, RunDiagnostics, RunDiagnosticsSummary};
 use crate::error::InlaError;
 use crate::graph::Graph;
+use crate::inference::SelectedStateEvidence;
 use crate::models::QFunc;
 use crate::solver::{FaerSolver, SpMat, SparseSolver};
 
@@ -75,16 +76,16 @@ fn add_offset(eta_data: &mut [f64], offset: Option<&[f64]>) {
 }
 
 fn add_latent_state_evidence(
-    model: &crate::inference::InlaModel<'_>,
+    evidence: &SelectedStateEvidence,
     atwa_diag: &mut [f64],
     b_x: &mut [f64],
 ) {
-    if let Some(precision) = model.latent_state_precision_diag {
+    if let Some(precision) = evidence.latent_precision_diag.as_deref() {
         for (target, value) in atwa_diag.iter_mut().zip(precision.iter()) {
             *target += *value;
         }
     }
-    if let Some(linear) = model.latent_state_linear {
+    if let Some(linear) = evidence.latent_linear.as_deref() {
         for (target, value) in b_x.iter_mut().zip(linear.iter()) {
             *target += *value;
         }
@@ -92,19 +93,19 @@ fn add_latent_state_evidence(
 }
 
 fn add_fixed_state_evidence(
-    model: &crate::inference::InlaModel<'_>,
+    evidence: &SelectedStateEvidence,
     s_mat: &mut [f64],
     b_beta: &mut [f64],
     n_fixed: usize,
 ) {
-    if let Some(precision) = model.fixed_state_precision {
+    if let Some(precision) = evidence.fixed_precision.as_deref() {
         for j1 in 0..n_fixed {
             for j2 in 0..n_fixed {
                 s_mat[j1 * n_fixed + j2] += precision[j1 * n_fixed + j2];
             }
         }
     }
-    if let Some(linear) = model.fixed_state_linear {
+    if let Some(linear) = evidence.fixed_linear.as_deref() {
         for (target, value) in b_beta.iter_mut().zip(linear.iter()) {
             *target += *value;
         }
@@ -112,12 +113,12 @@ fn add_fixed_state_evidence(
 }
 
 fn add_latent_fixed_state_evidence(
-    model: &crate::inference::InlaModel<'_>,
+    evidence: &SelectedStateEvidence,
     w_cross: &mut [f64],
     n_latent: usize,
     n_fixed: usize,
 ) {
-    if let Some(precision) = model.latent_fixed_state_precision {
+    if let Some(precision) = evidence.latent_fixed_precision.as_deref() {
         for j in 0..n_fixed {
             for i in 0..n_latent {
                 w_cross[i + j * n_latent] += precision[i + j * n_latent];
@@ -533,6 +534,7 @@ impl Problem {
             let n_model = model.qfunc.n_hyperparams();
             let theta_model = &theta[..n_model];
             let theta_lik = &theta[n_model..];
+            let state_evidence = model.selected_state_evidence(theta);
             let is_gaussian_mode = model
                 .likelihood
                 .gaussian_observation_precision(theta_lik)
@@ -596,7 +598,7 @@ impl Problem {
                         let wz = curv * (z_i - offset_i);
                         b_x[k] += ax * wz;
                     }
-                    add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
+                    add_latent_state_evidence(&state_evidence, &mut atwa_diag, &mut b_x);
                     (b_x, AtwaStorage::Diagonal(atwa_diag))
                 } else {
                     let mut b_x = vec![0.0_f64; n_latent];
@@ -622,7 +624,7 @@ impl Problem {
                             atwa_offdiag_values[slot] += w * coeff;
                         }
                     }
-                    add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
+                    add_latent_state_evidence(&state_evidence, &mut atwa_diag, &mut b_x);
                     let atwa_offdiag = build_atwa_offdiag(&self.a_pair_keys, atwa_offdiag_values);
                     (
                         b_x,
@@ -774,6 +776,7 @@ impl Problem {
             let n_model = model.qfunc.n_hyperparams();
             let theta_model = &theta[..n_model];
             let theta_lik = &theta[n_model..];
+            let state_evidence = model.selected_state_evidence(theta);
             let is_gaussian_mode = model
                 .likelihood
                 .gaussian_observation_precision(theta_lik)
@@ -848,7 +851,7 @@ impl Problem {
                     for j in 0..n_fixed {
                         s_mat[j * n_fixed + j] += PRIOR_PREC_BETA;
                     }
-                    add_fixed_state_evidence(model, &mut s_mat, &mut b_beta, n_fixed);
+                    add_fixed_state_evidence(&state_evidence, &mut s_mat, &mut b_beta, n_fixed);
                     for j in 0..n_fixed {
                         s_xtwx_diag[j] = s_mat[j * n_fixed + j];
                     }
@@ -1023,9 +1026,9 @@ impl Problem {
                                 b_beta[j] += x_ij * wz;
                             }
                         }
-                        add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
+                        add_latent_state_evidence(&state_evidence, &mut atwa_diag, &mut b_x);
                         add_latent_fixed_state_evidence(
-                            model,
+                            &state_evidence,
                             &mut w_cross,
                             n_latent,
                             n_fixed,
@@ -1067,9 +1070,9 @@ impl Problem {
                                 atwa_offdiag_values[slot] += curv * coeff;
                             }
                         }
-                        add_latent_state_evidence(model, &mut atwa_diag, &mut b_x);
+                        add_latent_state_evidence(&state_evidence, &mut atwa_diag, &mut b_x);
                         add_latent_fixed_state_evidence(
-                            model,
+                            &state_evidence,
                             &mut w_cross,
                             n_latent,
                             n_fixed,
@@ -1170,7 +1173,7 @@ impl Problem {
                             }
                         }
                     }
-                    add_fixed_state_evidence(model, &mut s_mat, &mut b_beta, n_fixed);
+                    add_fixed_state_evidence(&state_evidence, &mut s_mat, &mut b_beta, n_fixed);
                     for j in 0..n_fixed {
                         s_xtwx_diag[j] = s_mat[j * n_fixed + j];
                     }
@@ -1335,7 +1338,7 @@ impl Problem {
                 }
             }
             let mut unused_fixed_linear = vec![0.0_f64; n_fixed];
-            add_fixed_state_evidence(model, &mut s_mat, &mut unused_fixed_linear, n_fixed);
+            add_fixed_state_evidence(&state_evidence, &mut s_mat, &mut unused_fixed_linear, n_fixed);
             for j in 0..n_fixed {
                 s_xtwx_diag[j] = s_mat[j * n_fixed + j];
             }

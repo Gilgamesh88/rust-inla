@@ -82,7 +82,7 @@ validation cleanup.
 
 ## Phase 8C: theta-mixture evidence extraction
 
-Status: active; compact CCD-support extraction started.
+Status: checkpointed in `4f1b42e`; compact CCD-support extraction implemented.
 
 Goal: move from one local old-data evidence block at `theta_opt` to a small
 mixture of old-data evidence blocks over the old CCD/theta support.
@@ -106,8 +106,8 @@ Work:
   `theta_evidence` container over the old CCD/theta support
 - each support point records normalized weight, log marginal likelihood,
   log weight, and the local Gaussian log constant
-- the slice is not solver-integrated; update fits still consume the
-  source-mode evidence fields used by Phase 8A until Phase 8D
+- the 8C slice stores the CCD-support container; the 8D opt-in mode can now
+  consume it while the source-mode path remains available as a comparator
 - extract evidence blocks at supported theta points
 - store weights and log constants
 - keep memory bounded for large iid blocks
@@ -131,8 +131,9 @@ Current 8C checkpoint candidate:
   - `H_u_u_diag`
   - `h_u`
   - `H_u_beta`
-- `state$theta_evidence$solver_status = "not_integrated"` is intentional until
-  Phase 8D adds the theta-dependent objective
+- `state$theta_evidence$solver_status = "not_integrated"` describes the stored
+  object itself; update-fit metadata records `"linear_1d_integrated"` when the
+  8D solver path consumes it
 - `tests/posterior-state-theta-evidence-shape.R` checks the container shape and
   verifies that removing the container leaves the active source-mode update
   numerically unchanged
@@ -141,6 +142,8 @@ Expected size: medium.
 
 ## Phase 8D: theta-dependent objective
 
+Status: first opt-in implementation active.
+
 Goal: let the solver evaluate old-data evidence as a function of theta rather
 than as one frozen block.
 
@@ -148,15 +151,35 @@ Work:
 
 - add backend support for mixture evidence states
 - include old evidence constants in the hyperparameter objective
-- decide whether to select nearest support, interpolate, or log-sum-exp mixture
-  contributions
+- first implementation uses one-dimensional linear interpolation across the
+  old CCD/theta support
 - keep the one-iid restriction until the objective is benchmark-clean
 - add diagnostics that show which theta support points are active
+
+Current 8D candidate:
+
+- new opt-in mode: `fixed_iid_cross_theta_evidence`
+- restricted to exactly one theta dimension, currently the one-`iid` Poisson
+  split-update path
+- existing `fixed_iid_cross_gaussian_evidence` remains the source-mode frozen
+  block comparator
+- `tests/posterior-state-theta-objective.R` validates the integrated path
+- VehBrand pseudo-period benchmark improved theta drift versus joint from
+  `0.010236` with frozen source-cross evidence to `0.003678` with
+  theta-dependent evidence; fitted new-row max relative drift improved from
+  `0.000186` to `0.000112`
+- `tools/run_phase8_fremtpl_three_part_update.R` adds a three-part freMTPL
+  pseudo-period benchmark. Refit-based sequential updating stays close to
+  joint refits; naive rolling re-extraction drifts because it drops previously
+  compressed evidence, while the first explicit composed-state operator brings
+  the rolling path back near the refit-based update.
 
 Expected size: large; this is the main solver extension toward a full
 Bayes-like sequential approximation.
 
 ## Phase 8E: joint-refit validation gates
+
+Status: started with explicit state composition diagnostics.
 
 Goal: make the theta-mixture path credible.
 
@@ -175,8 +198,34 @@ Required cases:
 - synthetic iid with old/new/joint split
 - born-level iid split
 - VehBrand actuarial split
+- freMTPL ordered three-part split with both refit-based and rolling
+  composition diagnostics
 - fixed-only GLM control case where state reuse should be rejected or skipped
 - at least one stress case with multiple fixed columns
+
+Current composition candidate:
+
+- `rusty_compose_update_state(previous_state, fit)` extracts current-period
+  likelihood evidence from `fit` and adds it to `previous_state`
+- composition is support-by-support for the compact theta-evidence container,
+  with one-dimensional linear interpolation of the previous state onto the new
+  state's theta support
+- synthetic rolling validation improved theta drift from `0.070368` with naive
+  re-extraction to `0.009584` with composition, and fitted drift from
+  `0.109865` to `0.006090`
+- freMTPL three-part diagnostic improved part3 rolling theta drift from
+  `0.260389` with naive re-extraction to `0.011807` with composition; fitted
+  drift improved from `0.008549` to `0.000312`
+- `tools/run_phase8_fremtpl_born_brand_update.R` isolates the lowest-exposure
+  VehBrand (`B14`) so it is absent in period 1 and born in period 2. The update
+  metadata records `B14` as a born level, assigns zero old evidence at entry,
+  and the composed state adds positive period-2 evidence for that level.
+- dormant factor `iid` levels are now carried from the update state into the
+  next period's latent table even when they have zero current exposure; metadata
+  records active, dormant, and factor-levels-carried sets
+- `tools/run_phase8_fremtpl_four_part_dormant_brand_update.R` splits the same
+  low-exposure VehBrand into periods 2 and 4, leaves it dormant in period 3,
+  and compares born, dormant, and re-entry updates against joint refits.
 
 ## Phase 8F: broader latent structures
 

@@ -1109,7 +1109,8 @@ fixed_iid_update_state_semantics <- function(theta_evidence_policy = "single_sup
         theta_evidence_policy = theta_evidence_policy,
         compatible_update_modes = c(
             "fixed_iid_gaussian_evidence",
-            "fixed_iid_cross_gaussian_evidence"
+            "fixed_iid_cross_gaussian_evidence",
+            "fixed_iid_cross_theta_evidence"
         )
     )
 }
@@ -1154,6 +1155,54 @@ validate_fixed_iid_update_state_semantics <- function(state, mode) {
     }
 }
 
+flatten_support_fixed_precision <- function(arr) {
+    n_support <- dim(arr)[[3L]]
+    as.numeric(unlist(
+        lapply(seq_len(n_support), function(s) {
+            as.numeric(t(arr[, , s]))
+        }),
+        use.names = FALSE
+    ))
+}
+
+flatten_support_rows <- function(mat) {
+    as.numeric(t(mat))
+}
+
+flatten_support_latent_fixed <- function(arr) {
+    n_support <- dim(arr)[[3L]]
+    as.numeric(unlist(
+        lapply(seq_len(n_support), function(s) {
+            as.numeric(arr[, , s])
+        }),
+        use.names = FALSE
+    ))
+}
+
+expand_theta_evidence_for_new_iid_levels <- function(theta_evidence, new_levels, level_match) {
+    n_support <- as.integer(theta_evidence$n_support)
+    n_fixed <- dim(theta_evidence$H_beta_beta)[[1L]]
+    n_new <- length(new_levels)
+    matched <- which(!is.na(level_match))
+
+    latent_precision <- matrix(0.0, nrow = n_support, ncol = n_new)
+    latent_linear <- matrix(0.0, nrow = n_support, ncol = n_new)
+    latent_fixed <- array(0.0, dim = c(n_new, n_fixed, n_support))
+
+    if (length(matched) > 0L) {
+        latent_precision[, matched] <- theta_evidence$H_u_u_diag[, level_match[matched], drop = FALSE]
+        latent_linear[, matched] <- theta_evidence$h_u[, level_match[matched], drop = FALSE]
+        latent_fixed[matched, , ] <- theta_evidence$H_u_beta[level_match[matched], , , drop = FALSE]
+    }
+
+    list(
+        latent_precision = latent_precision,
+        latent_linear = latent_linear,
+        latent_fixed = latent_fixed,
+        n_support = n_support
+    )
+}
+
 apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, control.update, mode) {
     state <- control.update$state
     if (is.null(state)) {
@@ -1167,13 +1216,15 @@ apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, c
     }
     supported_approximations <- c(
         "fixed_iid_gaussian_evidence",
-        "fixed_iid_cross_gaussian_evidence"
+        "fixed_iid_cross_gaussian_evidence",
+        "fixed_iid_cross_theta_evidence_composed"
     )
     if (!identical(state$scope, "fixed_iid_gaussian") ||
         !(state$approximation %in% supported_approximations)) {
         stop("Only fixed_iid Gaussian evidence update states are supported.", call. = FALSE)
     }
-    include_cross <- identical(mode, "fixed_iid_cross_gaussian_evidence")
+    include_cross <- mode %in% c("fixed_iid_cross_gaussian_evidence", "fixed_iid_cross_theta_evidence")
+    use_theta_evidence <- identical(mode, "fixed_iid_cross_theta_evidence")
     validate_fixed_iid_update_state_semantics(state, mode)
 
     backend_signature <- build_backend_signature(backend_spec, family)
@@ -1230,12 +1281,42 @@ apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, c
     }
     born_levels <- new_levels[is.na(level_match)]
 
-    backend_spec$fixed_state_precision <- as.numeric(t(fixed_precision))
-    backend_spec$fixed_state_linear <- fixed_linear
-    backend_spec$latent_state_precision_diag <- latent_precision
-    backend_spec$latent_state_linear <- latent_linear
-    if (include_cross) {
-        backend_spec$latent_fixed_state_precision <- as.numeric(latent_fixed_cross)
+    if (use_theta_evidence) {
+        theta_evidence <- state$theta_evidence
+        if (is.null(theta_evidence) || !is.list(theta_evidence) ||
+            as.integer(theta_evidence$n_support) <= 1L) {
+            stop(
+                "fixed_iid_cross_theta_evidence requires a rusty_update_state() object with multi-point theta_evidence.",
+                call. = FALSE
+            )
+        }
+        if (length(state$theta_mode) != 1L || ncol(theta_evidence$theta) != 1L) {
+            stop(
+                "fixed_iid_cross_theta_evidence currently supports exactly one theta dimension.",
+                call. = FALSE
+            )
+        }
+        expanded_theta <- expand_theta_evidence_for_new_iid_levels(
+            theta_evidence = theta_evidence,
+            new_levels = new_levels,
+            level_match = level_match
+        )
+        backend_spec$theta_state_n_support <- as.integer(expanded_theta$n_support)
+        backend_spec$theta_state_support <- flatten_support_rows(theta_evidence$theta)
+        backend_spec$theta_state_fixed_precision <- flatten_support_fixed_precision(theta_evidence$H_beta_beta)
+        backend_spec$theta_state_fixed_linear <- flatten_support_rows(theta_evidence$h_beta)
+        backend_spec$theta_state_latent_precision_diag <- flatten_support_rows(expanded_theta$latent_precision)
+        backend_spec$theta_state_latent_linear <- flatten_support_rows(expanded_theta$latent_linear)
+        backend_spec$theta_state_latent_fixed_precision <- flatten_support_latent_fixed(expanded_theta$latent_fixed)
+        backend_spec$theta_state_log_constant <- as.numeric(theta_evidence$log_constants)
+    } else {
+        backend_spec$fixed_state_precision <- as.numeric(t(fixed_precision))
+        backend_spec$fixed_state_linear <- fixed_linear
+        backend_spec$latent_state_precision_diag <- latent_precision
+        backend_spec$latent_state_linear <- latent_linear
+        if (include_cross) {
+            backend_spec$latent_fixed_state_precision <- as.numeric(latent_fixed_cross)
+        }
     }
     backend_spec$posterior_update_metadata <- list(
         mode = mode,
@@ -1250,7 +1331,13 @@ apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, c
         theta_evidence_policy = state$semantics$theta_evidence_policy,
         theta_evidence_strategy = if (is.null(state$theta_evidence)) NA_character_ else state$theta_evidence$strategy,
         theta_evidence_support_points = if (is.null(state$theta_evidence)) NA_integer_ else as.integer(state$theta_evidence$n_support),
-        theta_evidence_solver_status = if (is.null(state$theta_evidence)) NA_character_ else state$theta_evidence$solver_status,
+        theta_evidence_solver_status = if (use_theta_evidence) {
+            "linear_1d_integrated"
+        } else if (is.null(state$theta_evidence)) {
+            NA_character_
+        } else {
+            state$theta_evidence$solver_status
+        },
         source_family = state$signature$family,
         source_n_obs = state$source$n_obs,
         source_fixed_names = state$fixed$names,
@@ -1258,7 +1345,9 @@ apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, c
         born_iid_levels = born_levels,
         caveat = paste(
             "Experimental fixed+iid Gaussian old-data evidence update;",
-            if (include_cross) {
+            if (use_theta_evidence) {
+                "uses linear interpolation across CCD theta evidence support with the fixed-iid cross block."
+            } else if (include_cross) {
                 "uses dense fixed evidence, diagonal iid evidence, and the fixed-iid cross block."
             } else {
                 "uses dense fixed evidence and diagonal iid evidence, but omits the fixed-iid cross block."
@@ -1280,7 +1369,11 @@ apply_control_update_to_backend_spec <- function(backend_spec, family, control.u
     if (is.null(mode)) {
         mode <- "iid_hyper_gaussian"
     }
-    if (mode %in% c("fixed_iid_gaussian_evidence", "fixed_iid_cross_gaussian_evidence")) {
+    if (mode %in% c(
+        "fixed_iid_gaussian_evidence",
+        "fixed_iid_cross_gaussian_evidence",
+        "fixed_iid_cross_theta_evidence"
+    )) {
         return(apply_fixed_iid_update_state_to_backend_spec(
             backend_spec = backend_spec,
             family = family,
@@ -1290,7 +1383,7 @@ apply_control_update_to_backend_spec <- function(backend_spec, family, control.u
     }
     if (!identical(mode, "iid_hyper_gaussian")) {
         stop(
-            "control.update mode must be 'iid_hyper_gaussian', 'fixed_iid_gaussian_evidence', or 'fixed_iid_cross_gaussian_evidence' for the current experiments.",
+            "control.update mode must be 'iid_hyper_gaussian', 'fixed_iid_gaussian_evidence', 'fixed_iid_cross_gaussian_evidence', or 'fixed_iid_cross_theta_evidence' for the current experiments.",
             call. = FALSE
         )
     }
@@ -1624,6 +1717,250 @@ rusty_update_state <- function(fit, scope = c("fixed_iid_gaussian"), min_varianc
     )
     class(state) <- "rusty_update_state"
     state
+}
+
+theta_evidence_support_blend <- function(theta_evidence, theta) {
+    n_support <- as.integer(theta_evidence$n_support)
+    theta_matrix <- as.matrix(theta_evidence$theta)
+    if (n_support <= 0L || nrow(theta_matrix) != n_support) {
+        stop("theta_evidence has inconsistent support dimensions.", call. = FALSE)
+    }
+    if (ncol(theta_matrix) != 1L || length(theta) != 1L) {
+        stop("Composed update states currently support exactly one theta dimension.", call. = FALSE)
+    }
+    if (n_support == 1L) {
+        return(list(left = 1L, right = 1L, right_weight = 0.0))
+    }
+
+    support <- as.numeric(theta_matrix[, 1L])
+    order_idx <- order(support)
+    theta_value <- as.numeric(theta[[1L]])
+    if (theta_value <= support[order_idx[[1L]]]) {
+        idx <- order_idx[[1L]]
+        return(list(left = idx, right = idx, right_weight = 0.0))
+    }
+    if (theta_value >= support[order_idx[[n_support]]]) {
+        idx <- order_idx[[n_support]]
+        return(list(left = idx, right = idx, right_weight = 0.0))
+    }
+
+    for (pos in seq_len(n_support - 1L)) {
+        left <- order_idx[[pos]]
+        right <- order_idx[[pos + 1L]]
+        theta_left <- support[[left]]
+        theta_right <- support[[right]]
+        if (theta_value >= theta_left && theta_value <= theta_right) {
+            denom <- theta_right - theta_left
+            right_weight <- if (abs(denom) <= .Machine$double.eps) {
+                0.0
+            } else {
+                min(max((theta_value - theta_left) / denom, 0.0), 1.0)
+            }
+            return(list(left = left, right = right, right_weight = right_weight))
+        }
+    }
+
+    distances <- abs(support - theta_value)
+    idx <- which.min(distances)
+    list(left = idx, right = idx, right_weight = 0.0)
+}
+
+blend_theta_array <- function(arr, blend) {
+    left <- blend$left
+    right <- blend$right
+    right_weight <- blend$right_weight
+    if (length(dim(arr)) == 3L) {
+        if (identical(left, right) || right_weight <= 0.0) {
+            return(arr[, , left, drop = FALSE][, , 1L])
+        }
+        (1.0 - right_weight) * arr[, , left] + right_weight * arr[, , right]
+    } else {
+        if (identical(left, right) || right_weight <= 0.0) {
+            return(arr[left, ])
+        }
+        (1.0 - right_weight) * arr[left, ] + right_weight * arr[right, ]
+    }
+}
+
+theta_evidence_block_at <- function(theta_evidence, theta, fixed_names, iid_levels) {
+    blend <- theta_evidence_support_blend(theta_evidence, theta)
+    old_fixed_names <- dimnames(theta_evidence$H_beta_beta)[[1L]]
+    old_levels <- dimnames(theta_evidence$H_u_beta)[[1L]]
+    if (!identical(as.character(old_fixed_names), as.character(fixed_names))) {
+        stop("Cannot compose update states with changed fixed-effect columns.", call. = FALSE)
+    }
+    if (is.null(old_levels)) {
+        old_levels <- seq_len(dim(theta_evidence$H_u_beta)[[1L]])
+    }
+    old_levels <- as.character(old_levels)
+    iid_levels <- as.character(iid_levels)
+    level_match <- match(iid_levels, old_levels)
+    matched <- which(!is.na(level_match))
+    n_iid <- length(iid_levels)
+    n_fixed <- length(fixed_names)
+
+    H_u_old <- as.numeric(blend_theta_array(theta_evidence$H_u_u_diag, blend))
+    h_u_old <- as.numeric(blend_theta_array(theta_evidence$h_u, blend))
+    H_u_beta_old <- as.matrix(blend_theta_array(theta_evidence$H_u_beta, blend))
+
+    H_u <- rep(0.0, n_iid)
+    h_u <- rep(0.0, n_iid)
+    H_u_beta <- matrix(0.0, nrow = n_iid, ncol = n_fixed)
+    if (length(matched) > 0L) {
+        H_u[matched] <- H_u_old[level_match[matched]]
+        h_u[matched] <- h_u_old[level_match[matched]]
+        H_u_beta[matched, ] <- H_u_beta_old[level_match[matched], , drop = FALSE]
+    }
+    names(H_u) <- iid_levels
+    names(h_u) <- iid_levels
+    dimnames(H_u_beta) <- list(iid_levels, fixed_names)
+
+    H_beta_beta <- as.matrix(blend_theta_array(theta_evidence$H_beta_beta, blend))
+    h_beta <- as.numeric(blend_theta_array(theta_evidence$h_beta, blend))
+    dimnames(H_beta_beta) <- list(fixed_names, fixed_names)
+    names(h_beta) <- fixed_names
+    log_constant <- if (identical(blend$left, blend$right) || blend$right_weight <= 0.0) {
+        as.numeric(theta_evidence$log_constants[[blend$left]])
+    } else {
+        (1.0 - blend$right_weight) * as.numeric(theta_evidence$log_constants[[blend$left]]) +
+            blend$right_weight * as.numeric(theta_evidence$log_constants[[blend$right]])
+    }
+
+    list(
+        H_beta_beta = H_beta_beta,
+        h_beta = h_beta,
+        H_u_u_diag = H_u,
+        h_u = h_u,
+        H_u_beta = H_u_beta,
+        log_constant = log_constant
+    )
+}
+
+compose_theta_evidence <- function(previous_state, incremental_state) {
+    theta_evidence <- incremental_state$theta_evidence
+    previous_theta_evidence <- previous_state$theta_evidence
+    if (is.null(theta_evidence) || is.null(previous_theta_evidence)) {
+        stop("Composed update states require theta_evidence in both states.", call. = FALSE)
+    }
+    if (ncol(as.matrix(theta_evidence$theta)) != 1L ||
+        ncol(as.matrix(previous_theta_evidence$theta)) != 1L) {
+        stop("Composed update states currently support exactly one theta dimension.", call. = FALSE)
+    }
+
+    fixed_names <- incremental_state$fixed$names
+    iid_levels <- incremental_state$iid$levels
+    n_support <- as.integer(theta_evidence$n_support)
+    composed <- theta_evidence
+    composed$version <- 3L
+    composed$strategy <- "composed_ccd_support_modes"
+    composed$solver_status <- "not_integrated"
+
+    for (support_idx in seq_len(n_support)) {
+        old_block <- theta_evidence_block_at(
+            theta_evidence = previous_theta_evidence,
+            theta = theta_evidence$theta[support_idx, ],
+            fixed_names = fixed_names,
+            iid_levels = iid_levels
+        )
+        composed$H_beta_beta[, , support_idx] <-
+            theta_evidence$H_beta_beta[, , support_idx] + old_block$H_beta_beta
+        composed$h_beta[support_idx, ] <-
+            theta_evidence$h_beta[support_idx, ] + old_block$h_beta
+        composed$H_u_u_diag[support_idx, ] <-
+            theta_evidence$H_u_u_diag[support_idx, ] + old_block$H_u_u_diag
+        composed$h_u[support_idx, ] <-
+            theta_evidence$h_u[support_idx, ] + old_block$h_u
+        composed$H_u_beta[, , support_idx] <-
+            theta_evidence$H_u_beta[, , support_idx] + old_block$H_u_beta
+        composed$log_constants[[support_idx]] <-
+            theta_evidence$log_constants[[support_idx]] + old_block$log_constant
+    }
+
+    composed
+}
+
+compose_source_mode_evidence <- function(previous_state, incremental_state, theta_evidence) {
+    fixed_names <- incremental_state$fixed$names
+    iid_levels <- incremental_state$iid$levels
+    source_block <- theta_evidence_block_at(
+        theta_evidence = theta_evidence,
+        theta = incremental_state$theta_mode,
+        fixed_names = fixed_names,
+        iid_levels = iid_levels
+    )
+    source_block
+}
+
+validate_update_state_composition_inputs <- function(previous_state, fit, incremental_state) {
+    if (!inherits(previous_state, "rusty_update_state")) {
+        stop("previous_state must be a rusty_update_state object.", call. = FALSE)
+    }
+    if (!inherits(fit, "rusty_inla")) {
+        stop("fit must be a rusty_inla object.", call. = FALSE)
+    }
+    if (!identical(previous_state$signature$family, incremental_state$signature$family)) {
+        stop("Cannot compose update states with changed family.", call. = FALSE)
+    }
+    if (!identical(
+        as.character(previous_state$signature$fixed_names),
+        as.character(incremental_state$signature$fixed_names)
+    )) {
+        stop("Cannot compose update states with changed fixed-effect columns.", call. = FALSE)
+    }
+    if (!identical(previous_state$iid$covariate_name, incremental_state$iid$covariate_name)) {
+        stop("Cannot compose update states with changed iid covariate name.", call. = FALSE)
+    }
+    if (length(previous_state$theta_mode) != 1L || length(incremental_state$theta_mode) != 1L) {
+        stop("Composed update states currently support exactly one theta dimension.", call. = FALSE)
+    }
+}
+
+#' Compose an existing fixed+iid update state with a new fitted period
+#'
+#' This experimental Phase 8E helper carries compressed old-data evidence
+#' forward for rolling updates. It extracts likelihood evidence from `fit$data`
+#' and adds it to `previous_state`, producing a new state that represents the
+#' previous compressed evidence plus the current period's likelihood evidence.
+#'
+#' @param previous_state A `rusty_update_state` object from an earlier period.
+#' @param fit A `rusty_inla` fit for the next period, usually fitted with
+#'   `control.update = list(state = previous_state,
+#'   mode = "fixed_iid_cross_theta_evidence")`.
+#' @param min_variance Lower bound passed to `rusty_update_state()`.
+#' @export
+rusty_compose_update_state <- function(previous_state, fit, min_variance = 1e-10) {
+    incremental_state <- rusty_update_state(fit, min_variance = min_variance)
+    validate_update_state_composition_inputs(previous_state, fit, incremental_state)
+
+    theta_evidence <- compose_theta_evidence(previous_state, incremental_state)
+    source_block <- compose_source_mode_evidence(previous_state, incremental_state, theta_evidence)
+
+    composed <- incremental_state
+    composed$version <- 4L
+    composed$approximation <- "fixed_iid_cross_theta_evidence_composed"
+    composed$semantics <- fixed_iid_update_state_semantics("ccd_support_modes_not_integrated")
+    composed$semantics$theta_policy <- "composed_ccd_support_linear_1d"
+    composed$semantics$composition <- "previous_compressed_evidence_plus_current_likelihood_evidence"
+    composed$signature <- incremental_state$signature
+    composed$source$n_obs <- as.integer(previous_state$source$n_obs + incremental_state$source$n_obs)
+    composed$source$composed_from <- list(
+        previous_n_obs = as.integer(previous_state$source$n_obs),
+        incremental_n_obs = as.integer(incremental_state$source$n_obs)
+    )
+    composed$theta_evidence <- theta_evidence
+    composed$fixed$evidence_precision <- source_block$H_beta_beta
+    composed$fixed$evidence_linear <- source_block$h_beta
+    composed$iid$evidence_precision_diag <- source_block$H_u_u_diag
+    composed$iid$evidence_linear <- source_block$h_u
+    composed$iid_fixed_cross_precision <- source_block$H_u_beta
+    composed$caveats <- c(
+        "Experimental composed fixed+iid Gaussian old-data likelihood evidence approximation.",
+        "Adds previous compressed evidence to the current fit's extracted likelihood evidence.",
+        "Uses one-dimensional linear interpolation over the previous theta-evidence support.",
+        "Intended for rolling diagnostics; validate against joint refits before production use."
+    )
+    class(composed) <- "rusty_update_state"
+    composed
 }
 
 #' @export
@@ -2108,6 +2445,82 @@ append_benchmark_outputs <- function(fit, res, backend_spec, data, formula, fami
     fit
 }
 
+prepare_control_update_data <- function(data, control.update) {
+    prepared <- list(
+        data = data,
+        dormant_iid_levels = character(),
+        active_iid_levels = character(),
+        carried_iid_levels = character()
+    )
+    if (is.null(control.update) || !is.list(control.update)) {
+        return(prepared)
+    }
+
+    mode <- control.update$mode
+    if (is.null(mode)) {
+        mode <- "iid_hyper_gaussian"
+    }
+    if (!(mode %in% c(
+        "fixed_iid_gaussian_evidence",
+        "fixed_iid_cross_gaussian_evidence",
+        "fixed_iid_cross_theta_evidence"
+    ))) {
+        return(prepared)
+    }
+
+    state <- control.update$state
+    if (is.null(state)) {
+        state <- control.update$posterior_state
+    }
+    if (!inherits(state, "rusty_update_state") || is.null(state$iid)) {
+        return(prepared)
+    }
+
+    cov_name <- state$iid$covariate_name
+    if (is.null(cov_name) || !(cov_name %in% names(data))) {
+        return(prepared)
+    }
+
+    old_levels <- as.character(state$iid$levels)
+    old_levels <- old_levels[!is.na(old_levels)]
+    if (length(old_levels) == 0L) {
+        return(prepared)
+    }
+
+    cov_data <- data[[cov_name]]
+    observed_levels <- unique(as.character(cov_data[!is.na(cov_data)]))
+    dormant_levels <- setdiff(old_levels, observed_levels)
+    active_levels <- intersect(old_levels, observed_levels)
+
+    if (!is.factor(cov_data)) {
+        if (length(dormant_levels) > 0L) {
+            stop(
+                sprintf(
+                    paste(
+                        "Dormant iid level carry for '%s' requires a factor covariate.",
+                        "Convert the iid covariate to factor before fitting rolling update states."
+                    ),
+                    cov_name
+                ),
+                call. = FALSE
+            )
+        }
+        return(prepared)
+    }
+
+    current_levels <- levels(cov_data)
+    union_levels <- unique(c(old_levels, current_levels))
+    carried_levels <- setdiff(old_levels, current_levels)
+    if (!identical(current_levels, union_levels)) {
+        prepared$data[[cov_name]] <- factor(as.character(cov_data), levels = union_levels)
+    }
+
+    prepared$dormant_iid_levels <- dormant_levels
+    prepared$active_iid_levels <- active_levels
+    prepared$carried_iid_levels <- carried_levels
+    prepared
+}
+
 #' Native R Formula Interface for Rusty-INLA
 #'
 #' @param formula A robust R formula such as
@@ -2129,6 +2542,9 @@ append_benchmark_outputs <- function(fit, res, backend_spec, data, formula, fami
 #'   current Phase 8 experiments support
 #'   `list(posterior_state = rusty_posterior_state(fit), mode = "iid_hyper_gaussian")`
 #'   and `list(state = rusty_update_state(fit), mode = "fixed_iid_cross_gaussian_evidence")`.
+#'   The opt-in Phase 8D path
+#'   `mode = "fixed_iid_cross_theta_evidence"` linearly interpolates the
+#'   extracted CCD theta-evidence blocks for one-dimensional iid updates.
 #' @export
 rusty_inla <- function(
     formula,
@@ -2140,6 +2556,8 @@ rusty_inla <- function(
 ) {
     fit_start_time <- safe_elapsed_time()
     output_profile <- match.arg(output_profile)
+    update_data <- prepare_control_update_data(data, control.update)
+    data <- update_data$data
     backend_spec <- build_backend_spec(
         formula,
         data,
@@ -2154,6 +2572,11 @@ rusty_inla <- function(
         family = family,
         control.update = control.update
     )
+    if (!is.null(backend_spec$posterior_update_metadata)) {
+        backend_spec$posterior_update_metadata$dormant_iid_levels <- update_data$dormant_iid_levels
+        backend_spec$posterior_update_metadata$active_iid_levels <- update_data$active_iid_levels
+        backend_spec$posterior_update_metadata$carried_iid_levels <- update_data$carried_iid_levels
+    }
     after_spec_time <- safe_elapsed_time()
 
     # 4. Invoke the Rust Core

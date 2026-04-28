@@ -192,6 +192,10 @@ Possible update modes:
 - `"fixed_iid_cross_gaussian_evidence"`: Phase 8 experimental mode; reuse a
   `rusty_update_state()` object containing dense fixed-effect evidence,
   diagonal `iid` evidence, and the fixed-`iid` cross block
+- `"fixed_iid_cross_theta_evidence"`: Phase 8D experimental mode; reuse the
+  same state object but evaluate the fixed-plus-`iid` old evidence through the
+  compact CCD theta-evidence container with one-dimensional linear
+  interpolation
 - later maybe `"hyper"` for broader hyperparameter-state reuse
 - later maybe `"hyper_and_latent"` for restricted same-structure models
 
@@ -219,6 +223,8 @@ The fixed-plus-`iid` evidence version supports only:
 - diagonal `iid` level Gaussian old-data evidence
 - fixed-`iid` cross Gaussian old-data evidence in the cross-block mode
 - new observed `iid` levels, expanded with zero old evidence
+- old factor `iid` levels with zero current exposure, carried forward as
+  dormant latent parameters with their compressed old-data evidence
 - original model priors in the new fit, plus old-data evidence factors
 - explicit state semantics:
   `old_data_likelihood_evidence`, `not_posterior_as_prior`, and
@@ -230,6 +236,7 @@ These versions should not support:
 - changing latent topology
 - changing graph structure
 - changing the meaning of fixed-effect columns
+- dormant-level carry for non-factor `iid` indices
 - arbitrary posterior-as-prior updates for the full latent field
 - joint hyperparameter covariance beyond the one-dimensional `iid` precision
   approximation
@@ -297,9 +304,19 @@ Current experimental implementation:
 - the first Phase 8C extraction slice adds `state$theta_evidence`, a compact
   container over the old CCD/theta support with normalized weights, log
   marginal likelihoods, local Gaussian log constants, and the fixed/`iid`
-  evidence blocks; it is marked `solver_status = "not_integrated"` because
-  update fits still use the Phase 8A source-mode fields until the
-  theta-dependent objective lands
+  evidence blocks; the stored object remains marked
+  `solver_status = "not_integrated"` because it is an extracted state, while
+  the Phase 8D update-fit metadata records `"linear_1d_integrated"` when
+  `mode = "fixed_iid_cross_theta_evidence"` consumes it
+- the first Phase 8D solver path is intentionally narrow: exactly one theta
+  dimension, one `iid` latent block, and linear interpolation across CCD
+  support points
+- `rusty_compose_update_state(previous_state, fit)` is the first Phase 8E
+  rolling-update operator. It extracts current-period likelihood evidence from
+  `fit`, interpolates the previous theta-evidence state onto the current theta
+  support, and adds the old and new Gaussian evidence blocks support-by-support.
+  This is the supported way to carry compressed evidence forward without a
+  joint refit.
 
 ### Phase 4: restricted latent-state reuse
 
@@ -460,9 +477,13 @@ So the recommended release posture is:
    validation, and docs all say the same thing.
 3. Phase 8C: extract theta-mixture evidence blocks over the old CCD/theta
    support.
-4. Phase 8D: add a theta-dependent objective with old-evidence log constants.
+4. Phase 8D: add a theta-dependent objective with old-evidence log constants;
+   first candidate is the one-dimensional `fixed_iid_cross_theta_evidence`
+   path.
 5. Phase 8E: validate theta-mixture updates against joint refits, including
    means, SDs, theta marginals, tails, time, and memory.
+   The first candidate also adds explicit state composition for rolling
+   updates.
 6. Phase 8F: defer broader latent structures until the one-`iid` path is
    benchmark-clean.
 

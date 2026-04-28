@@ -100,9 +100,10 @@ Expected work:
 - Phase 8B: formalize that reusable update states store old-data evidence, not
   posterior objects blindly reused as priors
 - Phase 8C: extract theta-mixture old-data evidence over CCD/theta support;
-  first slice stores compact CCD-support evidence in a `theta_evidence`
-  container and leaves solver integration for Phase 8D
-- Phase 8D: add a theta-dependent old-evidence objective with log constants
+  compact CCD-support evidence is stored in a `theta_evidence` container
+- Phase 8D: add a theta-dependent old-evidence objective with log constants;
+  first candidate is the one-dimensional `fixed_iid_cross_theta_evidence`
+  update path
 - Phase 8E: validate against joint refits on fixed effects, random effects,
   fitted values, theta marginals, tails, time, and memory
 - Phase 8F: defer broader latent structures (`rw1`, `rw2`, `ar1`, `ar2`) until
@@ -117,6 +118,9 @@ Expected work:
   dense fixed Gaussian evidence plus diagonal `iid` Gaussian evidence and the
   fixed-`iid` cross block, with new levels expanded as zero old evidence and
   posterior SD ratios checked against joint refits
+- carry factor `iid` levels from the update state through zero-exposure
+  periods as dormant latent parameters; keep non-factor dormant indices out of
+  scope until the iid path is benchmark-clean
 - keep the diagonal fixed-plus-`iid` evidence mode as a diagnostic comparator
   only; the cross-block mode is the mergeable Phase 8 target
 - define how model defaults are surfaced, overridden, serialized, and validated

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::diagnostics::LaplacePhase;
 use crate::error::InlaError;
-use crate::inference::InlaModel;
+use crate::inference::{InlaModel, SelectedStateEvidence};
 use crate::problem::Problem;
 
 pub mod ccd;
@@ -170,25 +170,21 @@ fn gaussian_integrated_data_term(
     )
 }
 
-fn has_state_evidence(model: &InlaModel<'_>) -> bool {
-    model.fixed_state_precision.is_some()
-        || model.fixed_state_linear.is_some()
-        || model.latent_state_precision_diag.is_some()
-        || model.latent_state_linear.is_some()
-        || model.latent_fixed_state_precision.is_some()
+fn has_state_evidence(evidence: &SelectedStateEvidence) -> bool {
+    evidence.has_any()
 }
 
-fn state_log_factor(model: &InlaModel<'_>, x: &[f64], beta: &[f64]) -> f64 {
-    let mut value = 0.0_f64;
+fn state_log_factor(evidence: &SelectedStateEvidence, x: &[f64], beta: &[f64]) -> f64 {
+    let mut value = evidence.log_constant;
 
-    if let Some(linear) = model.latent_state_linear {
+    if let Some(linear) = evidence.latent_linear.as_deref() {
         value += x
             .iter()
             .zip(linear.iter())
             .map(|(x_i, h_i)| x_i * h_i)
             .sum::<f64>();
     }
-    if let Some(precision) = model.latent_state_precision_diag {
+    if let Some(precision) = evidence.latent_precision_diag.as_deref() {
         value -= 0.5
             * x.iter()
                 .zip(precision.iter())
@@ -196,15 +192,15 @@ fn state_log_factor(model: &InlaModel<'_>, x: &[f64], beta: &[f64]) -> f64 {
                 .sum::<f64>();
     }
 
-    if let Some(linear) = model.fixed_state_linear {
+    if let Some(linear) = evidence.fixed_linear.as_deref() {
         value += beta
             .iter()
             .zip(linear.iter())
             .map(|(beta_i, h_i)| beta_i * h_i)
             .sum::<f64>();
     }
-    if let Some(precision) = model.fixed_state_precision {
-        let k = model.n_fixed;
+    if let Some(precision) = evidence.fixed_precision.as_deref() {
+        let k = beta.len();
         let mut qf = 0.0_f64;
         for j1 in 0..k {
             for j2 in 0..k {
@@ -214,9 +210,9 @@ fn state_log_factor(model: &InlaModel<'_>, x: &[f64], beta: &[f64]) -> f64 {
         value -= 0.5 * qf;
     }
 
-    if let Some(precision) = model.latent_fixed_state_precision {
-        let n = model.n_latent;
-        let k = model.n_fixed;
+    if let Some(precision) = evidence.latent_fixed_precision.as_deref() {
+        let n = x.len();
+        let k = beta.len();
         let mut qf = 0.0_f64;
         for j in 0..k {
             for i in 0..n {
@@ -241,6 +237,7 @@ pub(crate) fn laplace_eval(
     let n_model = model.qfunc.n_hyperparams();
     let theta_model = &theta[..n_model];
     let theta_lik = &theta[n_model..];
+    let state_evidence = model.selected_state_evidence(theta);
 
     let (x_hat, log_det_aug, eta_for_lik, beta_out, schur_s) = if model.n_fixed > 0 {
         let (beta, x, ld, s) = problem.find_mode_with_fixed_effects_logdet(
@@ -296,9 +293,9 @@ pub(crate) fn laplace_eval(
     let final_log_det_q = log_det_q + fixed_log_det_penalty;
     let final_log_det_aug = log_det_aug + schur_complement_adjustment;
     let final_q_form = latent_q_form + fixed_q_form;
-    let state_log_factor = state_log_factor(model, &x_hat, &beta_out);
+    let state_log_factor = state_log_factor(&state_evidence, &x_hat, &beta_out);
 
-    let gaussian_data_term = if has_state_evidence(model) {
+    let gaussian_data_term = if has_state_evidence(&state_evidence) {
         None
     } else {
         gaussian_integrated_data_term(model, theta_lik, &eta_for_lik)
@@ -864,6 +861,7 @@ mod tests {
             latent_state_precision_diag: None,
             latent_state_linear: None,
             latent_fixed_state_precision: None,
+            theta_state_evidence: None,
         };
 
         let eta = build_linear_predictor(&model, &x, &beta).unwrap();
@@ -907,6 +905,7 @@ mod tests {
             latent_state_precision_diag: None,
             latent_state_linear: None,
             latent_fixed_state_precision: None,
+            theta_state_evidence: None,
         };
 
         let mut problem = Problem::new(&model);

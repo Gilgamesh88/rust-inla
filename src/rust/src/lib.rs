@@ -4,7 +4,7 @@
 // expected by the current R integration.
 
 use extendr_api::prelude::*;
-use inla_core::inference::{InlaEngine, InlaModel, InlaParams};
+use inla_core::inference::{InlaEngine, InlaModel, InlaParams, ThetaStateEvidence};
 use inla_core::likelihood::{
     GammaLikelihood, GaussianLikelihood, LogLikelihood, PoissonLikelihood, TweedieLikelihood,
     ZipLikelihood,
@@ -47,6 +47,14 @@ struct BackendSpec {
     latent_state_precision_diag: Option<Vec<f64>>,
     latent_state_linear: Option<Vec<f64>>,
     latent_fixed_state_precision: Option<Vec<f64>>,
+    theta_state_n_support: Option<usize>,
+    theta_state_support: Option<Vec<f64>>,
+    theta_state_fixed_precision: Option<Vec<f64>>,
+    theta_state_fixed_linear: Option<Vec<f64>>,
+    theta_state_latent_precision_diag: Option<Vec<f64>>,
+    theta_state_latent_linear: Option<Vec<f64>>,
+    theta_state_latent_fixed_precision: Option<Vec<f64>>,
+    theta_state_log_constant: Option<Vec<f64>>,
     optimizer_max_evals: Option<usize>,
     skip_ccd: Option<bool>,
 }
@@ -595,6 +603,94 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
         }
     }
 
+    let theta_state_present = [
+        spec.theta_state_n_support.is_some(),
+        spec.theta_state_support.is_some(),
+        spec.theta_state_fixed_precision.is_some(),
+        spec.theta_state_fixed_linear.is_some(),
+        spec.theta_state_latent_precision_diag.is_some(),
+        spec.theta_state_latent_linear.is_some(),
+        spec.theta_state_latent_fixed_precision.is_some(),
+        spec.theta_state_log_constant.is_some(),
+    ];
+    if theta_state_present.iter().any(|present| *present) {
+        if !theta_state_present.iter().all(|present| *present) {
+            return Err(
+                "theta state evidence requires all theta_state_* fields together".to_string(),
+            );
+        }
+        let n_support = spec.theta_state_n_support.unwrap_or(0);
+        if n_support == 0 {
+            return Err("theta state evidence requires at least one support point".to_string());
+        }
+        let n_theta = expected_theta_len(spec);
+        if n_theta != 1 {
+            return Err(
+                "theta-dependent state evidence currently supports exactly one theta dimension"
+                    .to_string(),
+            );
+        }
+        if spec.latent_blocks.len() != 1 || spec.latent_blocks[0].model_type != "iid" {
+            return Err(
+                "theta-dependent state evidence currently supports exactly one iid latent block"
+                    .to_string(),
+            );
+        }
+
+        let support = spec.theta_state_support.as_ref().unwrap();
+        let fixed_precision = spec.theta_state_fixed_precision.as_ref().unwrap();
+        let fixed_linear = spec.theta_state_fixed_linear.as_ref().unwrap();
+        let latent_precision = spec.theta_state_latent_precision_diag.as_ref().unwrap();
+        let latent_linear = spec.theta_state_latent_linear.as_ref().unwrap();
+        let latent_fixed = spec.theta_state_latent_fixed_precision.as_ref().unwrap();
+        let log_constant = spec.theta_state_log_constant.as_ref().unwrap();
+
+        let expected_support = n_support * n_theta;
+        let expected_fixed_precision = n_support * spec.n_fixed * spec.n_fixed;
+        let expected_fixed_linear = n_support * spec.n_fixed;
+        let expected_latent = n_support * spec.n_latent;
+        let expected_latent_fixed = n_support * spec.n_latent * spec.n_fixed;
+        if support.len() != expected_support
+            || fixed_precision.len() != expected_fixed_precision
+            || fixed_linear.len() != expected_fixed_linear
+            || latent_precision.len() != expected_latent
+            || latent_linear.len() != expected_latent
+            || latent_fixed.len() != expected_latent_fixed
+            || log_constant.len() != n_support
+        {
+            return Err(
+                "theta state evidence dimensions do not match support, fixed, and iid sizes"
+                    .to_string(),
+            );
+        }
+        if support.iter().any(|value| !value.is_finite())
+            || fixed_precision.iter().any(|value| !value.is_finite())
+            || fixed_linear.iter().any(|value| !value.is_finite())
+            || latent_precision
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+            || latent_linear.iter().any(|value| !value.is_finite())
+            || latent_fixed.iter().any(|value| !value.is_finite())
+            || log_constant.iter().any(|value| !value.is_finite())
+        {
+            return Err(
+                "theta state evidence must contain finite values and non-negative iid precision"
+                    .to_string(),
+            );
+        }
+        for support_idx in 0..n_support {
+            let offset = support_idx * spec.n_fixed * spec.n_fixed;
+            for j in 0..spec.n_fixed {
+                if fixed_precision[offset + j * spec.n_fixed + j] < 0.0 {
+                    return Err(
+                        "theta state fixed precision must have non-negative diagonal entries"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
     if let Some(latent_init) = &spec.latent_init {
         if latent_init.len() != spec.n_latent {
             return Err(format!(
@@ -707,6 +803,46 @@ fn parse_backend_spec(spec_arg: Robj) -> BridgeResult<BackendSpec> {
             .map(|obj| parse_optional_real_vec(obj, "latent_fixed_state_precision"))
             .transpose()?
             .flatten(),
+        theta_state_n_support: spec_map
+            .get("theta_state_n_support")
+            .map(|obj| parse_optional_usize(obj, "theta_state_n_support"))
+            .transpose()?
+            .flatten(),
+        theta_state_support: spec_map
+            .get("theta_state_support")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_support"))
+            .transpose()?
+            .flatten(),
+        theta_state_fixed_precision: spec_map
+            .get("theta_state_fixed_precision")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_fixed_precision"))
+            .transpose()?
+            .flatten(),
+        theta_state_fixed_linear: spec_map
+            .get("theta_state_fixed_linear")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_fixed_linear"))
+            .transpose()?
+            .flatten(),
+        theta_state_latent_precision_diag: spec_map
+            .get("theta_state_latent_precision_diag")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_latent_precision_diag"))
+            .transpose()?
+            .flatten(),
+        theta_state_latent_linear: spec_map
+            .get("theta_state_latent_linear")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_latent_linear"))
+            .transpose()?
+            .flatten(),
+        theta_state_latent_fixed_precision: spec_map
+            .get("theta_state_latent_fixed_precision")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_latent_fixed_precision"))
+            .transpose()?
+            .flatten(),
+        theta_state_log_constant: spec_map
+            .get("theta_state_log_constant")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_log_constant"))
+            .transpose()?
+            .flatten(),
         optimizer_max_evals: spec_map
             .get("optimizer_max_evals")
             .map(|obj| parse_optional_usize(obj, "optimizer_max_evals"))
@@ -770,6 +906,25 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
         theta_init = theta_init_override;
     }
 
+    let theta_state_evidence = spec
+        .theta_state_n_support
+        .map(|n_support| ThetaStateEvidence {
+            n_support,
+            support: spec.theta_state_support.as_deref().unwrap_or(&[]),
+            fixed_precision: spec.theta_state_fixed_precision.as_deref().unwrap_or(&[]),
+            fixed_linear: spec.theta_state_fixed_linear.as_deref().unwrap_or(&[]),
+            latent_precision_diag: spec
+                .theta_state_latent_precision_diag
+                .as_deref()
+                .unwrap_or(&[]),
+            latent_linear: spec.theta_state_latent_linear.as_deref().unwrap_or(&[]),
+            latent_fixed_precision: spec
+                .theta_state_latent_fixed_precision
+                .as_deref()
+                .unwrap_or(&[]),
+            log_constant: spec.theta_state_log_constant.as_deref().unwrap_or(&[]),
+        });
+
     let model = InlaModel {
         qfunc: qfunc.as_ref(),
         likelihood: lik.as_ref(),
@@ -791,6 +946,7 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
         latent_state_precision_diag: spec.latent_state_precision_diag.as_deref(),
         latent_state_linear: spec.latent_state_linear.as_deref(),
         latent_fixed_state_precision: spec.latent_fixed_state_precision.as_deref(),
+        theta_state_evidence,
     };
 
     let mut params = InlaParams::default();

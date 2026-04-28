@@ -110,6 +110,15 @@ new_evidence_cross <- timed_fit(rusty_inla(
         mode = "fixed_iid_cross_gaussian_evidence"
     )
 ))
+new_evidence_theta <- timed_fit(rusty_inla(
+    formula,
+    data = new_data,
+    family = "poisson",
+    control.update = list(
+        state = evidence_state,
+        mode = "fixed_iid_cross_theta_evidence"
+    )
+))
 
 old_fixed <- named_column(old$value$summary.fixed, "mean")
 old_random <- named_column(old$value$summary.random$VehBrand, "mean")
@@ -164,6 +173,7 @@ theta_default <- new_default$value$mode$theta[[1L]]
 theta_updated <- new_updated$value$mode$theta[[1L]]
 theta_evidence_diag <- new_evidence_diag$value$mode$theta[[1L]]
 theta_evidence_cross <- new_evidence_cross$value$mode$theta[[1L]]
+theta_evidence_theta <- new_evidence_theta$value$mode$theta[[1L]]
 theta_fixed_mean_offset <- new_fixed_mean_offset$value$mode$theta[[1L]]
 theta_random_mean_offset <- new_random_mean_offset$value$mode$theta[[1L]]
 theta_state_random_mean_offset <- new_state_random_mean_offset$value$mode$theta[[1L]]
@@ -208,6 +218,7 @@ metrics <- data.frame(
         "new_updated",
         "new_fixed_iid_diag_evidence",
         "new_fixed_iid_cross_evidence",
+        "new_fixed_iid_theta_evidence",
         "new_fixed_mean_offset",
         "new_random_mean_offset",
         "new_state_random_mean_offset",
@@ -220,6 +231,7 @@ metrics <- data.frame(
         new_updated$elapsed,
         new_evidence_diag$elapsed,
         new_evidence_cross$elapsed,
+        new_evidence_theta$elapsed,
         new_fixed_mean_offset$elapsed,
         new_random_mean_offset$elapsed,
         new_state_random_mean_offset$elapsed,
@@ -232,6 +244,7 @@ metrics <- data.frame(
         theta_updated,
         theta_evidence_diag,
         theta_evidence_cross,
+        theta_evidence_theta,
         theta_fixed_mean_offset,
         theta_random_mean_offset,
         theta_state_random_mean_offset,
@@ -244,6 +257,7 @@ metrics <- data.frame(
         theta_updated,
         theta_evidence_diag,
         theta_evidence_cross,
+        theta_evidence_theta,
         theta_fixed_mean_offset,
         theta_random_mean_offset,
         theta_state_random_mean_offset,
@@ -256,6 +270,7 @@ metrics <- data.frame(
         abs(theta_updated - theta_joint),
         abs(theta_evidence_diag - theta_joint),
         abs(theta_evidence_cross - theta_joint),
+        abs(theta_evidence_theta - theta_joint),
         abs(theta_fixed_mean_offset - theta_joint),
         abs(theta_random_mean_offset - theta_joint),
         abs(theta_state_random_mean_offset - theta_joint),
@@ -268,6 +283,7 @@ metrics <- data.frame(
         abs(effective_intercept(new_updated$value) - joint_intercept),
         abs(effective_intercept(new_evidence_diag$value) - joint_intercept),
         abs(effective_intercept(new_evidence_cross$value) - joint_intercept),
+        abs(effective_intercept(new_evidence_theta$value) - joint_intercept),
         abs(effective_intercept(new_fixed_mean_offset$value, old_intercept) - joint_intercept),
         abs(effective_intercept(new_random_mean_offset$value) - joint_intercept),
         abs(effective_intercept(new_state_random_mean_offset$value) - joint_intercept),
@@ -280,6 +296,7 @@ metrics <- data.frame(
         max_abs_named_diff(effective_random(new_updated$value), random_joint),
         max_abs_named_diff(effective_random(new_evidence_diag$value), random_joint),
         max_abs_named_diff(effective_random(new_evidence_cross$value), random_joint),
+        max_abs_named_diff(effective_random(new_evidence_theta$value), random_joint),
         max_abs_named_diff(effective_random(new_fixed_mean_offset$value), random_joint),
         max_abs_named_diff(effective_random(new_random_mean_offset$value, old_random), random_joint),
         max_abs_named_diff(effective_random(new_state_random_mean_offset$value, old_random), random_joint),
@@ -292,6 +309,7 @@ metrics <- data.frame(
         min_named_ratio(named_column(new_updated$value$summary.fixed, "sd"), fixed_joint_sd),
         min_named_ratio(named_column(new_evidence_diag$value$summary.fixed, "sd"), fixed_joint_sd),
         min_named_ratio(named_column(new_evidence_cross$value$summary.fixed, "sd"), fixed_joint_sd),
+        min_named_ratio(named_column(new_evidence_theta$value$summary.fixed, "sd"), fixed_joint_sd),
         min_named_ratio(named_column(new_fixed_mean_offset$value$summary.fixed, "sd"), fixed_joint_sd),
         min_named_ratio(named_column(new_random_mean_offset$value$summary.fixed, "sd"), fixed_joint_sd),
         min_named_ratio(named_column(new_state_random_mean_offset$value$summary.fixed, "sd"), fixed_joint_sd),
@@ -304,6 +322,7 @@ metrics <- data.frame(
         min_named_ratio(named_column(new_updated$value$summary.random$VehBrand, "sd"), random_joint_sd),
         min_named_ratio(named_column(new_evidence_diag$value$summary.random$VehBrand, "sd"), random_joint_sd),
         min_named_ratio(named_column(new_evidence_cross$value$summary.random$VehBrand, "sd"), random_joint_sd),
+        min_named_ratio(named_column(new_evidence_theta$value$summary.random$VehBrand, "sd"), random_joint_sd),
         min_named_ratio(named_column(new_fixed_mean_offset$value$summary.random$VehBrand, "sd"), random_joint_sd),
         min_named_ratio(named_column(new_random_mean_offset$value$summary.random$VehBrand, "sd"), random_joint_sd),
         min_named_ratio(named_column(new_state_random_mean_offset$value$summary.random$VehBrand, "sd"), random_joint_sd),
@@ -316,6 +335,7 @@ metrics <- data.frame(
         max_fitted_rel_diff(new_updated$value, joint$value, joint_new_rows),
         max_fitted_rel_diff(new_evidence_diag$value, joint$value, joint_new_rows),
         max_fitted_rel_diff(new_evidence_cross$value, joint$value, joint_new_rows),
+        max_fitted_rel_diff(new_evidence_theta$value, joint$value, joint_new_rows),
         max_fitted_rel_diff(new_fixed_mean_offset$value, joint$value, joint_new_rows),
         max_fitted_rel_diff(new_random_mean_offset$value, joint$value, joint_new_rows),
         max_fitted_rel_diff(new_state_random_mean_offset$value, joint$value, joint_new_rows),
@@ -343,7 +363,7 @@ cat(sprintf(
 cat(sprintf(
     paste(
         "Fitted new-row max rel diff vs joint:",
-        "default %.6f -> theta-updated %.6f -> diag-evidence %.6f -> cross-evidence %.6f -> fixed-mean %.6f ->",
+        "default %.6f -> theta-updated %.6f -> diag-evidence %.6f -> cross-evidence %.6f -> theta-evidence %.6f -> fixed-mean %.6f ->",
         "random-mean %.6f -> state+random-mean %.6f -> full-mean %.6f\n"
     ),
     metrics$fitted_new_max_rel_to_joint[[2L]],
@@ -353,11 +373,13 @@ cat(sprintf(
     metrics$fitted_new_max_rel_to_joint[[6L]],
     metrics$fitted_new_max_rel_to_joint[[7L]],
     metrics$fitted_new_max_rel_to_joint[[8L]],
-    metrics$fitted_new_max_rel_to_joint[[9L]]
+    metrics$fitted_new_max_rel_to_joint[[9L]],
+    metrics$fitted_new_max_rel_to_joint[[10L]]
 ))
 cat(
     paste(
         "fixed+iid-cross-evidence is the reusable Gaussian evidence experiment.",
+        "fixed+iid-theta-evidence linearly interpolates the CCD evidence blocks and is the Phase 8D candidate.",
         "Mean-offset rows are diagnostics only.",
         "fixed-mean carries the old intercept as a point offset;",
         "random-mean carries old VehBrand means as point offsets;",
