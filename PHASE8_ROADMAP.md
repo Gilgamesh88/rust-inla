@@ -82,6 +82,8 @@ validation cleanup.
 
 ## Phase 8C: theta-mixture evidence extraction
 
+Status: active; compact CCD-support extraction started.
+
 Goal: move from one local old-data evidence block at `theta_opt` to a small
 mixture of old-data evidence blocks over the old CCD/theta support.
 
@@ -100,11 +102,40 @@ log_constant(theta_s)
 
 Work:
 
+- current slice stores compact old-data evidence blocks in an explicit
+  `theta_evidence` container over the old CCD/theta support
+- each support point records normalized weight, log marginal likelihood,
+  log weight, and the local Gaussian log constant
+- the slice is not solver-integrated; update fits still consume the
+  source-mode evidence fields used by Phase 8A until Phase 8D
 - extract evidence blocks at supported theta points
 - store weights and log constants
 - keep memory bounded for large iid blocks
 - preserve born-level expansion rules
 - validate that the single-point mixture reproduces Phase 8A behavior
+
+Current 8C checkpoint candidate:
+
+- `rusty_update_state()` emits a version-3 state with
+  `semantics$theta_evidence_policy = "ccd_support_modes_not_integrated"` when
+  CCD support is available
+- `state$theta_evidence` stores:
+  - `theta`
+  - `weights`
+  - `log_weights`
+  - `log_unnormalized_weights`
+  - `log_mlik`
+  - `log_constants`
+  - `H_beta_beta`
+  - `h_beta`
+  - `H_u_u_diag`
+  - `h_u`
+  - `H_u_beta`
+- `state$theta_evidence$solver_status = "not_integrated"` is intentional until
+  Phase 8D adds the theta-dependent objective
+- `tests/posterior-state-theta-evidence-shape.R` checks the container shape and
+  verifies that removing the container leaves the active source-mode update
+  numerically unchanged
 
 Expected size: medium.
 

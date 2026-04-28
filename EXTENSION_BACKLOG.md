@@ -99,7 +99,9 @@ Expected work:
   keep benchmark/accuracy gates attached to every commit candidate
 - Phase 8B: formalize that reusable update states store old-data evidence, not
   posterior objects blindly reused as priors
-- Phase 8C: extract theta-mixture old-data evidence over CCD/theta support
+- Phase 8C: extract theta-mixture old-data evidence over CCD/theta support;
+  first slice stores compact CCD-support evidence in a `theta_evidence`
+  container and leaves solver integration for Phase 8D
 - Phase 8D: add a theta-dependent old-evidence objective with log constants
 - Phase 8E: validate against joint refits on fixed effects, random effects,
   fitted values, theta marginals, tails, time, and memory

@@ -68,6 +68,12 @@ pub struct InlaResult {
     pub ccd_log_mlik: Vec<f64>,
     pub ccd_log_weight: Vec<f64>,
     pub ccd_hessian_eigenvalues: Vec<f64>,
+    pub theta_evidence_fixed_precision: Vec<f64>,
+    pub theta_evidence_fixed_linear: Vec<f64>,
+    pub theta_evidence_latent_precision_diag: Vec<f64>,
+    pub theta_evidence_latent_linear: Vec<f64>,
+    pub theta_evidence_latent_fixed_precision: Vec<f64>,
+    pub theta_evidence_log_constant: Vec<f64>,
     pub posterior_mean: Vec<f64>,
     pub latent_var_theta_opt: Vec<f64>,
     pub latent_var_within_theta: Vec<f64>,
@@ -84,6 +90,149 @@ pub struct InlaResult {
 }
 
 pub struct InlaEngine;
+
+fn build_a_rows(model: &InlaModel<'_>) -> Vec<Vec<(usize, f64)>> {
+    let mut a_rows = vec![vec![]; model.y.len()];
+    if let (Some(a_i), Some(a_j), Some(a_x)) = (model.a_i, model.a_j, model.a_x) {
+        for idx in 0..a_i.len() {
+            a_rows[a_i[idx]].push((a_j[idx], a_x[idx]));
+        }
+    } else {
+        for (i, row) in a_rows
+            .iter_mut()
+            .enumerate()
+            .take(model.y.len().min(model.n_latent))
+        {
+            row.push((i, 1.0));
+        }
+    }
+    a_rows
+}
+
+fn linear_predictor_for_state(
+    model: &InlaModel<'_>,
+    a_rows: &[Vec<(usize, f64)>],
+    x: &[f64],
+    beta: &[f64],
+) -> Vec<f64> {
+    let n_data = model.y.len();
+    let mut eta = vec![0.0_f64; n_data];
+
+    if let Some(fixed_matrix) = model.fixed_matrix {
+        for (j, beta_j) in beta.iter().enumerate().take(model.n_fixed) {
+            for i in 0..n_data {
+                eta[i] += fixed_matrix[i + j * n_data] * *beta_j;
+            }
+        }
+    }
+
+    for i in 0..n_data {
+        for &(latent_idx, ax) in &a_rows[i] {
+            eta[i] += ax * x[latent_idx];
+        }
+    }
+
+    if let Some(offset) = model.offset {
+        for (eta_i, offset_i) in eta.iter_mut().zip(offset.iter()) {
+            *eta_i += *offset_i;
+        }
+    }
+
+    eta
+}
+
+struct ThetaEvidenceBlocks {
+    fixed_precision: Vec<f64>,
+    fixed_linear: Vec<f64>,
+    latent_precision_diag: Vec<f64>,
+    latent_linear: Vec<f64>,
+    latent_fixed_precision: Vec<f64>,
+    log_constant: f64,
+}
+
+fn theta_evidence_blocks(
+    model: &InlaModel<'_>,
+    a_rows: &[Vec<(usize, f64)>],
+    theta: &[f64],
+    x: &[f64],
+    beta: &[f64],
+) -> ThetaEvidenceBlocks {
+    let n_model = model.qfunc.n_hyperparams();
+    let theta_lik = &theta[n_model..];
+    let n_data = model.y.len();
+    let n_latent = model.n_latent;
+    let n_fixed = model.n_fixed;
+    let eta = linear_predictor_for_state(model, a_rows, x, beta);
+
+    let mut logll = vec![0.0_f64; n_data];
+    model
+        .likelihood
+        .evaluate(&mut logll, &eta, model.y, theta_lik);
+
+    let mut grad = vec![0.0_f64; n_data];
+    let mut curvature = vec![0.0_f64; n_data];
+    model
+        .likelihood
+        .gradient_and_curvature(&mut grad, &mut curvature, &eta, model.y, theta_lik);
+    for curv_i in &mut curvature {
+        *curv_i = (*curv_i).max(1e-6);
+    }
+
+    let mut fixed_precision = vec![0.0_f64; n_fixed * n_fixed];
+    let mut fixed_linear = vec![0.0_f64; n_fixed];
+    let mut latent_precision_diag = vec![0.0_f64; n_latent];
+    let mut latent_linear = vec![0.0_f64; n_latent];
+    let mut latent_fixed_precision = vec![0.0_f64; n_latent * n_fixed];
+    let mut weighted_pseudo = vec![0.0_f64; n_data];
+    let mut log_constant = 0.0_f64;
+
+    for i in 0..n_data {
+        let offset_i = model.offset.map_or(0.0_f64, |offset| offset[i]);
+        let centered_mode = eta[i] - offset_i;
+        weighted_pseudo[i] = curvature[i] * centered_mode + grad[i];
+        log_constant +=
+            logll[i] - grad[i] * centered_mode - 0.5 * curvature[i] * centered_mode * centered_mode;
+    }
+
+    if let Some(fixed_matrix) = model.fixed_matrix {
+        for j1 in 0..n_fixed {
+            for i in 0..n_data {
+                fixed_linear[j1] += fixed_matrix[i + j1 * n_data] * weighted_pseudo[i];
+            }
+            for j2 in 0..n_fixed {
+                let mut value = 0.0_f64;
+                for i in 0..n_data {
+                    value += fixed_matrix[i + j1 * n_data]
+                        * curvature[i]
+                        * fixed_matrix[i + j2 * n_data];
+                }
+                fixed_precision[j1 * n_fixed + j2] = value;
+            }
+        }
+    }
+
+    for i in 0..n_data {
+        for &(latent_idx, ax) in &a_rows[i] {
+            latent_precision_diag[latent_idx] += ax * curvature[i] * ax;
+            latent_linear[latent_idx] += ax * weighted_pseudo[i];
+            if let Some(fixed_matrix) = model.fixed_matrix {
+                for j in 0..n_fixed {
+                    latent_fixed_precision[latent_idx + j * n_latent] +=
+                        ax * curvature[i] * fixed_matrix[i + j * n_data];
+                }
+            }
+        }
+    }
+
+    ThetaEvidenceBlocks {
+        fixed_precision,
+        fixed_linear,
+        latent_precision_diag,
+        latent_linear,
+        latent_fixed_precision,
+        log_constant,
+    }
+}
 
 impl InlaEngine {
     pub fn run(model: &InlaModel<'_>, params: &InlaParams) -> Result<InlaResult, InlaError> {
@@ -158,6 +307,13 @@ impl InlaEngine {
         let mut mixed_latent_fixed_cov_inner = vec![0.0_f64; n * k];
         let mut next_x_warm = opt.mode_x.clone();
         let mut next_beta_warm = opt.mode_beta.clone();
+        let a_rows = build_a_rows(model);
+        let mut theta_evidence_fixed_precision = Vec::new();
+        let mut theta_evidence_fixed_linear = Vec::new();
+        let mut theta_evidence_latent_precision_diag = Vec::new();
+        let mut theta_evidence_latent_linear = Vec::new();
+        let mut theta_evidence_latent_fixed_precision = Vec::new();
+        let mut theta_evidence_log_constant = Vec::new();
 
         for (pt_idx, pt) in ccd_grid.points.iter().enumerate() {
             let theta_k = &pt.theta;
@@ -217,6 +373,17 @@ impl InlaEngine {
 
             next_x_warm = mean_k.clone();
             next_beta_warm = fixed_k.clone();
+
+            if n > 0 && k > 0 {
+                let evidence =
+                    theta_evidence_blocks(model, &a_rows, theta_k, &mean_k, &fixed_k);
+                theta_evidence_fixed_precision.extend(evidence.fixed_precision);
+                theta_evidence_fixed_linear.extend(evidence.fixed_linear);
+                theta_evidence_latent_precision_diag.extend(evidence.latent_precision_diag);
+                theta_evidence_latent_linear.extend(evidence.latent_linear);
+                theta_evidence_latent_fixed_precision.extend(evidence.latent_fixed_precision);
+                theta_evidence_log_constant.push(evidence.log_constant);
+            }
 
             for (j1, fixed_value) in fixed_k.iter().enumerate().take(k) {
                 mixed_fixed_mean[j1] += weight * *fixed_value;
@@ -287,17 +454,6 @@ impl InlaEngine {
             }
             // Assume the first fixed effect is the global intercept.
             mixed_fixed_mean[0] += mean_x;
-        }
-
-        let mut a_rows = vec![vec![]; model.y.len()];
-        if let (Some(a_i), Some(a_j), Some(a_x)) = (model.a_i, model.a_j, model.a_x) {
-            for k in 0..a_i.len() {
-                a_rows[a_i[k]].push((a_j[k], a_x[k]));
-            }
-        } else {
-            for (i, row) in a_rows.iter_mut().enumerate().take(model.y.len().min(n)) {
-                row.push((i, 1.0));
-            }
         }
 
         let theta_lik = &theta_opt[n_model..];
@@ -449,6 +605,12 @@ impl InlaEngine {
             ccd_log_mlik,
             ccd_log_weight,
             ccd_hessian_eigenvalues: ccd_grid.hessian_eigenvalues,
+            theta_evidence_fixed_precision,
+            theta_evidence_fixed_linear,
+            theta_evidence_latent_precision_diag,
+            theta_evidence_latent_linear,
+            theta_evidence_latent_fixed_precision,
+            theta_evidence_log_constant,
             posterior_mean,
             latent_var_theta_opt,
             latent_var_within_theta: mixed_var_inner,

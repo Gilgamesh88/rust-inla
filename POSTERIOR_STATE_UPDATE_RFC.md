@@ -294,6 +294,12 @@ Current experimental implementation:
 - signature validation reports the concrete mismatch, such as changed family,
   changed fixed-effect columns, changed iid covariate name, or non-`iid` latent
   model
+- the first Phase 8C extraction slice adds `state$theta_evidence`, a compact
+  container over the old CCD/theta support with normalized weights, log
+  marginal likelihoods, local Gaussian log constants, and the fixed/`iid`
+  evidence blocks; it is marked `solver_status = "not_integrated"` because
+  update fits still use the Phase 8A source-mode fields until the
+  theta-dependent objective lands
 
 ### Phase 4: restricted latent-state reuse
 

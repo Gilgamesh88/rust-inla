@@ -380,6 +380,25 @@ fn test_gaussian_multi_fixed_iid_run_end_to_end() {
         .fitted
         .iter()
         .all(|marginal| marginal.mean().is_finite()));
+
+    let n_support = res.ccd_weights.len();
+    assert!(n_support > 1);
+    assert_eq!(res.theta_evidence_fixed_precision.len(), n_support * 4 * 4);
+    assert_eq!(res.theta_evidence_fixed_linear.len(), n_support * 4);
+    assert_eq!(
+        res.theta_evidence_latent_precision_diag.len(),
+        n_support * 3
+    );
+    assert_eq!(res.theta_evidence_latent_linear.len(), n_support * 3);
+    assert_eq!(
+        res.theta_evidence_latent_fixed_precision.len(),
+        n_support * 3 * 4
+    );
+    assert_eq!(res.theta_evidence_log_constant.len(), n_support);
+    assert!(res
+        .theta_evidence_log_constant
+        .iter()
+        .all(|value| value.is_finite()));
 }
 
 #[test]

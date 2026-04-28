@@ -66,7 +66,7 @@ if (!identical(state$scope, "fixed_iid_gaussian")) {
 if (!identical(state$approximation, "fixed_iid_cross_gaussian_evidence")) {
     stop("Unexpected update-state approximation.", call. = FALSE)
 }
-if (!identical(state$version, 2L)) {
+if (!identical(state$version, 3L)) {
     stop("Unexpected update-state version.", call. = FALSE)
 }
 if (!identical(state$semantics$kind, "old_data_likelihood_evidence")) {
@@ -78,8 +78,37 @@ if (!identical(state$semantics$prior_policy, "original_model_priors_remain_activ
 if (!identical(state$semantics$posterior_reuse, "not_posterior_as_prior")) {
     stop("Update state must not be labeled as posterior-as-prior reuse.", call. = FALSE)
 }
+if (!identical(state$semantics$theta_evidence_policy, "ccd_support_modes_not_integrated")) {
+    stop("Update state must declare the current CCD-support theta evidence policy.", call. = FALSE)
+}
 if (!identical(state$source$n_obs, as.integer(nrow(old_data)))) {
     stop("Update state source metadata did not record the old observation count.", call. = FALSE)
+}
+if (is.null(state$theta_evidence) ||
+    !identical(state$theta_evidence$strategy, "ccd_support_modes") ||
+    as.integer(state$theta_evidence$n_support) <= 1L) {
+    stop("Update state is missing the Phase 8C CCD-support theta evidence container.", call. = FALSE)
+}
+if (!isTRUE(all.equal(as.numeric(state$theta_evidence$theta[1L, ]), as.numeric(state$theta_mode), tolerance = 1e-12))) {
+    stop("Theta evidence support point does not match the source theta mode.", call. = FALSE)
+}
+if (!isTRUE(all.equal(state$theta_evidence$H_beta_beta[, , 1L], state$fixed$evidence_precision, tolerance = 1e-5))) {
+    stop("Theta evidence fixed precision does not reproduce the source-mode fixed evidence.", call. = FALSE)
+}
+if (!isTRUE(all.equal(as.numeric(state$theta_evidence$h_beta[1L, ]), as.numeric(state$fixed$evidence_linear), tolerance = 1e-5))) {
+    stop("Theta evidence fixed linear term does not reproduce the source-mode fixed evidence.", call. = FALSE)
+}
+if (!isTRUE(all.equal(as.numeric(state$theta_evidence$H_u_u_diag[1L, ]), as.numeric(state$iid$evidence_precision_diag), tolerance = 1e-5))) {
+    stop("Theta evidence iid precision does not reproduce the source-mode iid evidence.", call. = FALSE)
+}
+if (!isTRUE(all.equal(as.numeric(state$theta_evidence$h_u[1L, ]), as.numeric(state$iid$evidence_linear), tolerance = 1e-5))) {
+    stop("Theta evidence iid linear term does not reproduce the source-mode iid evidence.", call. = FALSE)
+}
+if (!isTRUE(all.equal(state$theta_evidence$H_u_beta[, , 1L], state$iid_fixed_cross_precision, tolerance = 1e-5))) {
+    stop("Theta evidence cross precision does not reproduce the source-mode cross evidence.", call. = FALSE)
+}
+if (!all(is.finite(state$theta_evidence$log_constants))) {
+    stop("Theta evidence log constants must be finite for the supported Poisson contract case.", call. = FALSE)
 }
 if (is.null(state$iid_fixed_cross_precision)) {
     stop("Cross evidence state is missing iid_fixed_cross_precision.", call. = FALSE)
@@ -108,7 +137,7 @@ if (!identical(metadata$mode, "fixed_iid_cross_gaussian_evidence")) {
 if (!identical(metadata$approximation, "fixed_iid_cross_gaussian_evidence")) {
     stop("Cross evidence metadata recorded the wrong approximation.", call. = FALSE)
 }
-if (!identical(metadata$state_version, 2L)) {
+if (!identical(metadata$state_version, 3L)) {
     stop("Cross evidence metadata recorded the wrong state version.", call. = FALSE)
 }
 if (!identical(metadata$evidence_semantics, "old_data_likelihood_evidence")) {
@@ -122,6 +151,12 @@ if (!identical(metadata$posterior_reuse, "not_posterior_as_prior")) {
 }
 if (!identical(metadata$source_n_obs, as.integer(nrow(old_data)))) {
     stop("Cross evidence metadata did not preserve the source observation count.", call. = FALSE)
+}
+if (!identical(metadata$theta_evidence_policy, "ccd_support_modes_not_integrated") ||
+    !identical(metadata$theta_evidence_strategy, "ccd_support_modes") ||
+    as.integer(metadata$theta_evidence_support_points) <= 1L ||
+    !identical(metadata$theta_evidence_solver_status, "not_integrated")) {
+    stop("Cross evidence metadata did not preserve Phase 8C theta evidence extraction metadata.", call. = FALSE)
 }
 if (!("C" %in% metadata$born_iid_levels)) {
     stop("Born iid level C was not recorded as zero old evidence.", call. = FALSE)

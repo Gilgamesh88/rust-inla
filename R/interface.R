@@ -518,6 +518,119 @@ sum_by_index <- function(values, index, n) {
     out
 }
 
+response_values_from_fit <- function(fit) {
+    tf <- terms(fit$formula, specials = "f")
+    resp_idx <- attr(tf, "response")
+    if (is.null(resp_idx) || resp_idx == 0L) {
+        stop("fit formula does not contain a response for likelihood evidence extraction.", call. = FALSE)
+    }
+    y_var <- as.character(attr(tf, "variables")[[resp_idx + 1L]])
+    if (!(y_var %in% names(fit$data))) {
+        stop("fit data does not contain the response needed for likelihood evidence extraction.", call. = FALSE)
+    }
+    as.numeric(fit$data[[y_var]])
+}
+
+fixed_iid_likelihood_theta <- function(fit) {
+    theta <- as.numeric(fit$internal.hyperpar$theta_mode)
+    if (length(theta) <= 1L) {
+        return(numeric())
+    }
+    theta[-1L]
+}
+
+fixed_iid_mode_loglik_values <- function(fit, eta) {
+    y <- response_values_from_fit(fit)
+    if (length(y) != length(eta)) {
+        stop("fit response length does not match mode eta for likelihood evidence extraction.", call. = FALSE)
+    }
+    family_name <- as.character(fit$family)[[1L]]
+    theta_lik <- fixed_iid_likelihood_theta(fit)
+    safe_eta <- pmax(pmin(as.numeric(eta), 50.0), -50.0)
+    out <- numeric(length(y))
+    observed <- !is.na(y)
+
+    switch(
+        family_name,
+        gaussian = {
+            if (length(theta_lik) < 1L) {
+                stop("Gaussian likelihood evidence extraction requires an observation precision theta.", call. = FALSE)
+            }
+            tau <- exp(theta_lik[[1L]])
+            resid <- y[observed] - eta[observed]
+            out[observed] <- 0.5 * theta_lik[[1L]] - 0.5 * tau * resid * resid - 0.5 * log(2.0 * pi)
+        },
+        poisson = {
+            out[observed] <- y[observed] * safe_eta[observed] -
+                exp(safe_eta[observed]) -
+                lgamma(y[observed] + 1.0)
+        },
+        gamma = {
+            if (length(theta_lik) < 1L) {
+                stop("Gamma likelihood evidence extraction requires a shape theta.", call. = FALSE)
+            }
+            phi <- exp(theta_lik[[1L]])
+            y_obs <- y[observed]
+            eta_obs <- safe_eta[observed]
+            out[observed] <- phi * theta_lik[[1L]] -
+                phi * eta_obs +
+                (phi - 1.0) * log(y_obs) -
+                phi * y_obs / exp(eta_obs) -
+                lgamma(phi)
+        },
+        zeroinflatedpoisson1 = {
+            if (length(theta_lik) < 1L) {
+                stop("ZIP likelihood evidence extraction requires a zero-inflation theta.", call. = FALSE)
+            }
+            p <- stats::plogis(theta_lik[[1L]])
+            y_obs <- y[observed]
+            eta_obs <- safe_eta[observed]
+            mu <- exp(eta_obs)
+            zero <- y_obs == 0.0
+            values <- numeric(length(y_obs))
+            values[zero] <- log(p + (1.0 - p) * exp(-mu[zero]))
+            values[!zero] <- log(1.0 - p) +
+                y_obs[!zero] * eta_obs[!zero] -
+                mu[!zero] -
+                lgamma(y_obs[!zero] + 1.0)
+            out[observed] <- values
+        },
+        tweedie = {
+            if (length(theta_lik) < 2L) {
+                stop("Tweedie likelihood evidence extraction requires dispersion and power theta values.", call. = FALSE)
+            }
+            phi <- exp(theta_lik[[1L]])
+            p_power <- 1.0 + stats::plogis(theta_lik[[2L]])
+            y_obs <- y[observed]
+            eta_obs <- safe_eta[observed]
+            mu <- exp(eta_obs)
+            zero <- y_obs == 0.0
+            values <- numeric(length(y_obs))
+            values[zero] <- -(mu[zero]^(2.0 - p_power)) / (phi * (2.0 - p_power))
+            if (any(!zero)) {
+                y_pos <- y_obs[!zero]
+                mu_pos <- mu[!zero]
+                d <- 2.0 * (
+                    (y_pos^(2.0 - p_power)) / ((1.0 - p_power) * (2.0 - p_power)) -
+                        (y_pos * mu_pos^(1.0 - p_power)) / (1.0 - p_power) +
+                        (mu_pos^(2.0 - p_power)) / (2.0 - p_power)
+                )
+                values[!zero] <- -0.5 * log(2.0 * pi * phi * y_pos^p_power) - d / (2.0 * phi)
+            }
+            out[observed] <- values
+        },
+        stop(sprintf(
+            "Likelihood evidence log constants are not implemented for family '%s'.",
+            family_name
+        ), call. = FALSE)
+    )
+
+    if (any(!is.finite(out[observed]))) {
+        stop("Likelihood evidence log constants contain non-finite values.", call. = FALSE)
+    }
+    out
+}
+
 fixed_iid_likelihood_evidence <- function(fit) {
     design <- fit$internal.design
     if (is.null(design)) {
@@ -562,6 +675,10 @@ fixed_iid_likelihood_evidence <- function(fit) {
     )
     centered_mode <- eta - offset
     weighted_pseudo <- curvature * centered_mode + grad
+    mode_loglik <- fixed_iid_mode_loglik_values(fit, eta)
+    log_constant <- sum(mode_loglik) -
+        sum(grad * centered_mode) -
+        0.5 * sum(curvature * centered_mode * centered_mode)
 
     fixed_precision <- crossprod(X, X * curvature)
     fixed_precision <- (fixed_precision + t(fixed_precision)) / 2.0
@@ -599,7 +716,218 @@ fixed_iid_likelihood_evidence <- function(fit) {
         fixed_linear = fixed_linear,
         latent_precision = latent_precision,
         latent_linear = latent_linear,
-        latent_fixed_precision = latent_fixed_precision
+        latent_fixed_precision = latent_fixed_precision,
+        log_constant = as.numeric(log_constant)
+    )
+}
+
+build_source_mode_theta_evidence <- function(
+    fit,
+    theta_mode,
+    fixed_names,
+    iid_levels,
+    fixed_precision,
+    fixed_linear,
+    iid_precision_diag,
+    iid_linear,
+    iid_fixed_cross_precision,
+    log_constant
+) {
+    support_names <- "source_mode"
+    theta_names <- fit$internal.hyperpar$theta_names
+    if (is.null(theta_names) || length(theta_names) != length(theta_mode)) {
+        theta_names <- paste0("theta", seq_along(theta_mode))
+    }
+    theta <- matrix(
+        as.numeric(theta_mode),
+        nrow = 1L,
+        dimnames = list(support_names, theta_names)
+    )
+    H_beta_beta <- array(
+        as.numeric(fixed_precision),
+        dim = c(length(fixed_names), length(fixed_names), 1L),
+        dimnames = list(fixed_names, fixed_names, support_names)
+    )
+    h_beta <- matrix(
+        as.numeric(fixed_linear),
+        nrow = 1L,
+        dimnames = list(support_names, fixed_names)
+    )
+    H_u_u_diag <- matrix(
+        as.numeric(iid_precision_diag),
+        nrow = 1L,
+        dimnames = list(support_names, iid_levels)
+    )
+    h_u <- matrix(
+        as.numeric(iid_linear),
+        nrow = 1L,
+        dimnames = list(support_names, iid_levels)
+    )
+    H_u_beta <- array(
+        as.numeric(iid_fixed_cross_precision),
+        dim = c(length(iid_levels), length(fixed_names), 1L),
+        dimnames = list(iid_levels, fixed_names, support_names)
+    )
+
+    list(
+        version = 1L,
+        strategy = "source_mode_single_point",
+        solver_status = "not_integrated",
+        n_support = 1L,
+        theta_names = theta_names,
+        theta = theta,
+        weights = stats::setNames(1.0, support_names),
+        log_weights = stats::setNames(0.0, support_names),
+        log_constants = stats::setNames(as.numeric(log_constant), support_names),
+        block_format = "dense_fixed_diag_iid_cross_by_support",
+        H_beta_beta = H_beta_beta,
+        h_beta = h_beta,
+        H_u_u_diag = H_u_u_diag,
+        h_u = h_u,
+        H_u_beta = H_u_beta
+    )
+}
+
+build_internal_theta_evidence <- function(
+    res,
+    backend_spec,
+    theta_matrix,
+    ccd_weights,
+    ccd_log_mlik,
+    ccd_log_weight,
+    theta_names
+) {
+    n_support <- if (is.null(theta_matrix)) 0L else nrow(theta_matrix)
+    n_fixed <- as.integer(backend_spec$n_fixed)
+    n_latent <- as.integer(backend_spec$n_latent)
+    if (n_support <= 0L || n_fixed <= 0L || n_latent <= 0L) {
+        return(NULL)
+    }
+
+    fixed_precision <- if (is.null(res$theta_evidence_fixed_precision)) {
+        numeric()
+    } else {
+        as.numeric(res$theta_evidence_fixed_precision)
+    }
+    fixed_linear <- if (is.null(res$theta_evidence_fixed_linear)) {
+        numeric()
+    } else {
+        as.numeric(res$theta_evidence_fixed_linear)
+    }
+    latent_precision <- if (is.null(res$theta_evidence_latent_precision_diag)) {
+        numeric()
+    } else {
+        as.numeric(res$theta_evidence_latent_precision_diag)
+    }
+    latent_linear <- if (is.null(res$theta_evidence_latent_linear)) {
+        numeric()
+    } else {
+        as.numeric(res$theta_evidence_latent_linear)
+    }
+    latent_fixed <- if (is.null(res$theta_evidence_latent_fixed_precision)) {
+        numeric()
+    } else {
+        as.numeric(res$theta_evidence_latent_fixed_precision)
+    }
+    log_constants <- if (is.null(res$theta_evidence_log_constant)) {
+        numeric()
+    } else {
+        as.numeric(res$theta_evidence_log_constant)
+    }
+
+    expected_fixed_precision <- n_support * n_fixed * n_fixed
+    expected_fixed_linear <- n_support * n_fixed
+    expected_latent <- n_support * n_latent
+    expected_latent_fixed <- n_support * n_latent * n_fixed
+    if (length(fixed_precision) != expected_fixed_precision ||
+        length(fixed_linear) != expected_fixed_linear ||
+        length(latent_precision) != expected_latent ||
+        length(latent_linear) != expected_latent ||
+        length(latent_fixed) != expected_latent_fixed ||
+        length(log_constants) != n_support) {
+        return(NULL)
+    }
+
+    support_names <- paste0("theta_", seq_len(n_support))
+    support_names[[1L]] <- "source_mode"
+    fixed_names <- as.character(backend_spec$fixed_names)
+    latent_names <- as.character(seq_len(n_latent))
+    H_beta_beta <- array(
+        0.0,
+        dim = c(n_fixed, n_fixed, n_support),
+        dimnames = list(fixed_names, fixed_names, support_names)
+    )
+    H_u_beta <- array(
+        0.0,
+        dim = c(n_latent, n_fixed, n_support),
+        dimnames = list(latent_names, fixed_names, support_names)
+    )
+    for (s in seq_len(n_support)) {
+        fixed_start <- (s - 1L) * n_fixed * n_fixed + 1L
+        fixed_end <- fixed_start + n_fixed * n_fixed - 1L
+        H_beta_beta[, , s] <- matrix(
+            fixed_precision[fixed_start:fixed_end],
+            nrow = n_fixed,
+            ncol = n_fixed,
+            byrow = TRUE,
+            dimnames = list(fixed_names, fixed_names)
+        )
+
+        cross_start <- (s - 1L) * n_latent * n_fixed + 1L
+        cross_end <- cross_start + n_latent * n_fixed - 1L
+        H_u_beta[, , s] <- matrix(
+            latent_fixed[cross_start:cross_end],
+            nrow = n_latent,
+            ncol = n_fixed,
+            dimnames = list(latent_names, fixed_names)
+        )
+    }
+
+    weights <- as.numeric(ccd_weights)
+    if (length(weights) != n_support || any(!is.finite(weights)) || sum(weights) <= 0.0) {
+        weights <- rep(1.0 / n_support, n_support)
+    } else {
+        weights <- weights / sum(weights)
+    }
+
+    dimnames(theta_matrix) <- list(support_names, theta_names)
+    h_beta <- matrix(
+        fixed_linear,
+        nrow = n_support,
+        byrow = TRUE,
+        dimnames = list(support_names, fixed_names)
+    )
+    H_u_u_diag <- matrix(
+        latent_precision,
+        nrow = n_support,
+        byrow = TRUE,
+        dimnames = list(support_names, latent_names)
+    )
+    h_u <- matrix(
+        latent_linear,
+        nrow = n_support,
+        byrow = TRUE,
+        dimnames = list(support_names, latent_names)
+    )
+
+    list(
+        version = 2L,
+        strategy = if (n_support > 1L) "ccd_support_modes" else "source_mode_single_point",
+        solver_status = "not_integrated",
+        n_support = as.integer(n_support),
+        theta_names = theta_names,
+        theta = theta_matrix,
+        weights = stats::setNames(weights, support_names),
+        log_weights = stats::setNames(log(pmax(weights, 1e-300)), support_names),
+        log_unnormalized_weights = stats::setNames(as.numeric(ccd_log_weight), support_names),
+        log_mlik = stats::setNames(as.numeric(ccd_log_mlik), support_names),
+        log_constants = stats::setNames(log_constants, support_names),
+        block_format = "dense_fixed_diag_iid_cross_by_support",
+        H_beta_beta = H_beta_beta,
+        h_beta = h_beta,
+        H_u_u_diag = H_u_u_diag,
+        h_u = h_u,
+        H_u_beta = H_u_beta
     )
 }
 
@@ -637,6 +965,17 @@ build_internal_hyperparameter_state <- function(res, backend_spec, family) {
             theta_matrix <- candidate
         }
     }
+    ccd_log_mlik <- if (is.null(res$ccd_log_mlik)) numeric() else as.numeric(res$ccd_log_mlik)
+    ccd_log_weight <- if (is.null(res$ccd_log_weight)) numeric() else as.numeric(res$ccd_log_weight)
+    theta_evidence <- build_internal_theta_evidence(
+        res = res,
+        backend_spec = backend_spec,
+        theta_matrix = theta_matrix,
+        ccd_weights = ccd_weights,
+        ccd_log_mlik = ccd_log_mlik,
+        ccd_log_weight = ccd_log_weight,
+        theta_names = theta_names
+    )
 
     list(
         theta_names = theta_names,
@@ -644,9 +983,10 @@ build_internal_hyperparameter_state <- function(res, backend_spec, family) {
         ccd_thetas = theta_matrix,
         ccd_weights = ccd_weights,
         ccd_base_weights = if (is.null(res$ccd_base_weights)) numeric() else as.numeric(res$ccd_base_weights),
-        ccd_log_mlik = if (is.null(res$ccd_log_mlik)) numeric() else as.numeric(res$ccd_log_mlik),
-        ccd_log_weight = if (is.null(res$ccd_log_weight)) numeric() else as.numeric(res$ccd_log_weight),
+        ccd_log_mlik = ccd_log_mlik,
+        ccd_log_weight = ccd_log_weight,
         ccd_hessian_eigenvalues = if (is.null(res$ccd_hessian_eigenvalues)) numeric() else as.numeric(res$ccd_hessian_eigenvalues),
+        theta_evidence = theta_evidence,
         internal_scale = TRUE
     )
 }
@@ -713,13 +1053,60 @@ same_iid_update_signature <- function(state_signature, backend_signature) {
     is.null(iid_update_signature_mismatch(state_signature, backend_signature))
 }
 
-fixed_iid_update_state_semantics <- function() {
+relabel_theta_evidence_for_update_state <- function(theta_evidence, fixed_names, iid_levels) {
+    if (is.null(theta_evidence) || !is.list(theta_evidence)) {
+        return(NULL)
+    }
+    n_support <- as.integer(theta_evidence$n_support)
+    if (!is.finite(n_support) || n_support <= 0L) {
+        return(NULL)
+    }
+    n_fixed <- length(fixed_names)
+    n_iid <- length(iid_levels)
+    if (!identical(dim(theta_evidence$H_beta_beta), c(n_fixed, n_fixed, n_support)) ||
+        !identical(dim(theta_evidence$h_beta), c(n_support, n_fixed)) ||
+        !identical(dim(theta_evidence$H_u_u_diag), c(n_support, n_iid)) ||
+        !identical(dim(theta_evidence$h_u), c(n_support, n_iid)) ||
+        !identical(dim(theta_evidence$H_u_beta), c(n_iid, n_fixed, n_support))) {
+        return(NULL)
+    }
+
+    support_names <- rownames(theta_evidence$theta)
+    if (is.null(support_names) || length(support_names) != n_support) {
+        support_names <- paste0("theta_", seq_len(n_support))
+        support_names[[1L]] <- "source_mode"
+    }
+    theta_evidence$theta <- as.matrix(theta_evidence$theta)
+    rownames(theta_evidence$theta) <- support_names
+    dimnames(theta_evidence$H_beta_beta) <- list(fixed_names, fixed_names, support_names)
+    dimnames(theta_evidence$h_beta) <- list(support_names, fixed_names)
+    dimnames(theta_evidence$H_u_u_diag) <- list(support_names, iid_levels)
+    dimnames(theta_evidence$h_u) <- list(support_names, iid_levels)
+    dimnames(theta_evidence$H_u_beta) <- list(iid_levels, fixed_names, support_names)
+    names(theta_evidence$weights) <- support_names
+    names(theta_evidence$log_weights) <- support_names
+    names(theta_evidence$log_constants) <- support_names
+    if (!is.null(theta_evidence$log_mlik)) {
+        names(theta_evidence$log_mlik) <- support_names
+    }
+    if (!is.null(theta_evidence$log_unnormalized_weights)) {
+        names(theta_evidence$log_unnormalized_weights) <- support_names
+    }
+    theta_evidence
+}
+
+fixed_iid_update_state_semantics <- function(theta_evidence_policy = "single_support_point_source_mode") {
     list(
         kind = "old_data_likelihood_evidence",
         approximation_family = "local_gaussian_taylor_at_source_mode",
         prior_policy = "original_model_priors_remain_active_in_update",
         posterior_reuse = "not_posterior_as_prior",
-        theta_policy = "source_theta_mode_only",
+        theta_policy = if (identical(theta_evidence_policy, "ccd_support_modes_not_integrated")) {
+            "ccd_support_extracted_solver_uses_source_mode"
+        } else {
+            "source_theta_mode_only"
+        },
+        theta_evidence_policy = theta_evidence_policy,
         compatible_update_modes = c(
             "fixed_iid_gaussian_evidence",
             "fixed_iid_cross_gaussian_evidence"
@@ -753,6 +1140,14 @@ validate_fixed_iid_update_state_semantics <- function(state, mode) {
     }
     if (!identical(semantics$posterior_reuse, "not_posterior_as_prior")) {
         stop("rusty_update_state must store old-data evidence, not a posterior-as-prior object.", call. = FALSE)
+    }
+    supported_theta_evidence_policies <- c(
+        "single_support_point_source_mode",
+        "ccd_support_modes_not_integrated"
+    )
+    if (!is.null(semantics$theta_evidence_policy) &&
+        !(semantics$theta_evidence_policy %in% supported_theta_evidence_policies)) {
+        stop("Unsupported update-state theta evidence policy for fixed/iid evidence reuse.", call. = FALSE)
     }
     if (!(mode %in% as.character(semantics$compatible_update_modes))) {
         stop(sprintf("Update-state mode '%s' is not compatible with this state.", mode), call. = FALSE)
@@ -852,6 +1247,10 @@ apply_fixed_iid_update_state_to_backend_spec <- function(backend_spec, family, c
         prior_policy = state$semantics$prior_policy,
         posterior_reuse = state$semantics$posterior_reuse,
         theta_policy = state$semantics$theta_policy,
+        theta_evidence_policy = state$semantics$theta_evidence_policy,
+        theta_evidence_strategy = if (is.null(state$theta_evidence)) NA_character_ else state$theta_evidence$strategy,
+        theta_evidence_support_points = if (is.null(state$theta_evidence)) NA_integer_ else as.integer(state$theta_evidence$n_support),
+        theta_evidence_solver_status = if (is.null(state$theta_evidence)) NA_character_ else state$theta_evidence$solver_status,
         source_family = state$signature$family,
         source_n_obs = state$source$n_obs,
         source_fixed_names = state$fixed$names,
@@ -1151,11 +1550,36 @@ rusty_update_state <- function(fit, scope = c("fixed_iid_gaussian"), min_varianc
     names(iid_evidence_linear) <- iid_levels
     dimnames(iid_fixed_cross_precision) <- list(iid_levels, fixed_names)
 
+    theta_evidence <- relabel_theta_evidence_for_update_state(
+        fit$internal.hyperpar$theta_evidence,
+        fixed_names = fixed_names,
+        iid_levels = iid_levels
+    )
+    if (is.null(theta_evidence)) {
+        theta_evidence <- build_source_mode_theta_evidence(
+            fit = fit,
+            theta_mode = theta_mode,
+            fixed_names = fixed_names,
+            iid_levels = iid_levels,
+            fixed_precision = fixed_evidence_precision,
+            fixed_linear = fixed_evidence_linear,
+            iid_precision_diag = iid_evidence_precision,
+            iid_linear = iid_evidence_linear,
+            iid_fixed_cross_precision = iid_fixed_cross_precision,
+            log_constant = evidence$log_constant
+        )
+    }
+    theta_evidence_policy <- if (as.integer(theta_evidence$n_support) > 1L) {
+        "ccd_support_modes_not_integrated"
+    } else {
+        "single_support_point_source_mode"
+    }
+
     state <- list(
-        version = 2L,
+        version = 3L,
         scope = scope,
         approximation = "fixed_iid_cross_gaussian_evidence",
-        semantics = fixed_iid_update_state_semantics(),
+        semantics = fixed_iid_update_state_semantics(theta_evidence_policy),
         signature = fit$backend_signature,
         source = list(
             n_obs = as.integer(fit$internal.design$n_data),
@@ -1166,6 +1590,7 @@ rusty_update_state <- function(fit, scope = c("fixed_iid_gaussian"), min_varianc
             theta_mode = theta_mode
         ),
         theta_mode = theta_mode,
+        theta_evidence = theta_evidence,
         fixed = list(
             names = fixed_names,
             mode = fixed_mode,
@@ -1188,7 +1613,12 @@ rusty_update_state <- function(fit, scope = c("fixed_iid_gaussian"), min_varianc
         caveats = c(
             "Experimental fixed+iid Gaussian old-data likelihood evidence approximation.",
             "Uses dense fixed-effect evidence, diagonal iid evidence, and the fixed-iid cross block.",
-            "The old evidence is local at the old posterior mode and still simplifies hyperparameter uncertainty.",
+            if (identical(theta_evidence_policy, "ccd_support_modes_not_integrated")) {
+                "Stores a Phase 8C CCD-support theta-evidence container extracted at old theta support points."
+            } else {
+                "Stores a Phase 8C single-point theta-evidence container at the old source theta."
+            },
+            "The active solver path still uses the source-mode evidence block, so hyperparameter uncertainty is still simplified.",
             "New iid levels receive zero old evidence and start from the ordinary zero-mean iid prior."
         )
     )
@@ -1225,6 +1655,13 @@ print.rusty_update_state <- function(x, ...) {
     }
     cat(sprintf("Fixed effects: %d\n", length(x$fixed$names)))
     cat(sprintf("iid block: %s with %d levels\n", x$iid$covariate_name, length(x$iid$levels)))
+    if (!is.null(x$theta_evidence)) {
+        cat(sprintf(
+            "Theta evidence: %d support point(s), strategy = %s\n",
+            as.integer(x$theta_evidence$n_support),
+            x$theta_evidence$strategy
+        ))
+    }
     cat("Caveat: local Gaussian old-data evidence; hyperparameter uncertainty is still simplified.\n")
     invisible(x)
 }

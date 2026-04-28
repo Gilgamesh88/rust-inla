@@ -87,6 +87,14 @@ The current 8B contract is explicit: `rusty_update_state()` stores old-data
 likelihood evidence, not a posterior-as-prior object, and update fits keep the
 original model priors active while adding those old-data evidence factors.
 
+The first 8C slice is extraction-only but now uses the actual old CCD/theta
+support when available: `rusty_update_state()` carries a `theta_evidence`
+container with support-point theta values, normalized weights, log marginal
+likelihoods, local Gaussian log constants, and the fixed/`iid` evidence blocks
+(`H_beta_beta`, `h_beta`, `H_u_u_diag`, `h_u`, and `H_u_beta`). The active
+solver still uses the Phase 8A source-mode evidence fields until the later
+theta-dependent objective is implemented.
+
 For the curated uploaded-suite subset, run:
 
 ```powershell
