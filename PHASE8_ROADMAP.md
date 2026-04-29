@@ -248,3 +248,205 @@ Open problems:
 
 This phase should not begin until Phase 8A through 8E are benchmark-clean for
 the one-`iid` workflow.
+
+## Phase 8G: recursive evidence graph for multiple iid blocks
+
+Deferred until the one-`iid` MVP has been validated on real multi-period data.
+
+Goal: generalize the Phase 8 update state from a fixed-plus-one-`iid` pair to
+a recursive block-sparse evidence graph that can represent several simultaneous
+factor `iid` random effects.
+
+Theoretical frame:
+
+```text
+S_t =
+  ComposeEvidenceGraphs(
+    S_{t-1},
+    ExtractEvidence(
+      Fit(D_t | S_{t-1})
+    )
+  )
+```
+
+Here `S_t` is a compressed representation of cumulative likelihood evidence,
+not a posterior object blindly reused as a prior. Each new batch contributes an
+evidence increment, and composition is graph addition after level alignment.
+
+Minimum extracted evidence from each batch:
+
+- compatibility signature:
+  - family
+  - fixed-effect column names
+  - latent block list
+  - `iid` covariate names and model types
+  - theta parameter names and order
+- theta support:
+  - `theta_s`
+  - support weights
+  - log constants needed for theta posterior comparison
+- fixed node evidence:
+  - `Delta H_beta_beta(theta_s)`
+  - `Delta h_beta(theta_s)`
+- each `iid` node evidence:
+  - levels
+  - `Delta H_kk_diag(theta_s)`
+  - `Delta h_k(theta_s)`
+- fixed-random edge evidence for each `iid` block:
+  - `Delta H_k_beta(theta_s)`
+- random-random edge evidence for each pair of `iid` blocks:
+  - sparse `Delta H_ij(theta_s)` triplets
+- level metadata:
+  - active
+  - born
+  - dormant
+  - re-entered
+  - source rows and exposure when available
+
+Evidence graph structure:
+
+```text
+nodes:
+  beta
+  u_1
+  ...
+  u_K
+
+node terms:
+  H_ii(theta), h_i(theta)
+
+edges:
+  beta -- u_k
+  u_i  -- u_j
+
+edge terms:
+  H_ij(theta)
+```
+
+The current MVP is the smallest nontrivial graph:
+
+```text
+nodes:
+  beta
+  u_1
+
+edge:
+  beta -- u_1
+```
+
+For multiple iid blocks the same recursion should apply:
+
+```text
+G_t(theta) =
+  Align(G_{t-1}(theta), Delta G_t(theta))
+  +
+  Delta G_t(theta)
+```
+
+Composition rules:
+
+- align fixed columns exactly; reject changed fixed-effect design
+- align each factor `iid` block by covariate name and level labels
+- keep dormant levels and their old evidence
+- add born levels with zero old evidence
+- expand node terms for born/dormant levels
+- expand fixed-random edges for born/dormant levels
+- expand random-random sparse edges for all affected level pairs
+- add node evidence, edge evidence, and log constants support-by-support
+
+Implementation shape:
+
+- R should keep the public state inspectable and explicit:
+  - `signature`: family, fixed columns, latent block descriptors, theta names
+  - `theta_support`: support points, weights, and constants
+  - `blocks`: one fixed block plus one entry per factor `iid` block
+  - `edges`: fixed-random and random-random evidence links
+  - `level_metadata`: active, born, dormant, and re-entered levels
+- Rust should own the validated numerical representation:
+  - `EvidenceGraph`
+  - `EvidenceNode`
+  - `EvidenceEdge`
+  - `ThetaEvidenceSlice`
+  - sparse triplet or compressed sparse storage for random-random edges
+- the R object should be easy to print, audit, serialize, and compare in tests
+- the Rust object should be strict about dimensions, level alignment, and theta
+  support compatibility
+
+Suggested R state layout:
+
+```text
+state <- list(
+  version = "phase8_graph_v1",
+  signature = list(...),
+  theta_support = list(points = ..., weights = ..., constants = ...),
+  blocks = list(
+    beta = list(kind = "fixed", names = ..., H = ..., h = ...),
+    VehBrand = list(kind = "iid", levels = ..., H_diag = ..., h = ...),
+    Region = list(kind = "iid", levels = ..., H_diag = ..., h = ...)
+  ),
+  edges = list(
+    list(from = "beta", to = "VehBrand", H = ...),
+    list(from = "beta", to = "Region", H = ...),
+    list(from = "VehBrand", to = "Region", H_sparse = ...)
+  ),
+  level_metadata = list(...)
+)
+```
+
+Suggested Rust structure:
+
+```text
+struct EvidenceGraph {
+    signature: EvidenceSignature,
+    theta_slices: Vec<ThetaEvidenceSlice>,
+    blocks: Vec<EvidenceBlock>,
+    edges: Vec<EvidenceEdge>,
+}
+
+struct ThetaEvidenceSlice {
+    theta: Vec<f64>,
+    weight: f64,
+    log_constant: f64,
+}
+
+enum EvidenceBlock {
+    Fixed { names: Vec<String>, h: Vec<f64>, hessian: DenseMatrix },
+    Iid { covariate: String, levels: Vec<String>, h: Vec<f64>, h_diag: Vec<f64> },
+}
+
+enum EvidenceEdge {
+    FixedIid { fixed: BlockId, iid: BlockId, hessian: DenseMatrix },
+    IidIid { left: BlockId, right: BlockId, hessian: SparseMatrix },
+}
+```
+
+The recursion should be implemented as one composition operator rather than as
+model-specific branches:
+
+```text
+compose(previous_state, fitted_batch):
+  increment = extract_evidence(fitted_batch)
+  aligned_previous, aligned_increment =
+    align_graphs(previous_state.graph, increment.graph)
+  return add_graphs(aligned_previous, aligned_increment)
+```
+
+This makes "two random effects" the first validation target, not a permanent
+special case. If the graph abstraction is right, a third `iid` block should be
+more bookkeeping and validation, not a new mathematical design.
+
+Recommended implementation path:
+
+1. define the R state shape as human-readable `blocks` and `edges`
+2. define Rust typed structs for a block-sparse `EvidenceGraph`
+3. prove the graph abstraction reproduces the current one-`iid` MVP
+4. enable exactly two `iid` blocks as the first validation target
+5. validate two-block updates against joint refits before allowing arbitrary K
+
+Key warning:
+
+- two `iid` blocks require the random-random cross edge `H_12`
+- three or more `iid` blocks are not mathematically different, but they reveal
+  the general graph structure and require careful sparse level alignment
+- ignoring cross edges can make posterior uncertainty lie; this is the same
+  lesson learned from the fixed-random cross block in Phase 8A

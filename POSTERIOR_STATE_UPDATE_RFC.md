@@ -318,6 +318,250 @@ Current experimental implementation:
   This is the supported way to carry compressed evidence forward without a
   joint refit.
 
+### Recursive evidence graph for future multiple iid blocks
+
+The post-MVP generalization should be framed as recursive evidence composition,
+not as a sequence of special cases for two, three, or more random effects.
+
+Let
+
+```text
+z = (beta, u_1, ..., u_K)
+```
+
+and let `S_t` denote the compressed cumulative likelihood evidence from data
+batches `D_1:t`. The recursive update is:
+
+```text
+S_t =
+  ComposeEvidenceGraphs(
+    S_{t-1},
+    ExtractEvidence(
+      Fit(D_t | S_{t-1})
+    )
+  )
+```
+
+Equivalently, in log-evidence form:
+
+```text
+log E_t(z, theta)
+≈
+c_t(theta)
+- 1/2 z' H_t(theta) z
++ h_t(theta)' z
+```
+
+and composition is additive:
+
+```text
+H_t(theta) = H_{t-1}(theta) + Delta H_t(theta)
+h_t(theta) = h_{t-1}(theta) + Delta h_t(theta)
+c_t(theta) = c_{t-1}(theta) + Delta c_t(theta)
+```
+
+The block-sparse evidence graph is a storage decomposition of this quadratic
+form:
+
+```text
+nodes:
+  beta
+  u_1
+  ...
+  u_K
+
+node evidence:
+  H_ii(theta), h_i(theta)
+
+edge evidence:
+  H_ij(theta)
+```
+
+For the current one-`iid` MVP, the graph has two nodes and one edge:
+
+```text
+beta -- u_1
+```
+
+For multiple `iid` blocks, the graph adds one node per block and edges for:
+
+```text
+beta -- u_k
+u_i  -- u_j
+```
+
+The minimum extracted information from each fitted batch is:
+
+- compatibility signature:
+  - family
+  - fixed-effect column names
+  - latent block list
+  - `iid` covariate names and model types
+  - theta parameter names and order
+- theta support:
+  - support points `theta_s`
+  - support weights
+  - log constants `Delta c_t(theta_s)`
+- fixed node evidence:
+  - `Delta H_beta_beta(theta_s)`
+  - `Delta h_beta(theta_s)`
+- per-`iid` node evidence:
+  - levels
+  - diagonal `Delta H_kk(theta_s)`
+  - `Delta h_k(theta_s)`
+- fixed-random edge evidence:
+  - `Delta H_k_beta(theta_s)` for each `iid` block
+- random-random edge evidence:
+  - sparse `Delta H_ij(theta_s)` triplets for each pair of `iid` blocks
+- level metadata:
+  - active
+  - born
+  - dormant
+  - re-entered
+  - source rows and exposure where available
+
+The graph composition operator must:
+
+- reject changed family or fixed-effect design
+- align factor `iid` levels by block/covariate name
+- carry dormant levels and their old evidence
+- add born levels with zero old evidence
+- expand node and edge terms for born/dormant levels
+- add node, edge, and constant terms support-by-support
+
+Implementation contract:
+
+The R side should expose a transparent object. It should be possible to inspect
+the state without reading Rust internals. The object should say which model it
+came from, which levels it knows about, which levels are dormant, and which
+evidence blocks and edges are being carried forward.
+
+```text
+state <- list(
+  version = "phase8_graph_v1",
+  semantics = "old_data_likelihood_evidence",
+  signature = list(
+    family = ...,
+    fixed_names = ...,
+    latent_blocks = ...,
+    theta_names = ...
+  ),
+  theta_support = list(
+    points = ...,
+    weights = ...,
+    constants = ...
+  ),
+  blocks = list(
+    beta = list(
+      kind = "fixed",
+      names = ...,
+      H = ...,
+      h = ...
+    ),
+    block_name = list(
+      kind = "iid",
+      covariate = ...,
+      levels = ...,
+      H_diag = ...,
+      h = ...
+    )
+  ),
+  edges = list(
+    list(from = "beta", to = "block_name", kind = "fixed_iid", H = ...),
+    list(from = "block_a", to = "block_b", kind = "iid_iid", H_sparse = ...)
+  ),
+  level_metadata = list(...)
+)
+```
+
+The Rust side should receive that object only after validation and convert it
+into typed numerical structures. The target shape is:
+
+```text
+struct EvidenceGraph {
+    signature: EvidenceSignature,
+    theta_slices: Vec<ThetaEvidenceSlice>,
+    blocks: Vec<EvidenceBlock>,
+    edges: Vec<EvidenceEdge>,
+}
+
+struct EvidenceSignature {
+    family: String,
+    fixed_names: Vec<String>,
+    latent_blocks: Vec<LatentBlockSignature>,
+    theta_names: Vec<String>,
+}
+
+struct ThetaEvidenceSlice {
+    theta: Vec<f64>,
+    weight: f64,
+    log_constant: f64,
+}
+
+enum EvidenceBlock {
+    Fixed {
+        names: Vec<String>,
+        h: Vec<f64>,
+        hessian: DenseMatrix,
+    },
+    Iid {
+        covariate: String,
+        levels: Vec<String>,
+        h: Vec<f64>,
+        h_diag: Vec<f64>,
+    },
+}
+
+enum EvidenceEdge {
+    FixedIid {
+        fixed: BlockId,
+        iid: BlockId,
+        hessian: DenseMatrix,
+    },
+    IidIid {
+        left: BlockId,
+        right: BlockId,
+        hessian: SparseMatrix,
+    },
+}
+```
+
+The recursive algorithm is:
+
+```text
+extract_evidence(fit):
+  build node evidence for beta
+  build node evidence for each iid block
+  build beta-iid edge evidence
+  build iid-iid edge evidence when more than one iid block exists
+  attach theta support and constants
+  return evidence graph increment
+
+compose(previous_state, fit):
+  increment = extract_evidence(fit)
+  assert_compatible(previous_state.signature, increment.signature)
+  previous_aligned, increment_aligned =
+    align_levels_and_edges(previous_state.graph, increment.graph)
+  return add_evidence_graphs(previous_aligned, increment_aligned)
+```
+
+This is why the problem is naturally recursive. A one-period fit produces an
+evidence increment. A two-period state is the composition of two increments. A
+three-period state is the composition of the previous state and one more
+increment. The same operator should work repeatedly, as long as the model
+signature remains inside the supported subset.
+
+The proof target is deliberately narrow:
+
+> If the evidence graph addition reconstructs the same quadratic approximation
+> to cumulative likelihood evidence, then the sequential update solves the same
+> approximate objective as the corresponding joint refit under that
+> approximation.
+
+This does not claim exact Bayes for arbitrary model changes. It claims that the
+compressed evidence graph preserves the local Gaussian/Laplace evidence
+geometry needed for the supported sequential update.
+
 ### Phase 4: restricted latent-state reuse
 
 Only after the above is validated should we consider:
