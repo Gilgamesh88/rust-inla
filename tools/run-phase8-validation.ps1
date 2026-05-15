@@ -75,6 +75,36 @@ finally {
 }
 
 Write-Host ''
+Write-Host '==> Phase 8 fixed-theta replay controls'
+Write-Host "    $Rscript tests\accuracy-gate-controls.R"
+
+Push-Location $repoRoot
+try {
+    & $Rscript 'tests\accuracy-gate-controls.R'
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ''
+Write-Host '==> Phase 8 multi-iid evidence graph'
+Write-Host "    $Rscript tests\posterior-state-multi-iid-evidence.R"
+
+Push-Location $repoRoot
+try {
+    & $Rscript 'tests\posterior-state-multi-iid-evidence.R'
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ''
 Write-Host '==> Phase 8 theta evidence extraction shape'
 Write-Host "    $Rscript tests\posterior-state-theta-evidence-shape.R"
 

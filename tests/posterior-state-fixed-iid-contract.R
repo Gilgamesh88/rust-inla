@@ -181,6 +181,7 @@ if (!grepl("omits the fixed-iid cross block", diag_metadata$caveat, fixed = TRUE
 
 bad_state <- state
 bad_state$iid_fixed_cross_precision <- NULL
+bad_state$iid_blocks[[1L]]$fixed_cross_precision <- NULL
 expect_error(
     rusty_inla(
         formula,
@@ -191,7 +192,7 @@ expect_error(
             mode = "fixed_iid_cross_gaussian_evidence"
         )
     ),
-    "requires a state with iid_fixed_cross_precision",
+    "requires a state with fixed cross precision",
     "missing cross evidence"
 )
 

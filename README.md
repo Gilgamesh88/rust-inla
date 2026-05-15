@@ -35,7 +35,7 @@ The detailed comparison note is tracked in [scratch/BENCHMARK_SUMMARY_2026-04-19
 
 For deeper parity inspection of returned summaries, set `RUSTYINLA_OUTPUT_PROFILE=benchmark` before running the local harnesses. That extended mode compares additional fit-object surfaces such as fixed-effect standard deviations, hyperparameter summaries, and linear-predictor summaries.
 
-For the current implemented subset, the Phase 7A fixed-effects formula scope, the uploaded-suite supported-subset manifest, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the Phase 8 sequential-update roadmap, the posterior-state update RFC, the external-example benchmarking guide, the directory-level intervention map, and the recommended path for adding new families or latent models, see [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [FIXED_EFFECTS_FORMULA_SUBSET.md](FIXED_EFFECTS_FORMULA_SUBSET.md), [SUPPORTED_SUBSET_VALIDATION_MANIFEST.md](SUPPORTED_SUBSET_VALIDATION_MANIFEST.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [PHASE8_ROADMAP.md](PHASE8_ROADMAP.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md](EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
+For the current implemented subset, the core architecture and file map, the Phase 7A fixed-effects formula scope, the uploaded-suite supported-subset manifest, the coverage evaluation, the detailed R-INLA parity gap inventory, the public API-surface inventory, the API implementation queue, the Phase 8 sequential-update roadmap, the clean-room actuarial distribution roadmap, the posterior-state update RFC, the external-example benchmarking guide, the directory-level intervention map, and the recommended path for adding new families or latent models, see [CORE_ARCHITECTURE_MAP.md](CORE_ARCHITECTURE_MAP.md), [IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md](IMPLEMENTATION_INVENTORY_AND_EXTENSION_GUIDE.md), [FIXED_EFFECTS_FORMULA_SUBSET.md](FIXED_EFFECTS_FORMULA_SUBSET.md), [SUPPORTED_SUBSET_VALIDATION_MANIFEST.md](SUPPORTED_SUBSET_VALIDATION_MANIFEST.md), [COVERAGE_EVALUATION_2026-04-19.md](COVERAGE_EVALUATION_2026-04-19.md), [RINLA_PARITY_GAP_INVENTORY.md](RINLA_PARITY_GAP_INVENTORY.md), [RINLA_API_SURFACE_INVENTORY.md](RINLA_API_SURFACE_INVENTORY.md), [API_IMPLEMENTATION_QUEUE.md](API_IMPLEMENTATION_QUEUE.md), [PHASE8_ROADMAP.md](PHASE8_ROADMAP.md), [CLEAN_ROOM_DISTRIBUTION_ROADMAP.md](CLEAN_ROOM_DISTRIBUTION_ROADMAP.md), [POSTERIOR_STATE_UPDATE_RFC.md](POSTERIOR_STATE_UPDATE_RFC.md), [EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md](EXTERNAL_EXAMPLE_BENCHMARKING_GUIDE.md), [EXTENSION_INTERVENTION_MAP.md](EXTENSION_INTERVENTION_MAP.md), and [EXTENSION_BACKLOG.md](EXTENSION_BACKLOG.md).
 
 ## Implementation Roadmap (75% Complete)
 
@@ -49,10 +49,12 @@ Our goal is to port the subset of INLA specifically relied upon by the actuarial
 - [x] **Phase 6:** Native R Formula Parsing Interface (`y ~ 1 + f(...)`).
 - [x] **Phase 7A:** Generalized Fixed Effects Matrix. (Productizing the supported `$X\beta$` dense covariate subset).
 - [ ] **Phase 8:** Prior/control metadata reuse and sequential update states. (Phase 8A is the active one-`iid` fixed-cross evidence path; later 8C-8E steps build toward theta-mixture, full-Bayes-like updating.)
-- [ ] **Phase 9:** Multi-variate Likelihoods. (Allowing structural covariates to predict zero-inflation probabilities via joint frameworks such as `ZIP Type-2`).
+- [ ] **Phase 9:** Clean-room actuarial distribution expansion. (Native `nbinomial2`, constant zero-inflated count families, Tweedie stabilization, and then structural covariates for zero-inflation through a second-predictor surface such as `ZIP Type-2`).
 - [ ] **Phase 10:** Dynamic Arbitrary Priors. (Exposing richer prior modification arrays to the R frontend after the Phase 8 metadata layer exists).
 
 Tweedie support remains experimental and is currently excluded from the active parity benchmark sweep until the instability path is better understood.
+
+Phase 9 is tracked in [CLEAN_ROOM_DISTRIBUTION_ROADMAP.md](CLEAN_ROOM_DISTRIBUTION_ROADMAP.md). It is explicitly clean-room: external packages such as `glmmTMB` may be used as optional black-box reference oracles, but not as runtime dependencies or source-code references.
 
 Phase 7A is complete for the MVP supported subset: multiple fixed-effect columns are validated through the current `model.matrix()` path, fixed-effect-only GLMs are supported through the zero-latent backend path, rank-deficient fixed designs fail fast with a clear error, unsupported formula surfaces are rejected before Rust is called, and the external reference harness includes a multi-fixed-effect Gaussian + `iid` + offset comparison against `R-INLA`.
 
@@ -80,8 +82,8 @@ addresses the SD narrowing seen in the diagonal-only diagnostic mode.
 The active Phase 8 breakdown is tracked in [PHASE8_ROADMAP.md](PHASE8_ROADMAP.md):
 8A stabilizes fixed-plus-`iid` cross evidence, 8B formalizes old-data evidence
 semantics, 8C and 8D add theta-mixture evidence and a theta-dependent objective,
-8E defines joint-refit validation gates, and 8F defers broader latent structures
-until the one-`iid` workflow is benchmark-clean.
+8E defines joint-refit validation gates, and 8H starts the recursive evidence
+graph for multiple `iid` effects.
 
 The current 8B contract is explicit: `rusty_update_state()` stores old-data
 likelihood evidence, not a posterior-as-prior object, and update fits keep the
@@ -102,6 +104,18 @@ experimental path for year-by-year diagnostics. Factor `iid` levels that are
 present in the update state but absent from the current period are carried as
 dormant latent parameters, so actuarial tables can keep old brand parameters
 through zero-exposure periods and update them again when exposure returns.
+
+The first multi-`iid` implementation carries dense fixed evidence, diagonal iid
+evidence for every block, fixed-iid cross blocks, and sparse iid-iid cross
+edges. The theta-dependent path can consume the same graph at old theta support
+points. Multiple theta dimensions now use a guarded local interpolation rule:
+inside the old CCD support box it blends nearby support evidence, while outside
+that box it falls back to the nearest support point to avoid unsafe
+extrapolation. For multi-`iid` states, `rusty_update_state()` also adds
+expanded axial guard support by fixed-theta replay on the old data; in the
+focused synthetic outside-cloud test this reduced theta drift from `6.099695`
+with the original CCD support to `1.999375`. Multi-`iid` theta drift is still
+diagnostic-only until this path is validated on real rolling data.
 
 For the curated uploaded-suite subset, run:
 

@@ -46,6 +46,9 @@ struct BackendSpec {
     fixed_state_linear: Option<Vec<f64>>,
     latent_state_precision_diag: Option<Vec<f64>>,
     latent_state_linear: Option<Vec<f64>>,
+    latent_state_precision_i: Option<Vec<usize>>,
+    latent_state_precision_j: Option<Vec<usize>>,
+    latent_state_precision_x: Option<Vec<f64>>,
     latent_fixed_state_precision: Option<Vec<f64>>,
     theta_state_n_support: Option<usize>,
     theta_state_support: Option<Vec<f64>>,
@@ -53,6 +56,9 @@ struct BackendSpec {
     theta_state_fixed_linear: Option<Vec<f64>>,
     theta_state_latent_precision_diag: Option<Vec<f64>>,
     theta_state_latent_linear: Option<Vec<f64>>,
+    theta_state_latent_precision_i: Option<Vec<usize>>,
+    theta_state_latent_precision_j: Option<Vec<usize>>,
+    theta_state_latent_precision_x: Option<Vec<f64>>,
     theta_state_latent_fixed_precision: Option<Vec<f64>>,
     theta_state_log_constant: Option<Vec<f64>>,
     optimizer_max_evals: Option<usize>,
@@ -556,9 +562,14 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                         .to_string(),
                 );
             }
-            if spec.latent_blocks.len() != 1 || spec.latent_blocks[0].model_type != "iid" {
+            if spec.latent_blocks.is_empty()
+                || spec
+                    .latent_blocks
+                    .iter()
+                    .any(|block| block.model_type != "iid")
+            {
                 return Err(
-                    "latent state evidence currently supports exactly one iid latent block"
+                    "latent state evidence currently supports only iid latent blocks"
                         .to_string(),
                 );
             }
@@ -568,6 +579,59 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 "latent state evidence requires latent_state_precision_diag and latent_state_linear together"
                     .to_string(),
             )
+        }
+    }
+
+    let latent_sparse_state_present = [
+        spec.latent_state_precision_i.is_some(),
+        spec.latent_state_precision_j.is_some(),
+        spec.latent_state_precision_x.is_some(),
+    ];
+    if latent_sparse_state_present.iter().any(|present| *present) {
+        if !latent_sparse_state_present.iter().all(|present| *present) {
+            return Err(
+                "latent sparse state evidence requires latent_state_precision_i, latent_state_precision_j, and latent_state_precision_x together"
+                    .to_string(),
+            );
+        }
+        if spec.latent_state_precision_diag.is_none() || spec.latent_state_linear.is_none() {
+            return Err(
+                "latent sparse state evidence requires latent diagonal state evidence".to_string(),
+            );
+        }
+        if spec.latent_blocks.is_empty()
+            || spec
+                .latent_blocks
+                .iter()
+                .any(|block| block.model_type != "iid")
+        {
+            return Err(
+                "latent sparse state evidence currently supports only iid latent blocks"
+                    .to_string(),
+            );
+        }
+        let rows = spec.latent_state_precision_i.as_ref().unwrap();
+        let cols = spec.latent_state_precision_j.as_ref().unwrap();
+        let values = spec.latent_state_precision_x.as_ref().unwrap();
+        if rows.len() != cols.len() || rows.len() != values.len() {
+            return Err(
+                "latent sparse state evidence index and value vectors must have matching lengths"
+                    .to_string(),
+            );
+        }
+        for idx in 0..values.len() {
+            if rows[idx] >= spec.n_latent || cols[idx] >= spec.n_latent || rows[idx] == cols[idx] {
+                return Err(format!(
+                    "latent sparse state evidence entry {} has invalid latent indices",
+                    idx
+                ));
+            }
+            if !values[idx].is_finite() {
+                return Err(
+                    "latent sparse state evidence precision must contain only finite values"
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -613,10 +677,23 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
         spec.theta_state_latent_fixed_precision.is_some(),
         spec.theta_state_log_constant.is_some(),
     ];
+    let theta_sparse_state_present = [
+        spec.theta_state_latent_precision_i.is_some(),
+        spec.theta_state_latent_precision_j.is_some(),
+        spec.theta_state_latent_precision_x.is_some(),
+    ];
     if theta_state_present.iter().any(|present| *present) {
         if !theta_state_present.iter().all(|present| *present) {
             return Err(
                 "theta state evidence requires all theta_state_* fields together".to_string(),
+            );
+        }
+        if theta_sparse_state_present.iter().any(|present| *present)
+            && !theta_sparse_state_present.iter().all(|present| *present)
+        {
+            return Err(
+                "theta sparse state evidence requires theta_state_latent_precision_i, theta_state_latent_precision_j, and theta_state_latent_precision_x together"
+                    .to_string(),
             );
         }
         let n_support = spec.theta_state_n_support.unwrap_or(0);
@@ -624,15 +701,14 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
             return Err("theta state evidence requires at least one support point".to_string());
         }
         let n_theta = expected_theta_len(spec);
-        if n_theta != 1 {
+        if spec.latent_blocks.is_empty()
+            || spec
+                .latent_blocks
+                .iter()
+                .any(|block| block.model_type != "iid")
+        {
             return Err(
-                "theta-dependent state evidence currently supports exactly one theta dimension"
-                    .to_string(),
-            );
-        }
-        if spec.latent_blocks.len() != 1 || spec.latent_blocks[0].model_type != "iid" {
-            return Err(
-                "theta-dependent state evidence currently supports exactly one iid latent block"
+                "theta-dependent state evidence currently supports only iid latent blocks"
                     .to_string(),
             );
         }
@@ -644,6 +720,9 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
         let latent_linear = spec.theta_state_latent_linear.as_ref().unwrap();
         let latent_fixed = spec.theta_state_latent_fixed_precision.as_ref().unwrap();
         let log_constant = spec.theta_state_log_constant.as_ref().unwrap();
+        let theta_sparse_i = spec.theta_state_latent_precision_i.as_ref();
+        let theta_sparse_j = spec.theta_state_latent_precision_j.as_ref();
+        let theta_sparse_x = spec.theta_state_latent_precision_x.as_ref();
 
         let expected_support = n_support * n_theta;
         let expected_fixed_precision = n_support * spec.n_fixed * spec.n_fixed;
@@ -662,6 +741,33 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 "theta state evidence dimensions do not match support, fixed, and iid sizes"
                     .to_string(),
             );
+        }
+        if let (Some(rows), Some(cols), Some(values)) =
+            (theta_sparse_i, theta_sparse_j, theta_sparse_x)
+        {
+            if rows.len() != cols.len() || values.len() != n_support * rows.len() {
+                return Err(
+                    "theta sparse state evidence dimensions do not match support and edge count"
+                        .to_string(),
+                );
+            }
+            for edge_idx in 0..rows.len() {
+                if rows[edge_idx] >= spec.n_latent
+                    || cols[edge_idx] >= spec.n_latent
+                    || rows[edge_idx] == cols[edge_idx]
+                {
+                    return Err(format!(
+                        "theta sparse state evidence edge {} has invalid latent indices",
+                        edge_idx
+                    ));
+                }
+            }
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(
+                    "theta sparse state evidence precision must contain only finite values"
+                        .to_string(),
+                );
+            }
         }
         if support.iter().any(|value| !value.is_finite())
             || fixed_precision.iter().any(|value| !value.is_finite())
@@ -689,6 +795,14 @@ fn validate_backend_spec(spec: &BackendSpec) -> BridgeResult<()> {
                 }
             }
         }
+    }
+    if !theta_state_present.iter().any(|present| *present)
+        && theta_sparse_state_present.iter().any(|present| *present)
+    {
+        return Err(
+            "theta sparse state evidence requires the complete theta state evidence block"
+                .to_string(),
+        );
     }
 
     if let Some(latent_init) = &spec.latent_init {
@@ -798,6 +912,21 @@ fn parse_backend_spec(spec_arg: Robj) -> BridgeResult<BackendSpec> {
             .map(|obj| parse_optional_real_vec(obj, "latent_state_linear"))
             .transpose()?
             .flatten(),
+        latent_state_precision_i: spec_map
+            .get("latent_state_precision_i")
+            .map(|obj| parse_optional_usize_vec(obj, "latent_state_precision_i"))
+            .transpose()?
+            .flatten(),
+        latent_state_precision_j: spec_map
+            .get("latent_state_precision_j")
+            .map(|obj| parse_optional_usize_vec(obj, "latent_state_precision_j"))
+            .transpose()?
+            .flatten(),
+        latent_state_precision_x: spec_map
+            .get("latent_state_precision_x")
+            .map(|obj| parse_optional_real_vec(obj, "latent_state_precision_x"))
+            .transpose()?
+            .flatten(),
         latent_fixed_state_precision: spec_map
             .get("latent_fixed_state_precision")
             .map(|obj| parse_optional_real_vec(obj, "latent_fixed_state_precision"))
@@ -831,6 +960,21 @@ fn parse_backend_spec(spec_arg: Robj) -> BridgeResult<BackendSpec> {
         theta_state_latent_linear: spec_map
             .get("theta_state_latent_linear")
             .map(|obj| parse_optional_real_vec(obj, "theta_state_latent_linear"))
+            .transpose()?
+            .flatten(),
+        theta_state_latent_precision_i: spec_map
+            .get("theta_state_latent_precision_i")
+            .map(|obj| parse_optional_usize_vec(obj, "theta_state_latent_precision_i"))
+            .transpose()?
+            .flatten(),
+        theta_state_latent_precision_j: spec_map
+            .get("theta_state_latent_precision_j")
+            .map(|obj| parse_optional_usize_vec(obj, "theta_state_latent_precision_j"))
+            .transpose()?
+            .flatten(),
+        theta_state_latent_precision_x: spec_map
+            .get("theta_state_latent_precision_x")
+            .map(|obj| parse_optional_real_vec(obj, "theta_state_latent_precision_x"))
             .transpose()?
             .flatten(),
         theta_state_latent_fixed_precision: spec_map
@@ -918,6 +1062,9 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
                 .as_deref()
                 .unwrap_or(&[]),
             latent_linear: spec.theta_state_latent_linear.as_deref().unwrap_or(&[]),
+            latent_precision_i: spec.theta_state_latent_precision_i.as_deref(),
+            latent_precision_j: spec.theta_state_latent_precision_j.as_deref(),
+            latent_precision_x: spec.theta_state_latent_precision_x.as_deref(),
             latent_fixed_precision: spec
                 .theta_state_latent_fixed_precision
                 .as_deref()
@@ -945,6 +1092,9 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
         fixed_state_linear: spec.fixed_state_linear.as_deref(),
         latent_state_precision_diag: spec.latent_state_precision_diag.as_deref(),
         latent_state_linear: spec.latent_state_linear.as_deref(),
+        latent_state_precision_i: spec.latent_state_precision_i.as_deref(),
+        latent_state_precision_j: spec.latent_state_precision_j.as_deref(),
+        latent_state_precision_x: spec.latent_state_precision_x.as_deref(),
         latent_fixed_state_precision: spec.latent_fixed_state_precision.as_deref(),
         theta_state_evidence,
     };
@@ -1038,6 +1188,9 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
                 theta_evidence_fixed_linear = res.theta_evidence_fixed_linear,
                 theta_evidence_latent_precision_diag = res.theta_evidence_latent_precision_diag,
                 theta_evidence_latent_linear = res.theta_evidence_latent_linear,
+                theta_evidence_latent_precision_i = res.theta_evidence_latent_precision_i,
+                theta_evidence_latent_precision_j = res.theta_evidence_latent_precision_j,
+                theta_evidence_latent_precision_x = res.theta_evidence_latent_precision_x,
                 theta_evidence_latent_fixed_precision = res.theta_evidence_latent_fixed_precision,
                 theta_evidence_log_constant = res.theta_evidence_log_constant,
                 prior_W = res.w_opt,

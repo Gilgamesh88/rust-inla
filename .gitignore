@@ -16,6 +16,17 @@ scratch/rlib/
 # Generated benchmark artifacts
 scratch/*.csv
 scratch/plots/
+scratch/phase8_reports/
+
+# Local Codex/Graphify state and rendered documentation outputs
+.codex/
+AGENTS.md
+graphify-out/
+*.html
+*.pdf
 
 # Downloaded or cached external reference data
 scratch/external_reference_data/
+
+# Sensitive local real-data inputs
+data/real/

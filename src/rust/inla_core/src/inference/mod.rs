@@ -15,6 +15,9 @@ pub struct ThetaStateEvidence<'a> {
     pub fixed_linear: &'a [f64],
     pub latent_precision_diag: &'a [f64],
     pub latent_linear: &'a [f64],
+    pub latent_precision_i: Option<&'a [usize]>,
+    pub latent_precision_j: Option<&'a [usize]>,
+    pub latent_precision_x: Option<&'a [f64]>,
     pub latent_fixed_precision: &'a [f64],
     pub log_constant: &'a [f64],
 }
@@ -24,6 +27,9 @@ pub struct SelectedStateEvidence {
     pub fixed_linear: Option<Vec<f64>>,
     pub latent_precision_diag: Option<Vec<f64>>,
     pub latent_linear: Option<Vec<f64>>,
+    pub latent_precision_i: Option<Vec<usize>>,
+    pub latent_precision_j: Option<Vec<usize>>,
+    pub latent_precision_x: Option<Vec<f64>>,
     pub latent_fixed_precision: Option<Vec<f64>>,
     pub log_constant: f64,
 }
@@ -34,6 +40,7 @@ impl SelectedStateEvidence {
             || self.fixed_linear.is_some()
             || self.latent_precision_diag.is_some()
             || self.latent_linear.is_some()
+            || self.latent_precision_x.is_some()
             || self.latent_fixed_precision.is_some()
             || self.log_constant != 0.0
     }
@@ -59,12 +66,19 @@ pub struct InlaModel<'a> {
     pub fixed_state_linear: Option<&'a [f64]>,
     pub latent_state_precision_diag: Option<&'a [f64]>,
     pub latent_state_linear: Option<&'a [f64]>,
+    pub latent_state_precision_i: Option<&'a [usize]>,
+    pub latent_state_precision_j: Option<&'a [usize]>,
+    pub latent_state_precision_x: Option<&'a [f64]>,
     pub latent_fixed_state_precision: Option<&'a [f64]>,
     pub theta_state_evidence: Option<ThetaStateEvidence<'a>>,
 }
 
 impl<'a> InlaModel<'a> {
-    fn theta_state_blend(&self, theta: &[f64], state: &ThetaStateEvidence<'_>) -> (usize, usize, f64) {
+    fn theta_state_blend(
+        &self,
+        theta: &[f64],
+        state: &ThetaStateEvidence<'_>,
+    ) -> (usize, usize, f64) {
         if state.n_support == 0 || theta.is_empty() {
             return (0, 0, 0.0);
         }
@@ -121,72 +135,152 @@ impl<'a> InlaModel<'a> {
         (best, best, 0.0)
     }
 
-    fn blend_theta_state_slice(
+    fn theta_state_blend_weights(
+        &self,
+        theta: &[f64],
+        state: &ThetaStateEvidence<'_>,
+    ) -> Vec<(usize, f64)> {
+        if state.n_support == 0 || theta.is_empty() {
+            return vec![(0, 1.0)];
+        }
+        if theta.len() == 1 {
+            let (left, right, right_weight) = self.theta_state_blend(theta, state);
+            if left == right || right_weight <= 0.0 {
+                return vec![(left, 1.0)];
+            }
+            return vec![(left, 1.0 - right_weight), (right, right_weight)];
+        }
+
+        let n_theta = theta.len();
+        let mut scale = vec![1.0_f64; n_theta];
+        let mut min_support = vec![f64::INFINITY; n_theta];
+        let mut max_support = vec![-f64::INFINITY; n_theta];
+        for (theta_idx, scale_i) in scale.iter_mut().enumerate().take(n_theta) {
+            let mut min_value = f64::INFINITY;
+            let mut max_value = -f64::INFINITY;
+            for support_idx in 0..state.n_support {
+                let value = state.support[support_idx * n_theta + theta_idx];
+                min_value = min_value.min(value);
+                max_value = max_value.max(value);
+            }
+            let range = max_value - min_value;
+            if range.is_finite() && range > 1e-12 {
+                *scale_i = range;
+            }
+            min_support[theta_idx] = min_value;
+            max_support[theta_idx] = max_value;
+        }
+
+        let mut distances: Vec<(usize, f64)> = (0..state.n_support)
+            .map(|support_idx| {
+                let mut dist = 0.0_f64;
+                for (theta_idx, theta_value) in theta.iter().enumerate().take(n_theta) {
+                    let diff = (*theta_value - state.support[support_idx * n_theta + theta_idx])
+                        / scale[theta_idx];
+                    dist += diff * diff;
+                }
+                (support_idx, dist)
+            })
+            .collect();
+        distances.sort_by(|lhs, rhs| {
+            lhs.1
+                .partial_cmp(&rhs.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if distances[0].1 <= 1e-12 {
+            return vec![(distances[0].0, 1.0)];
+        }
+
+        let outside_support = theta.iter().enumerate().any(|(theta_idx, theta_value)| {
+            *theta_value < min_support[theta_idx] - 1e-10
+                || *theta_value > max_support[theta_idx] + 1e-10
+        });
+        if outside_support {
+            return vec![(distances[0].0, 1.0)];
+        }
+
+        let target_count = (2 * n_theta + 1).min(state.n_support).max(1);
+        let radius_limit = (distances[0].1 * 4.0).max(1e-10);
+        let mut selected = Vec::new();
+        for &(support_idx, dist) in &distances {
+            if selected.len() < target_count || dist <= radius_limit {
+                selected.push((support_idx, dist));
+            }
+            if selected.len() >= target_count && dist > radius_limit {
+                break;
+            }
+        }
+
+        let mut raw_weights = Vec::with_capacity(selected.len());
+        let mut weight_sum = 0.0_f64;
+        for (support_idx, dist) in selected {
+            let weight = 1.0 / dist.max(1e-12);
+            raw_weights.push((support_idx, weight));
+            weight_sum += weight;
+        }
+        if weight_sum <= 0.0 || !weight_sum.is_finite() {
+            return vec![(distances[0].0, 1.0)];
+        }
+        raw_weights
+            .into_iter()
+            .map(|(support_idx, weight)| (support_idx, weight / weight_sum))
+            .collect()
+    }
+
+    fn blend_theta_state_slice_weighted(
         source: &[f64],
         per_support: usize,
-        left: usize,
-        right: usize,
-        right_weight: f64,
+        weights: &[(usize, f64)],
     ) -> Vec<f64> {
-        let left_start = left * per_support;
-        let right_start = right * per_support;
-        let left_slice = &source[left_start..left_start + per_support];
-        if left == right || right_weight <= 0.0 {
-            return left_slice.to_vec();
+        let mut out = vec![0.0_f64; per_support];
+        for &(support_idx, weight) in weights {
+            let start = support_idx * per_support;
+            let slice = &source[start..start + per_support];
+            for (target, value) in out.iter_mut().zip(slice.iter()) {
+                *target += weight * *value;
+            }
         }
-        let right_slice = &source[right_start..right_start + per_support];
-        let left_weight = 1.0 - right_weight;
-        left_slice
-            .iter()
-            .zip(right_slice.iter())
-            .map(|(lhs, rhs)| left_weight * *lhs + right_weight * *rhs)
-            .collect()
+        out
     }
 
     pub fn selected_state_evidence(&self, theta: &[f64]) -> SelectedStateEvidence {
         if let Some(theta_state) = &self.theta_state_evidence {
-            let (left, right, right_weight) = self.theta_state_blend(theta, theta_state);
-            let log_constant = if left == right || right_weight <= 0.0 {
-                theta_state.log_constant[left]
-            } else {
-                (1.0 - right_weight) * theta_state.log_constant[left]
-                    + right_weight * theta_state.log_constant[right]
-            };
+            let weights = self.theta_state_blend_weights(theta, theta_state);
+            let log_constant = weights
+                .iter()
+                .map(|(support_idx, weight)| weight * theta_state.log_constant[*support_idx])
+                .sum();
             return SelectedStateEvidence {
-                fixed_precision: Some(Self::blend_theta_state_slice(
+                fixed_precision: Some(Self::blend_theta_state_slice_weighted(
                     theta_state.fixed_precision,
                     self.n_fixed * self.n_fixed,
-                    left,
-                    right,
-                    right_weight,
+                    &weights,
                 )),
-                fixed_linear: Some(Self::blend_theta_state_slice(
+                fixed_linear: Some(Self::blend_theta_state_slice_weighted(
                     theta_state.fixed_linear,
                     self.n_fixed,
-                    left,
-                    right,
-                    right_weight,
+                    &weights,
                 )),
-                latent_precision_diag: Some(Self::blend_theta_state_slice(
+                latent_precision_diag: Some(Self::blend_theta_state_slice_weighted(
                     theta_state.latent_precision_diag,
                     self.n_latent,
-                    left,
-                    right,
-                    right_weight,
+                    &weights,
                 )),
-                latent_linear: Some(Self::blend_theta_state_slice(
+                latent_linear: Some(Self::blend_theta_state_slice_weighted(
                     theta_state.latent_linear,
                     self.n_latent,
-                    left,
-                    right,
-                    right_weight,
+                    &weights,
                 )),
-                latent_fixed_precision: Some(Self::blend_theta_state_slice(
+                latent_precision_i: theta_state.latent_precision_i.map(|values| values.to_vec()),
+                latent_precision_j: theta_state.latent_precision_j.map(|values| values.to_vec()),
+                latent_precision_x: theta_state.latent_precision_x.map(|values| {
+                    let n_edges = theta_state.latent_precision_i.map_or(0, |idx| idx.len());
+                    Self::blend_theta_state_slice_weighted(values, n_edges, &weights)
+                }),
+                latent_fixed_precision: Some(Self::blend_theta_state_slice_weighted(
                     theta_state.latent_fixed_precision,
                     self.n_latent * self.n_fixed,
-                    left,
-                    right,
-                    right_weight,
+                    &weights,
                 )),
                 log_constant,
             };
@@ -199,6 +293,9 @@ impl<'a> InlaModel<'a> {
                 .latent_state_precision_diag
                 .map(|values| values.to_vec()),
             latent_linear: self.latent_state_linear.map(|values| values.to_vec()),
+            latent_precision_i: self.latent_state_precision_i.map(|values| values.to_vec()),
+            latent_precision_j: self.latent_state_precision_j.map(|values| values.to_vec()),
+            latent_precision_x: self.latent_state_precision_x.map(|values| values.to_vec()),
             latent_fixed_precision: self
                 .latent_fixed_state_precision
                 .map(|values| values.to_vec()),
@@ -248,6 +345,9 @@ pub struct InlaResult {
     pub theta_evidence_fixed_linear: Vec<f64>,
     pub theta_evidence_latent_precision_diag: Vec<f64>,
     pub theta_evidence_latent_linear: Vec<f64>,
+    pub theta_evidence_latent_precision_i: Vec<usize>,
+    pub theta_evidence_latent_precision_j: Vec<usize>,
+    pub theta_evidence_latent_precision_x: Vec<f64>,
     pub theta_evidence_latent_fixed_precision: Vec<f64>,
     pub theta_evidence_log_constant: Vec<f64>,
     pub posterior_mean: Vec<f64>,
@@ -322,13 +422,34 @@ struct ThetaEvidenceBlocks {
     fixed_linear: Vec<f64>,
     latent_precision_diag: Vec<f64>,
     latent_linear: Vec<f64>,
+    latent_precision_x: Vec<f64>,
     latent_fixed_precision: Vec<f64>,
     log_constant: f64,
+}
+
+fn theta_evidence_pair_keys(a_rows: &[Vec<(usize, f64)>]) -> Vec<(usize, usize)> {
+    let mut pair_keys = Vec::new();
+    for row in a_rows {
+        for (idx, &(lhs, _)) in row.iter().enumerate() {
+            for &(rhs, _) in &row[(idx + 1)..] {
+                if lhs == rhs {
+                    continue;
+                }
+                let key = if lhs < rhs { (lhs, rhs) } else { (rhs, lhs) };
+                if !pair_keys.contains(&key) {
+                    pair_keys.push(key);
+                }
+            }
+        }
+    }
+    pair_keys.sort_unstable();
+    pair_keys
 }
 
 fn theta_evidence_blocks(
     model: &InlaModel<'_>,
     a_rows: &[Vec<(usize, f64)>],
+    pair_keys: &[(usize, usize)],
     theta: &[f64],
     x: &[f64],
     beta: &[f64],
@@ -358,6 +479,7 @@ fn theta_evidence_blocks(
     let mut fixed_linear = vec![0.0_f64; n_fixed];
     let mut latent_precision_diag = vec![0.0_f64; n_latent];
     let mut latent_linear = vec![0.0_f64; n_latent];
+    let mut latent_precision_x = vec![0.0_f64; pair_keys.len()];
     let mut latent_fixed_precision = vec![0.0_f64; n_latent * n_fixed];
     let mut weighted_pseudo = vec![0.0_f64; n_data];
     let mut log_constant = 0.0_f64;
@@ -398,6 +520,19 @@ fn theta_evidence_blocks(
                 }
             }
         }
+        for (idx, &(lhs, ax_lhs)) in a_rows[i].iter().enumerate() {
+            for &(rhs, ax_rhs) in &a_rows[i][(idx + 1)..] {
+                let value = ax_lhs * curvature[i] * ax_rhs;
+                if lhs == rhs {
+                    latent_precision_diag[lhs] += 2.0 * value;
+                    continue;
+                }
+                let key = if lhs < rhs { (lhs, rhs) } else { (rhs, lhs) };
+                if let Ok(pair_idx) = pair_keys.binary_search(&key) {
+                    latent_precision_x[pair_idx] += value;
+                }
+            }
+        }
     }
 
     ThetaEvidenceBlocks {
@@ -405,6 +540,7 @@ fn theta_evidence_blocks(
         fixed_linear,
         latent_precision_diag,
         latent_linear,
+        latent_precision_x,
         latent_fixed_precision,
         log_constant,
     }
@@ -484,10 +620,16 @@ impl InlaEngine {
         let mut next_x_warm = opt.mode_x.clone();
         let mut next_beta_warm = opt.mode_beta.clone();
         let a_rows = build_a_rows(model);
+        let theta_evidence_pair_keys = theta_evidence_pair_keys(&a_rows);
         let mut theta_evidence_fixed_precision = Vec::new();
         let mut theta_evidence_fixed_linear = Vec::new();
         let mut theta_evidence_latent_precision_diag = Vec::new();
         let mut theta_evidence_latent_linear = Vec::new();
+        let theta_evidence_latent_precision_i: Vec<usize> =
+            theta_evidence_pair_keys.iter().map(|(i, _)| *i).collect();
+        let theta_evidence_latent_precision_j: Vec<usize> =
+            theta_evidence_pair_keys.iter().map(|(_, j)| *j).collect();
+        let mut theta_evidence_latent_precision_x = Vec::new();
         let mut theta_evidence_latent_fixed_precision = Vec::new();
         let mut theta_evidence_log_constant = Vec::new();
 
@@ -551,12 +693,19 @@ impl InlaEngine {
             next_beta_warm = fixed_k.clone();
 
             if n > 0 && k > 0 {
-                let evidence =
-                    theta_evidence_blocks(model, &a_rows, theta_k, &mean_k, &fixed_k);
+                let evidence = theta_evidence_blocks(
+                    model,
+                    &a_rows,
+                    &theta_evidence_pair_keys,
+                    theta_k,
+                    &mean_k,
+                    &fixed_k,
+                );
                 theta_evidence_fixed_precision.extend(evidence.fixed_precision);
                 theta_evidence_fixed_linear.extend(evidence.fixed_linear);
                 theta_evidence_latent_precision_diag.extend(evidence.latent_precision_diag);
                 theta_evidence_latent_linear.extend(evidence.latent_linear);
+                theta_evidence_latent_precision_x.extend(evidence.latent_precision_x);
                 theta_evidence_latent_fixed_precision.extend(evidence.latent_fixed_precision);
                 theta_evidence_log_constant.push(evidence.log_constant);
             }
@@ -785,6 +934,9 @@ impl InlaEngine {
             theta_evidence_fixed_linear,
             theta_evidence_latent_precision_diag,
             theta_evidence_latent_linear,
+            theta_evidence_latent_precision_i,
+            theta_evidence_latent_precision_j,
+            theta_evidence_latent_precision_x,
             theta_evidence_latent_fixed_precision,
             theta_evidence_log_constant,
             posterior_mean,

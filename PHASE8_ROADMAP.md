@@ -450,3 +450,121 @@ Key warning:
   the general graph structure and require careful sparse level alignment
 - ignoring cross edges can make posterior uncertainty lie; this is the same
   lesson learned from the fixed-random cross block in Phase 8A
+
+## Phase 8H: multi-iid evidence graph
+
+Status: active experimental implementation.
+
+Scope implemented:
+
+- `rusty_update_state()` accepts one or more `iid` latent blocks for the
+  source-mode Gaussian evidence path
+- the public R state now carries `iid_blocks` plus a sparse
+  `latent_pair_precision` graph for iid-iid cross evidence
+- dormant/born level carry now loops over every iid block instead of one
+  hard-coded covariate
+- the Rust bridge accepts `latent_state_precision_i`,
+  `latent_state_precision_j`, and `latent_state_precision_x`
+- the core solver merges those sparse old-data edges into the latent
+  factorization graph
+- source-mode composition can add a previous multi-iid evidence graph to the
+  current extracted evidence graph
+- `fixed_iid_cross_theta_evidence` can consume multi-iid theta support by
+  carrying dense fixed, diagonal iid, fixed-iid, and sparse iid-iid evidence
+  at each support point
+
+First validation target:
+
+- `tests/posterior-state-multi-iid-evidence.R`
+- synthetic Poisson offset model with two iid blocks
+- born levels in both iid blocks
+- source-mode and theta-dependent updates versus joint refit
+- current source-mode result: theta drift `6.205979`, fixed drift `0.007414`,
+  random drift `0.021681`, fitted max relative drift `0.029236`
+- current theta-dependent result: theta drift `6.099695`, fixed drift
+  `0.007255`, random drift `0.021344`, fitted max relative drift `0.028684`
+
+Important limitation:
+
+- multi-iid theta-dependent evidence uses guarded multidimensional local
+  interpolation: inside the old CCD support box it blends nearby support
+  evidence; outside that box it falls back to the nearest support point rather
+  than extrapolating the old likelihood evidence
+- theta drift remains diagnostic-only in the first multi-iid test because the
+  joint-refit theta lies far outside the old CCD support for the first iid
+  precision; broader real-data validation is still needed before trusting
+  multi-iid hyperparameters year-by-year
+
+## Phase 8I: expanded multi-iid theta support
+
+Status: active experimental implementation.
+
+Goal: reduce multi-iid theta drift when the joint-refit hyperparameter mode
+moves outside the original old-fit CCD cloud.
+
+Scope implemented:
+
+- `rusty_update_state()` now accepts
+  `theta_support_expansion = c("auto", "none")`
+- the default `"auto"` path applies only to multi-iid theta-evidence states
+- expansion uses fixed-theta replay on the old data at axial guard points
+  beyond the original CCD range
+- each successful guard replay appends a real old-data evidence block:
+  `H_beta_beta`, `h_beta`, `H_u_u_diag`, `h_u`, `H_u_beta`, sparse
+  `H_u_u`, and `log_constant`
+- guard points get zero integration weight because they are interpolation
+  support, not posterior-mass points
+- update metadata records support-expansion strategy and guard points added
+
+First validation result:
+
+- `tests/posterior-state-multi-iid-evidence.R` now compares source-mode,
+  original CCD theta support, and expanded guard theta support
+- state extraction time: original CCD `0.100s`, expanded guard `0.130s`
+- update fit time: source `0.110s`, CCD dynamic `0.050s`, guard dynamic
+  `0.070s`, joint `0.280s`
+- theta drift improved from source `6.205979` and CCD dynamic `6.099695` to
+  expanded guard dynamic `1.999375`
+- fixed drift improved from `0.007414` source to `0.003713` guard dynamic
+- random drift improved from `0.021681` source to `0.006223` guard dynamic
+- fitted max relative drift improved from `0.029236` source to `0.008498`
+  guard dynamic
+
+Important limitation:
+
+- expanded support improves the synthetic outside-cloud theta case, but theta
+  is still a diagnostic target until this is validated on real rolling data
+- if the new fit still leaves the expanded support region, the guarded solver
+  falls back to nearest support rather than extrapolating old evidence
+- adaptive support refinement during the update would be stronger, but would
+  require keeping access to the old data rather than using only the compressed
+  state
+
+## Phase 9 complement: clean-room actuarial distributions
+
+The rolling iid evidence MVP in commit `230b9c8` and the recursive evidence
+graph roadmap in commit `ecaf119` make the sequential-update path useful enough
+that the next likelihood additions should be planned deliberately rather than
+as one-off family strings.
+
+The Phase 9 distribution roadmap is tracked in
+[CLEAN_ROOM_DISTRIBUTION_ROADMAP.md](CLEAN_ROOM_DISTRIBUTION_ROADMAP.md).
+Its purpose is to add actuarial count and severity breadth while keeping the
+implementation native and clean-room:
+
+- native `nbinomial2` as the next low-friction GLM-like family
+- constant zero-inflated count families, including `zeroinflatednbinomial2`
+- a stabilized Tweedie density based on the compound Poisson-Gamma
+  representation
+- later, a second-predictor zero-inflation surface inspired by public
+  multi-part model semantics but implemented independently
+
+Phase 8 compatibility rule:
+
+- update states must continue to reject changed families
+- each new family must define stable theta names, transforms, and curvature
+  behavior before it is used in rolling-update validation
+- each new family should define what evidence blocks can be extracted for the
+  recursive graph state before it is promoted beyond single-fit validation
+- Tweedie remains out of the Phase 8 validation family set until its density
+  implementation is benchmark-clean

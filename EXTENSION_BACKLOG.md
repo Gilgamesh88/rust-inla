@@ -131,23 +131,32 @@ Expected work:
 - keep expression priors, `rprior`, table priors, and broad R-INLA prior
   registry parity out of scope until the metadata layer is stable
 
-### 3. one additional GLM-like likelihood family
+### 3. Phase 9 clean-room actuarial distribution track
 
 Candidate examples:
 
-- negative binomial, if count overdispersion is the most valuable next actuarial case
+- negative binomial 2, if count overdispersion is the most valuable next actuarial case
+- constant zero-inflated negative binomial after native negative binomial is stable
+- Tweedie stabilization through a clean compound Poisson-Gamma density path
 - binomial, if generalized-link validation breadth is more important
 
 Why now:
 
 - the likelihood trait is already a clean extension point
 - this usually requires less API redesign than a new spatial GMRF family
+- the Phase 8 rolling iid evidence MVP gives future likelihoods a clearer
+  sequential-validation target
 
 Expected work:
 
 - implement the likelihood struct
 - register its string name and defaults in the bridge
 - add unit tests, end-to-end tests, and reference comparisons
+- keep `glmmTMB`/`TMB` as optional black-box reference oracles only, not
+  runtime dependencies or source-code references
+- follow the mathematical clean-room plan in
+  [CLEAN_ROOM_DISTRIBUTION_ROADMAP.md](CLEAN_ROOM_DISTRIBUTION_ROADMAP.md)
+  as the Phase 9 plan
 
 ### If we add exactly one more thing before the first public release
 
@@ -168,7 +177,8 @@ Why:
 
 Best second choice after that:
 
-- one additional GLM-like family, with `nbinomial` the strongest candidate if count overdispersion is the most valuable next actuarial case
+- the Phase 9 clean-room actuarial distribution track, with `nbinomial2` first if
+  count overdispersion is the most valuable next actuarial case
 
 Practical interpretation:
 
@@ -176,7 +186,8 @@ Practical interpretation:
 - if we choose one thing for release honesty after Phase 7A, choose Phase 8
   prior/control metadata design
 - if we choose one thing for immediate actuarial model breadth after Phase 8,
-  choose a GLM-like family
+  choose native `nbinomial2`, then constant zero-inflated NB2, then Tweedie
+  stabilization
 
 ## Priority 2: modest API expansion with strong payoff
 
@@ -218,6 +229,8 @@ Why later:
 
 - they are not just another scalar-family extension
 - they need clearer support for family-specific covariates or multiple linear predictors
+- constant zero-inflated families should be stabilized first under the
+  clean-room distribution roadmap
 
 Expected work:
 
@@ -273,7 +286,7 @@ If development capacity is limited, the most efficient sequence is:
 1. keep the current stable subset benchmark-clean
 2. keep Phase 7A fixed-effects productization closed and gated
 3. complete Phase 8 prior/control metadata design
-4. add one additional GLM-like family
+4. add Phase 9 clean-room distributions, starting with native `nbinomial2`
 5. widen the backend spec for generic graph input
 6. add `besag`
 7. revisit richer multi-part families

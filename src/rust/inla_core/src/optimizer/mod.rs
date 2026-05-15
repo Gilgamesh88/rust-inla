@@ -191,6 +191,15 @@ fn state_log_factor(evidence: &SelectedStateEvidence, x: &[f64], beta: &[f64]) -
                 .map(|(x_i, h_i)| x_i * h_i * x_i)
                 .sum::<f64>();
     }
+    if let (Some(rows), Some(cols), Some(values)) = (
+        evidence.latent_precision_i.as_deref(),
+        evidence.latent_precision_j.as_deref(),
+        evidence.latent_precision_x.as_deref(),
+    ) {
+        for idx in 0..values.len() {
+            value -= values[idx] * x[rows[idx]] * x[cols[idx]];
+        }
+    }
 
     if let Some(linear) = evidence.fixed_linear.as_deref() {
         value += beta
@@ -301,12 +310,12 @@ pub(crate) fn laplace_eval(
         gaussian_integrated_data_term(model, theta_lik, &eta_for_lik)
     };
     let log_mlik = if let Some(data_term) = gaussian_data_term {
-            0.5 * (final_log_det_q - final_log_det_aug) + data_term + log_prior
-        } else {
-            0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form
-                + state_log_factor
-                + log_prior
-        };
+        0.5 * (final_log_det_q - final_log_det_aug) + data_term + log_prior
+    } else {
+        0.5 * (final_log_det_q - final_log_det_aug) + sum_logll - 0.5 * final_q_form
+            + state_log_factor
+            + log_prior
+    };
 
     let decomposition = LaplaceDecomposition {
         sum_loglik: sum_logll,
@@ -860,6 +869,9 @@ mod tests {
             fixed_state_linear: None,
             latent_state_precision_diag: None,
             latent_state_linear: None,
+            latent_state_precision_i: None,
+            latent_state_precision_j: None,
+            latent_state_precision_x: None,
             latent_fixed_state_precision: None,
             theta_state_evidence: None,
         };
@@ -904,6 +916,9 @@ mod tests {
             fixed_state_linear: None,
             latent_state_precision_diag: None,
             latent_state_linear: None,
+            latent_state_precision_i: None,
+            latent_state_precision_j: None,
+            latent_state_precision_x: None,
             latent_fixed_state_precision: None,
             theta_state_evidence: None,
         };
