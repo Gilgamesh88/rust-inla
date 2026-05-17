@@ -530,7 +530,7 @@ fn test_fixed_only_gaussian_covariance_matches_dense_gls_reference() {
     };
 
     let mut problem = Problem::new(&model);
-    let (_, x_hat, log_det_aug, diag_aug_inv, fixed_cov, latent_fixed_cov, schur_log_det) = problem
+    let (_, x_hat, log_det_aug, diag_aug_inv, fixed_cov, latent_fixed_cov, _, schur_log_det) = problem
         .find_mode_with_fixed_effects_with_cov(&model, &theta, &[], &[], 50, 1e-8)
         .unwrap();
 
@@ -637,7 +637,7 @@ fn test_gaussian_multi_fixed_iid_problem_returns_exact_fixed_covariance() {
     };
 
     let mut problem = Problem::new(&model);
-    let (_, _, _, diag_aug_inv, fixed_cov, latent_fixed_cov, _) = problem
+    let (_, _, _, diag_aug_inv, fixed_cov, latent_fixed_cov, _, _) = problem
         .find_mode_with_fixed_effects_with_cov(&model, &theta, &[], &[], 50, 1e-8)
         .unwrap();
 
@@ -769,7 +769,7 @@ fn test_gaussian_multi_fixed_skip_ccd_fixed_sds_match_conditional_covariance() {
     let res = InlaEngine::run(&model, &params).unwrap();
 
     let mut problem = Problem::new(&model);
-    let (_, _, _, _, fixed_cov, _, _) = problem
+    let (_, _, _, _, fixed_cov, _, _, _) = problem
         .find_mode_with_fixed_effects_with_cov(
             &model,
             &res.theta_opt,
@@ -929,7 +929,7 @@ fn test_gaussian_benchmark_style_fixed_covariance_matches_dense_gls_reference() 
     };
 
     let mut problem = Problem::new(&model);
-    let (_, _, _, _, fixed_cov, _, _) = problem
+    let (_, _, _, _, fixed_cov, _, _, _) = problem
         .find_mode_with_fixed_effects_with_cov(&model, &theta, &[], &[], 50, 1e-8)
         .unwrap();
 

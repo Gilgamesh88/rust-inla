@@ -105,6 +105,21 @@ finally {
 }
 
 Write-Host ''
+Write-Host '==> Phase 8 variable K-iid evidence graph'
+Write-Host "    $Rscript tests\posterior-state-k-iid-evidence.R"
+
+Push-Location $repoRoot
+try {
+    & $Rscript 'tests\posterior-state-k-iid-evidence.R'
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
+}
+
+Write-Host ''
 Write-Host '==> Phase 8 theta evidence extraction shape'
 Write-Host "    $Rscript tests\posterior-state-theta-evidence-shape.R"
 

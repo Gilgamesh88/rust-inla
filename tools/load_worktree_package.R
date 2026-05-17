@@ -10,6 +10,16 @@ load_rustyinla_for_benchmarks <- function(repo_root = getwd()) {
             "rust",
             "target",
             "x86_64-pc-windows-gnu",
+            "release",
+            "rustyINLA.dll"
+        ),
+        file.path(repo_root, "src", "rust", "target", "release", "rustyINLA.dll"),
+        file.path(
+            repo_root,
+            "src",
+            "rust",
+            "target",
+            "x86_64-pc-windows-gnu",
             "debug",
             "rustyINLA.dll"
         ),

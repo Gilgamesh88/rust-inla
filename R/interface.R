@@ -216,6 +216,68 @@ validate_supported_formula_subset <- function(formula, data, tf) {
     )
 }
 
+extract_formula_offset <- function(tf, data) {
+    offset_idx <- attr(tf, "offset")
+    if (is.null(offset_idx) || length(offset_idx) == 0L) {
+        return(NULL)
+    }
+
+    variables <- attr(tf, "variables")
+    formula_env <- attr(tf, ".Environment")
+    if (is.null(formula_env)) {
+        formula_env <- parent.frame()
+    }
+
+    offsets <- lapply(offset_idx, function(idx) {
+        expr <- formula_variable_expr(variables, idx)
+        if (!is.call(expr) || !identical(expr[[1L]], as.name("offset")) || length(expr) != 2L) {
+            stop("Formula offset must be an offset(...) call.", call. = FALSE)
+        }
+        value <- tryCatch(
+            eval(expr[[2L]], envir = data, enclos = formula_env),
+            error = function(e) {
+                stop(
+                    sprintf("Could not evaluate formula offset: %s", e$message),
+                    call. = FALSE
+                )
+            }
+        )
+        if (!is.numeric(value)) {
+            stop("Formula offset must evaluate to a numeric vector.", call. = FALSE)
+        }
+        value <- as.numeric(value)
+        if (length(value) != nrow(data)) {
+            stop("Formula offset length does not match the number of observations.")
+        }
+        if (any(!is.finite(value))) {
+            stop("Formula offset contains non-finite values.", call. = FALSE)
+        }
+        value
+    })
+
+    Reduce(`+`, offsets)
+}
+
+drop_latent_terms_for_fixed_design <- function(tf, f_term_idx) {
+    if (length(f_term_idx) == 0L) {
+        return(delete.response(tf))
+    }
+
+    term_labels <- attr(tf, "term.labels")
+    keep_idx <- setdiff(seq_along(term_labels), f_term_idx)
+    if (length(keep_idx) > 0L) {
+        return(drop.terms(tf, f_term_idx, keep.response = FALSE))
+    }
+
+    fixed_formula <- if (identical(attr(tf, "intercept"), 0L)) {
+        stats::as.formula("~ 0")
+    } else {
+        stats::as.formula("~ 1")
+    }
+    attr(fixed_formula, ".Environment") <- attr(tf, ".Environment")
+    terms(fixed_formula)
+}
+
 # Internal helper to assemble the backend specification consumed by Rust.
 build_backend_spec <- function(
     formula,
@@ -235,11 +297,7 @@ build_backend_spec <- function(
 
     # 2. Extract fixed terms design matrix
     f_term_idx <- formula_info$f_term_idx
-    if (length(f_term_idx) > 0) {
-        tf_fixed <- drop.terms(tf, f_term_idx, keep.response = FALSE)
-    } else {
-        tf_fixed <- delete.response(tf)
-    }
+    tf_fixed <- drop_latent_terms_for_fixed_design(tf, f_term_idx)
 
     mf_fixed <- tryCatch(
         model.frame(tf_fixed, data = data, na.action = na.pass),
@@ -285,16 +343,7 @@ build_backend_spec <- function(
             )
         }
     }
-    formula_offset <- model.offset(mf_fixed)
-    if (!is.null(formula_offset)) {
-        formula_offset <- as.numeric(formula_offset)
-        if (length(formula_offset) != nrow(data)) {
-            stop("Formula offset length does not match the number of observations.")
-        }
-        if (any(!is.finite(formula_offset))) {
-            stop("Formula offset contains non-finite values.", call. = FALSE)
-        }
-    }
+    formula_offset <- extract_formula_offset(tf, data)
     user_offset <- NULL
     if (isTRUE(offset_provided)) {
         user_offset <- tryCatch(
@@ -491,6 +540,62 @@ build_internal_design <- function(backend_spec, n_data) {
         a_x = backend_spec$a_x,
         offset = if (is.null(backend_spec$offset)) rep(0.0, n_data) else backend_spec$offset,
         latent_blocks = backend_spec$latent_blocks
+    )
+}
+
+build_latent_level_metadata <- function(backend_spec) {
+    if (length(backend_spec$latent_blocks) == 0L) {
+        return(data.frame(
+            index = integer(),
+            covariate_name = character(),
+            level = character(),
+            latent_name = character(),
+            check.names = FALSE
+        ))
+    }
+
+    rows <- lapply(backend_spec$latent_blocks, function(block) {
+        nl <- as.integer(block$n_levels)
+        levels <- if (!is.null(block$level_values) && length(block$level_values) == nl) {
+            as.character(block$level_values)
+        } else {
+            as.character(seq_len(nl))
+        }
+        data.frame(
+            index = as.integer(block$start) + seq_len(nl),
+            covariate_name = block$covariate_name,
+            level = levels,
+            latent_name = paste(block$covariate_name, levels, sep = ":"),
+            check.names = FALSE
+        )
+    })
+    do.call(rbind, rows)
+}
+
+build_latent_pair_covariance <- function(res, latent_names) {
+    pair_i <- if (is.null(res$latent_pair_cov_i)) integer() else as.integer(res$latent_pair_cov_i)
+    pair_j <- if (is.null(res$latent_pair_cov_j)) integer() else as.integer(res$latent_pair_cov_j)
+    pair_cov <- if (is.null(res$latent_pair_cov)) numeric() else as.numeric(res$latent_pair_cov)
+    n_pair <- min(length(pair_i), length(pair_j), length(pair_cov))
+    if (n_pair == 0L) {
+        return(data.frame(
+            i = integer(),
+            j = integer(),
+            latent_i = character(),
+            latent_j = character(),
+            covariance = numeric(),
+            check.names = FALSE
+        ))
+    }
+    pair_i <- pair_i[seq_len(n_pair)] + 1L
+    pair_j <- pair_j[seq_len(n_pair)] + 1L
+    data.frame(
+        i = pair_i,
+        j = pair_j,
+        latent_i = latent_names[pair_i],
+        latent_j = latent_names[pair_j],
+        covariance = pair_cov[seq_len(n_pair)],
+        check.names = FALSE
     )
 }
 
@@ -3970,6 +4075,8 @@ rusty_inla <- function(
     if (is.character(res)) { stop(res) }
 
     # 5. Build Standard Output Structure matching R-INLA expectations
+    latent_metadata <- build_latent_level_metadata(backend_spec)
+    latent_names <- latent_metadata$latent_name
     fit <- list(
         call = match.call(),
         formula = formula,
@@ -4104,9 +4211,23 @@ rusty_inla <- function(
             byrow = TRUE,
             dimnames = list(backend_spec$fixed_names, backend_spec$fixed_names)
         ),
+        fixed_cov = matrix(
+            if (is.null(res$fixed_cov)) numeric() else as.numeric(res$fixed_cov),
+            nrow = backend_spec$n_fixed,
+            ncol = backend_spec$n_fixed,
+            byrow = TRUE,
+            dimnames = list(backend_spec$fixed_names, backend_spec$fixed_names)
+        ),
         fixed_prior_precision = 0.001,
         latent_mode = if (is.null(res$mode_x)) numeric() else as.numeric(res$mode_x),
-        latent_var_theta_opt = if (is.null(res$latent_var_theta_opt)) numeric() else as.numeric(res$latent_var_theta_opt)
+        latent_var_theta_opt = if (is.null(res$latent_var_theta_opt)) numeric() else as.numeric(res$latent_var_theta_opt),
+        latent_fixed_cov = matrix(
+            if (is.null(res$latent_fixed_cov)) numeric() else as.numeric(res$latent_fixed_cov),
+            nrow = backend_spec$n_latent,
+            ncol = backend_spec$n_fixed,
+            dimnames = list(latent_names, backend_spec$fixed_names)
+        ),
+        latent_pair_cov = build_latent_pair_covariance(res, latent_names)
     )
 
     if (identical(output_profile, "benchmark")) {

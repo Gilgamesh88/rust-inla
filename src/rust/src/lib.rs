@@ -1165,6 +1165,11 @@ fn rust_inla_run(spec_arg: Robj) -> Robj {
                 fixed_sds = res.fixed_sds,
                 fixed_var_theta_opt = res.fixed_var_theta_opt,
                 fixed_cov_theta_opt = res.fixed_cov_theta_opt,
+                fixed_cov = res.fixed_cov,
+                latent_fixed_cov = res.latent_fixed_cov,
+                latent_pair_cov_i = res.latent_pair_cov_i,
+                latent_pair_cov_j = res.latent_pair_cov_j,
+                latent_pair_cov = res.latent_pair_cov,
                 marg_means = marg_means,
                 marg_vars = marg_vars,
                 // Predictions mapped to the Response (μ) Scale natively!

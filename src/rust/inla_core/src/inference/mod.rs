@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use crate::diagnostics::RunDiagnosticsSummary;
 use crate::error::InlaError;
@@ -335,6 +335,11 @@ pub struct InlaResult {
     pub fixed_sds: Vec<f64>,
     pub fixed_var_theta_opt: Vec<f64>,
     pub fixed_cov_theta_opt: Vec<f64>,
+    pub fixed_cov: Vec<f64>,
+    pub latent_fixed_cov: Vec<f64>,
+    pub latent_pair_cov_i: Vec<usize>,
+    pub latent_pair_cov_j: Vec<usize>,
+    pub latent_pair_cov: Vec<f64>,
     pub ccd_thetas: Vec<f64>,
     pub ccd_base_weights: Vec<f64>,
     pub ccd_weights: Vec<f64>,
@@ -556,11 +561,13 @@ impl InlaEngine {
         let n_model = model.qfunc.n_hyperparams();
         let n = model.n_latent;
         let k = model.n_fixed;
+        let latent_pair_keys = problem.a_pair_keys().to_vec();
+        let n_latent_pairs = latent_pair_keys.len();
 
         let mut fixed_var_theta_opt = vec![0.0_f64; k];
         let mut fixed_cov_theta_opt = vec![0.0_f64; k * k];
         let latent_var_theta_opt = if k > 0 {
-            let (_, _, _, diag_aug_inv, fixed_cov, _, _) = problem
+            let (_, _, _, diag_aug_inv, fixed_cov, _, _, _) = problem
                 .find_mode_with_fixed_effects_with_cov(
                     model,
                     &theta_opt,
@@ -617,6 +624,8 @@ impl InlaEngine {
         let mut mixed_fixed_cov_inner = vec![0.0_f64; k * k];
         let mut mixed_latent_fixed_second_moment = vec![0.0_f64; n * k];
         let mut mixed_latent_fixed_cov_inner = vec![0.0_f64; n * k];
+        let mut mixed_latent_pair_second_moment = vec![0.0_f64; n_latent_pairs];
+        let mut mixed_latent_pair_cov_inner = vec![0.0_f64; n_latent_pairs];
         let mut next_x_warm = opt.mode_x.clone();
         let mut next_beta_warm = opt.mode_beta.clone();
         let a_rows = build_a_rows(model);
@@ -665,8 +674,24 @@ impl InlaEngine {
                 }
             }
 
-            let (fixed_k, mean_k, vars_k, fixed_cov_k, latent_fixed_cov_k) = if k > 0 {
-                let (beta, x_hat, _, diag_aug_inv, fixed_cov, latent_fixed_cov, _) = problem
+            let (
+                fixed_k,
+                mean_k,
+                vars_k,
+                fixed_cov_k,
+                latent_fixed_cov_k,
+                latent_pair_cov_k,
+            ) = if k > 0 {
+                let (
+                    beta,
+                    x_hat,
+                    _,
+                    diag_aug_inv,
+                    fixed_cov,
+                    latent_fixed_cov,
+                    latent_pair_cov,
+                    _,
+                ) = problem
                     .find_mode_with_fixed_effects_with_cov(
                         model, theta_k, &x_warm, &beta_warm, 20, 1e-8,
                     )
@@ -676,7 +701,7 @@ impl InlaEngine {
                         ),
                     })?;
                 let vs: Vec<f64> = diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect();
-                (beta, x_hat, vs, fixed_cov, latent_fixed_cov)
+                (beta, x_hat, vs, fixed_cov, latent_fixed_cov, latent_pair_cov)
             } else {
                 let (x_hat, _, diag_aug_inv) = problem
                     .find_mode_with_inverse(model, theta_k, &x_warm, 20, 1e-8)
@@ -686,7 +711,7 @@ impl InlaEngine {
                         ),
                     })?;
                 let vs: Vec<f64> = diag_aug_inv.into_iter().map(|v| v.max(1e-12)).collect();
-                (vec![], x_hat, vs, vec![], vec![])
+                (vec![], x_hat, vs, vec![], vec![], vec![])
             };
 
             next_x_warm = mean_k.clone();
@@ -728,6 +753,12 @@ impl InlaEngine {
                         weight * latent_fixed_cov_k[i + j * n];
                 }
             }
+            if latent_pair_cov_k.len() == n_latent_pairs {
+                for (slot, &(lhs, rhs)) in latent_pair_keys.iter().enumerate() {
+                    mixed_latent_pair_second_moment[slot] += weight * mean_k[lhs] * mean_k[rhs];
+                    mixed_latent_pair_cov_inner[slot] += weight * latent_pair_cov_k[slot];
+                }
+            }
         }
 
         let mut inter_var = vec![0.0_f64; n];
@@ -752,6 +783,17 @@ impl InlaEngine {
                     - mixed_mean[i] * mixed_fixed_mean[j];
             }
         }
+
+        let mut mixed_latent_pair_cov = mixed_latent_pair_cov_inner;
+        for (slot, &(lhs, rhs)) in latent_pair_keys.iter().enumerate() {
+            mixed_latent_pair_cov[slot] +=
+                mixed_latent_pair_second_moment[slot] - mixed_mean[lhs] * mixed_mean[rhs];
+        }
+        let latent_pair_cov_lookup: HashMap<(usize, usize), f64> = latent_pair_keys
+            .iter()
+            .copied()
+            .zip(mixed_latent_pair_cov.iter().copied())
+            .collect();
 
         let mut fixed_sds = vec![0.0_f64; k];
         for j in 0..k {
@@ -853,6 +895,17 @@ impl InlaEngine {
                 for &(j, ax) in &a_rows[i] {
                     var += ax * ax * variances[j];
                 }
+                for (left_idx, &(lhs, lhs_ax)) in a_rows[i].iter().enumerate() {
+                    for &(rhs, rhs_ax) in &a_rows[i][(left_idx + 1)..] {
+                        if lhs == rhs {
+                            continue;
+                        }
+                        let key = if lhs < rhs { (lhs, rhs) } else { (rhs, lhs) };
+                        if let Some(cov) = latent_pair_cov_lookup.get(&key) {
+                            var += 2.0 * lhs_ax * rhs_ax * *cov;
+                        }
+                    }
+                }
                 if let Some(fixed_matrix) = model.fixed_matrix {
                     for j1 in 0..k {
                         let x_i_j1 = fixed_matrix[i + j1 * model.y.len()];
@@ -924,6 +977,11 @@ impl InlaEngine {
             fixed_sds,
             fixed_var_theta_opt,
             fixed_cov_theta_opt,
+            fixed_cov: mixed_fixed_cov,
+            latent_fixed_cov: mixed_latent_fixed_cov,
+            latent_pair_cov_i: latent_pair_keys.iter().map(|(lhs, _)| *lhs).collect(),
+            latent_pair_cov_j: latent_pair_keys.iter().map(|(_, rhs)| *rhs).collect(),
+            latent_pair_cov: mixed_latent_pair_cov,
             ccd_thetas,
             ccd_base_weights,
             ccd_weights,

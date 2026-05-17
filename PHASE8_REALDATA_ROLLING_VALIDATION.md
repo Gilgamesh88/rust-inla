@@ -241,14 +241,37 @@ truth comparator:
   cumulative joint refit through the same period
 ```
 
+For multi-iid rolling runs, the template selects the evidence mode from the
+current state. A state with multi-point `theta_evidence` uses
+`fixed_iid_cross_theta_evidence`; a composed multi-iid state without
+multi-dimensional theta composition falls back to
+`fixed_iid_cross_gaussian_evidence`. This keeps the rolling path runnable while
+making the theta limitation explicit in `realdata_rolling_update_times.csv`.
+
 It writes:
 
 ```text
 realdata_rolling_update_times.csv
 realdata_rolling_metrics.csv
+realdata_rolling_theta_proxy_vs_joint.csv
 realdata_rolling_effects_proxy_vs_joint.csv
 realdata_rolling_fitted_proxy_vs_joint.csv
 ```
+
+`realdata_rolling_theta_proxy_vs_joint.csv` is the preferred theta diagnostic.
+It compares every iid precision hyperparameter on several scales:
+
+```text
+log precision mean/mode
+raw precision mean and relative drift
+block-level random-effect SD, exp(-0.5 * log_precision)
+precision marginal CDF KS
+uncertainty-aware log-precision z drift
+```
+
+Raw precision drift can be misleading when both fits drive an iid precision
+very high. The block-SD and internal log-precision columns are usually more
+interpretable for actuarial shrinkage.
 
 By default, `--joint-refit-schedule=all` runs a cumulative joint refit after
 every update. For longer rolling checks, use `--joint-refit-schedule=final` to
@@ -299,6 +322,100 @@ Core diagnostics:
 - fitted-value total, quantile, and top-cell drift on the new period
 - exposure/claim summaries by factor level and period, useful for sparse
   levels such as `modeloc(20,25]`
+
+## Current Corrected Two-Iid Rolling Result
+
+After fixing formula-offset extraction, the first all-period two-iid diagnostic
+ran from `2021_y` through `2025_4t` with a final cumulative joint refit:
+
+```text
+report_dir:
+  scratch/phase8_reports/realdata_two_iid_all_periods_offsetfix_final_joint_v2
+
+base fit:
+  35.36 sec, 3.97 MB object
+
+rolling updates:
+  first update mode: fixed_iid_cross_theta_evidence
+  later composed-state mode: fixed_iid_cross_gaussian_evidence
+  final update 2025_4t: 24.94 sec, 5.14 MB object
+
+final joint refit:
+  189.56 sec, 60.54 MB object
+```
+
+Final-period update versus cumulative joint refit:
+
+```text
+theta internal drift max:      0.108704
+theta CDF KS max:              0.113248
+fixed mean max abs drift:      0.098801
+random mean max abs drift:     0.052692
+fitted max relative drift:     0.107920
+fitted total update vs joint:  1104.03 vs 1087.55
+```
+
+By block, the final theta drift is mostly geographic:
+
+```text
+desc_edo_circula:
+  log-precision mean drift: 0.111272
+  block SD relative drift:  0.057213
+
+desc_armadora:
+  log-precision mean drift: 0.007390
+  block SD relative drift:  0.003702
+```
+
+This result is a usable MVP diagnostic, not a final claim of exact full Bayes:
+multi-iid theta composition is still source-mode after the first update. The
+drifts above are therefore the main evidence for whether that approximation is
+acceptable on this portfolio.
+
+## Walkthrough script
+
+For a direct package-use example rather than the full harness, run:
+
+```powershell
+Rscript examples\phase8_two_iid_rolling_update_walkthrough.R
+```
+
+That script performs the first two-iid rolling check step by step:
+
+```text
+1. read the private RDS
+2. aggregate Poisson cells
+3. fit 2021_y
+4. extract rusty_update_state()
+5. update on 2022_1t
+6. fit the cumulative joint comparator
+7. write theta, effect, fitted, observed-frequency, prediction, and timing
+   tables
+```
+
+It is meant to be edited locally when testing new period splits or factor
+choices.
+
+The walkthrough now writes explicit frequency-scale guardrails:
+
+```text
+walkthrough_observed_period_frequencies.csv
+walkthrough_prediction_frequency_summary.csv
+walkthrough_level_predictions.csv
+```
+
+`walkthrough_level_predictions.csv` includes observed claims, exposure,
+period count, and empirical frequency for the exact model cell represented by
+each prediction row. This is deliberate: a full Cartesian prediction grid can
+include sparse or synthetic factor combinations, so the report should make it
+obvious whether a surprising frequency is coming from observed experience or
+from extrapolating a level combination.
+
+The package interface also has a regression guard for formula offsets mixed
+with latent `f(...)` terms. The offset must be extracted from the original
+formula before the latent terms are removed for fixed-effect model-matrix
+construction; otherwise `offset(log(expuesto))` can be silently lost and the
+Poisson model fits claim counts instead of frequency.
 
 ## Guardrails
 

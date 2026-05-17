@@ -70,6 +70,27 @@ stopifnot(isTRUE(all.equal(
 stopifnot(isTRUE(all.equal(spec$offset, log(df$exposure), tolerance = 1e-12)))
 stopifnot(identical(spec$n_latent, as.integer(nlevels(df$group))))
 
+latent_only_spec <- build_backend_spec(
+    y ~ 1 + offset(log(exposure)) + f(group, model = "iid"),
+    data = df,
+    family = "poisson"
+)
+stopifnot(identical(latent_only_spec$n_fixed, 1L))
+stopifnot(identical(latent_only_spec$fixed_names, "(Intercept)"))
+stopifnot(isTRUE(all.equal(latent_only_spec$offset, log(df$exposure), tolerance = 1e-12)))
+
+latent_only_no_intercept_spec <- build_backend_spec(
+    y ~ 0 + offset(log(exposure)) + f(group, model = "iid"),
+    data = df,
+    family = "poisson"
+)
+stopifnot(identical(latent_only_no_intercept_spec$n_fixed, 0L))
+stopifnot(isTRUE(all.equal(
+    latent_only_no_intercept_spec$offset,
+    log(df$exposure),
+    tolerance = 1e-12
+)))
+
 rich_df <- data.frame(
     y = c(1.2, 0.8, 1.6, 1.0, 1.4, 1.9, 0.7, 1.1, 1.8, 1.3, 2.0, 0.9),
     x1 = c(-1.2, -0.8, -0.3, 0.1, 0.5, 1.0, -1.0, -0.4, 0.2, 0.7, 1.2, -0.1),

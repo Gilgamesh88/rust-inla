@@ -171,6 +171,17 @@ check_fit_budget <- function(context) {
     invisible(TRUE)
 }
 
+update_mode_for_state <- function(state) {
+    theta_evidence <- state$theta_evidence
+    if (!is.null(theta_evidence) &&
+        is.list(theta_evidence) &&
+        is.finite(as.integer(theta_evidence$n_support)) &&
+        as.integer(theta_evidence$n_support) > 1L) {
+        return("fixed_iid_cross_theta_evidence")
+    }
+    "fixed_iid_cross_gaussian_evidence"
+}
+
 write_report <- function(x, name) {
     path <- file.path(report_dir, name)
     utils::write.csv(x, path, row.names = FALSE, na = "")
@@ -981,6 +992,82 @@ theta_ks <- function(proxy_fit, joint_fit) {
     }, numeric(1)), na.rm = TRUE)
 }
 
+theta_ks_by_name <- function(proxy_fit, joint_fit) {
+    proxy <- proxy_fit$marginals.hyperpar
+    joint <- joint_fit$marginals.hyperpar
+    if (is.null(proxy) || is.null(joint)) {
+        return(stats::setNames(numeric(), character()))
+    }
+    theta_names <- intersect(names(proxy), names(joint))
+    if (length(theta_names) == 0L) {
+        return(stats::setNames(numeric(), character()))
+    }
+    stats::setNames(vapply(theta_names, function(name) {
+        lhs <- marginal_cdf(proxy[[name]])
+        rhs <- marginal_cdf(joint[[name]])
+        if (is.null(lhs) || is.null(rhs)) {
+            return(NA_real_)
+        }
+        grid <- sort(unique(c(lhs$x, rhs$x)))
+        lhs_cdf <- stats::approx(lhs$x, lhs$cdf, xout = grid, rule = 2)$y
+        rhs_cdf <- stats::approx(rhs$x, rhs$cdf, xout = grid, rule = 2)$y
+        max(abs(lhs_cdf - rhs_cdf))
+    }, numeric(1)), theta_names)
+}
+
+theta_comparison_table <- function(stage, proxy_fit, joint_fit) {
+    proxy_internal <- proxy_fit$summary.hyperpar.internal
+    joint_internal <- joint_fit$summary.hyperpar.internal
+    proxy_precision <- proxy_fit$summary.hyperpar
+    joint_precision <- joint_fit$summary.hyperpar
+    theta_names <- intersect(rownames(proxy_internal), rownames(joint_internal))
+    if (length(theta_names) == 0L) {
+        return(data.frame())
+    }
+
+    ks_by_name <- theta_ks_by_name(proxy_fit, joint_fit)
+    internal_update_mean <- as.numeric(proxy_internal[theta_names, "mean"])
+    internal_joint_mean <- as.numeric(joint_internal[theta_names, "mean"])
+    internal_update_sd <- as.numeric(proxy_internal[theta_names, "sd"])
+    internal_joint_sd <- as.numeric(joint_internal[theta_names, "sd"])
+    precision_update_mean <- as.numeric(proxy_precision[theta_names, "mean"])
+    precision_joint_mean <- as.numeric(joint_precision[theta_names, "mean"])
+    block_sd_update <- exp(-0.5 * internal_update_mean)
+    block_sd_joint <- exp(-0.5 * internal_joint_mean)
+
+    data.frame(
+        stage = stage,
+        theta_index = seq_along(theta_names),
+        theta_name = theta_names,
+        iid_block = sub("^Precision for ", "", theta_names),
+        update_log_precision_mean = internal_update_mean,
+        joint_log_precision_mean = internal_joint_mean,
+        log_precision_mean_abs_diff = abs(internal_update_mean - internal_joint_mean),
+        update_log_precision_mode = as.numeric(proxy_internal[theta_names, "mode"]),
+        joint_log_precision_mode = as.numeric(joint_internal[theta_names, "mode"]),
+        log_precision_mode_abs_diff = abs(
+            as.numeric(proxy_internal[theta_names, "mode"]) -
+                as.numeric(joint_internal[theta_names, "mode"])
+        ),
+        update_log_precision_sd = internal_update_sd,
+        joint_log_precision_sd = internal_joint_sd,
+        log_precision_z_diff = abs(internal_update_mean - internal_joint_mean) /
+            pmax(sqrt(internal_update_sd^2 + internal_joint_sd^2), 1e-12),
+        update_precision_mean = precision_update_mean,
+        joint_precision_mean = precision_joint_mean,
+        precision_abs_diff = abs(precision_update_mean - precision_joint_mean),
+        precision_rel_diff = abs(precision_update_mean - precision_joint_mean) /
+            pmax(abs(precision_joint_mean), 1e-12),
+        update_block_sd_from_log_mean = block_sd_update,
+        joint_block_sd_from_log_mean = block_sd_joint,
+        block_sd_abs_diff = abs(block_sd_update - block_sd_joint),
+        block_sd_rel_diff = abs(block_sd_update - block_sd_joint) /
+            pmax(abs(block_sd_joint), 1e-12),
+        precision_cdf_ks = as.numeric(ks_by_name[theta_names]),
+        check.names = FALSE
+    )
+}
+
 summary_value <- function(df, row_names, column) {
     if (is.null(df) || nrow(df) == 0L || !(column %in% names(df))) {
         return(rep(NA_real_, length(row_names)))
@@ -1204,6 +1291,7 @@ cumulative_data <- base_data
 metrics <- list()
 effect_tables <- list()
 fitted_tables <- list()
+theta_tables <- list()
 update_time_tables <- list()
 last_requested_update <- if (length(requested_updates) == 0L) NA_character_ else requested_updates[[length(requested_updates)]]
 update_times_path <- file.path(report_dir, "realdata_rolling_update_times.csv")
@@ -1218,6 +1306,8 @@ for (p in requested_updates) {
     joint_rows <- which(cumulative_data[[period_col]] == p)
 
     cat(sprintf("Running rolling update for %s (%d rows)...\n", p, nrow(batch_data)))
+    update_mode <- update_mode_for_state(state)
+    cat(sprintf("  update evidence mode: %s\n", update_mode))
     update_fit <- timed_fit(rusty_inla(
         model_formula,
         data = batch_data,
@@ -1225,12 +1315,13 @@ for (p in requested_updates) {
         output_profile = "benchmark",
         control.update = list(
             state = state,
-            mode = "fixed_iid_cross_theta_evidence"
+            mode = update_mode
         )
     ), label = sprintf("rolling update %s", p))
 
     update_time_tables[[p]] <- data.frame(
         stage = p,
+        update_mode = update_mode,
         update_rows = nrow(batch_data),
         cumulative_rows = nrow(cumulative_data),
         update_time_sec = update_fit$elapsed,
@@ -1268,6 +1359,7 @@ for (p in requested_updates) {
         metrics[[p]] <- fit_metrics(p, update_fit$value, update_fit, joint_fit$value, joint_fit, joint_rows, base_fit)
         effect_tables[[p]] <- effect_comparison_table(p, update_fit$value, joint_fit$value, batch_data)
         fitted_tables[[p]] <- fitted_comparison_table(p, update_fit$value, joint_fit$value, batch_data, joint_rows)
+        theta_tables[[p]] <- theta_comparison_table(p, update_fit$value, joint_fit$value)
     }
     state <- rusty_compose_update_state(state, update_fit$value)
 }
@@ -1288,10 +1380,12 @@ if (length(metrics) == 0L) {
 metrics_table <- do.call(rbind, metrics)
 effect_table <- do.call(rbind, effect_tables)
 fitted_table <- do.call(rbind, fitted_tables)
+theta_table <- do.call(rbind, theta_tables)
 
 metrics_path <- write_report(metrics_table, "realdata_rolling_metrics.csv")
 effect_path <- write_report(effect_table, "realdata_rolling_effects_proxy_vs_joint.csv")
 fitted_path <- write_report(fitted_table, "realdata_rolling_fitted_proxy_vs_joint.csv")
+theta_path <- write_report(theta_table, "realdata_rolling_theta_proxy_vs_joint.csv")
 update_times_path <- write_report(update_time_table, "realdata_rolling_update_times.csv")
 
 cat("Rolling validation complete.\n")
@@ -1299,4 +1393,5 @@ cat(sprintf("  %s\n", update_times_path))
 cat(sprintf("  %s\n", metrics_path))
 cat(sprintf("  %s\n", effect_path))
 cat(sprintf("  %s\n", fitted_path))
+cat(sprintf("  %s\n", theta_path))
 print(metrics_table)

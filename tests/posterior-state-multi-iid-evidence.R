@@ -212,4 +212,45 @@ if (fitted_theta_rel_diff > 0.08 || fixed_theta_diff > 0.12 || random_theta_diff
     stop("Multi-iid theta evidence drift exceeded the focused synthetic tolerance.", call. = FALSE)
 }
 
+third_data <- make_two_iid_batch(
+    n = 90L,
+    g1_levels = all_g1,
+    g2_levels = all_g2,
+    all_g1 = all_g1,
+    all_g2 = all_g2,
+    seed = 81403L,
+    shift = 0.08
+)
+joint123_data <- rbind(old_data, new_data, third_data)
+joint123_data$g1 <- factor(joint123_data$g1, levels = all_g1)
+joint123_data$g2 <- factor(joint123_data$g2, levels = all_g2)
+
+composed_state <- rusty_compose_update_state(state, theta_fit)
+if (!inherits(composed_state, "rusty_update_state") ||
+    !identical(composed_state$semantics$composition, "previous_compressed_evidence_plus_current_likelihood_evidence")) {
+    stop("Multi-iid composed state did not preserve composition semantics.", call. = FALSE)
+}
+if (!is.null(composed_state$theta_evidence)) {
+    stop("Multi-iid composed state should fall back to source-mode evidence until theta composition is generalized.", call. = FALSE)
+}
+rolling3_fit <- rusty_inla(
+    formula,
+    data = third_data,
+    family = "poisson",
+    control.update = list(
+        state = composed_state,
+        mode = "fixed_iid_cross_gaussian_evidence"
+    )
+)
+joint123_fit <- rusty_inla(formula, data = joint123_data, family = "poisson")
+joint123_third_rows <- seq.int(nrow(old_data) + nrow(new_data) + 1L, nrow(joint123_data))
+composed_fitted_rel_diff <- max_fitted_rel_diff(rolling3_fit, joint123_fit, joint123_third_rows)
+if (!is.finite(composed_fitted_rel_diff) || composed_fitted_rel_diff > 0.12) {
+    stop("Multi-iid composed source-mode update drift exceeded the focused synthetic tolerance.", call. = FALSE)
+}
+cat(sprintf(
+    "posterior_state_multi_iid_composition: source-mode fitted_rel %.6f\n",
+    composed_fitted_rel_diff
+))
+
 cat("posterior_state_multi_iid_evidence: PASS\n")
