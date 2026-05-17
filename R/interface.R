@@ -2080,6 +2080,49 @@ aggregate_sparse_pairs_0 <- function(i, j, x) {
     list(i = out_i[ord], j = out_j[ord], x = as.numeric(values[ord]))
 }
 
+aggregate_sparse_pair_matrix_0 <- function(i, j, x) {
+    x <- as.matrix(x)
+    n_support <- nrow(x)
+    if (length(i) == 0L || length(j) == 0L || ncol(x) == 0L) {
+        return(list(i = integer(), j = integer(), x = matrix(numeric(), nrow = n_support)))
+    }
+    if (length(i) != length(j) || ncol(x) != length(i)) {
+        stop("Sparse support edge matrix has inconsistent dimensions.", call. = FALSE)
+    }
+
+    pair_values <- new.env(parent = emptyenv())
+    for (idx in seq_along(i)) {
+        lo <- min(as.integer(i[[idx]]), as.integer(j[[idx]]))
+        hi <- max(as.integer(i[[idx]]), as.integer(j[[idx]]))
+        if (lo == hi) {
+            next
+        }
+        values <- as.numeric(x[, idx])
+        values[!is.finite(values)] <- 0.0
+        if (!any(values != 0.0)) {
+            next
+        }
+        key <- paste0(lo, ":", hi)
+        old <- pair_values[[key]]
+        pair_values[[key]] <- if (is.null(old)) values else old + values
+    }
+
+    keys <- ls(pair_values, all.names = TRUE)
+    if (length(keys) == 0L) {
+        return(list(i = integer(), j = integer(), x = matrix(numeric(), nrow = n_support)))
+    }
+    parts <- strsplit(keys, ":", fixed = TRUE)
+    out_i <- vapply(parts, function(part) as.integer(part[[1L]]), integer(1))
+    out_j <- vapply(parts, function(part) as.integer(part[[2L]]), integer(1))
+    ord <- order(out_i, out_j)
+    out_x <- do.call(cbind, lapply(keys[ord], function(key) pair_values[[key]]))
+    if (is.null(dim(out_x))) {
+        out_x <- matrix(out_x, ncol = 1L)
+    }
+    colnames(out_x) <- paste0("edge_", seq_len(ncol(out_x)))
+    list(i = out_i[ord], j = out_j[ord], x = out_x)
+}
+
 state_latent_pair_precision <- function(state) {
     if (!is.null(state$latent_pair_precision)) {
         return(state$latent_pair_precision)
@@ -2844,6 +2887,69 @@ theta_evidence_support_blend <- function(theta_evidence, theta) {
     list(left = idx, right = idx, right_weight = 0.0)
 }
 
+theta_evidence_support_weights <- function(theta_evidence, theta) {
+    n_support <- as.integer(theta_evidence$n_support)
+    theta_matrix <- as.matrix(theta_evidence$theta)
+    theta <- as.numeric(theta)
+    if (n_support <= 0L || nrow(theta_matrix) != n_support) {
+        stop("theta_evidence has inconsistent support dimensions.", call. = FALSE)
+    }
+    if (ncol(theta_matrix) != length(theta)) {
+        stop("theta_evidence theta dimensions do not match the requested theta.", call. = FALSE)
+    }
+    if (n_support == 1L) {
+        return(list(index = 1L, weight = 1.0))
+    }
+    if (length(theta) == 1L) {
+        blend <- theta_evidence_support_blend(theta_evidence, theta)
+        if (identical(blend$left, blend$right) || blend$right_weight <= 0.0) {
+            return(list(index = blend$left, weight = 1.0))
+        }
+        return(list(
+            index = c(blend$left, blend$right),
+            weight = c(1.0 - blend$right_weight, blend$right_weight)
+        ))
+    }
+
+    n_theta <- length(theta)
+    theta_min <- apply(theta_matrix, 2L, min)
+    theta_max <- apply(theta_matrix, 2L, max)
+    scale <- theta_max - theta_min
+    scale[!is.finite(scale) | scale <= 1e-12] <- 1.0
+    scaled <- sweep(theta_matrix, 2L, theta, FUN = "-")
+    scaled <- sweep(scaled, 2L, scale, FUN = "/")
+    distances <- rowSums(scaled * scaled)
+    order_idx <- order(distances)
+    if (distances[[order_idx[[1L]]]] <= 1e-12) {
+        return(list(index = order_idx[[1L]], weight = 1.0))
+    }
+
+    outside_support <- any(theta < theta_min - 1e-10 | theta > theta_max + 1e-10)
+    if (outside_support) {
+        return(list(index = order_idx[[1L]], weight = 1.0))
+    }
+
+    target_count <- max(min(2L * n_theta + 1L, n_support), 1L)
+    radius_limit <- max(distances[[order_idx[[1L]]]] * 4.0, 1e-10)
+    selected <- integer()
+    for (support_idx in order_idx) {
+        dist <- distances[[support_idx]]
+        if (length(selected) < target_count || dist <= radius_limit) {
+            selected <- c(selected, support_idx)
+        }
+        if (length(selected) >= target_count && dist > radius_limit) {
+            break
+        }
+    }
+
+    raw_weights <- 1.0 / pmax(distances[selected], 1e-12)
+    weight_sum <- sum(raw_weights)
+    if (!is.finite(weight_sum) || weight_sum <= 0.0) {
+        return(list(index = order_idx[[1L]], weight = 1.0))
+    }
+    list(index = selected, weight = raw_weights / weight_sum)
+}
+
 blend_theta_array <- function(arr, blend) {
     left <- blend$left
     right <- blend$right
@@ -2859,6 +2965,33 @@ blend_theta_array <- function(arr, blend) {
         }
         (1.0 - right_weight) * arr[left, ] + right_weight * arr[right, ]
     }
+}
+
+blend_theta_array_weighted <- function(arr, weights) {
+    index <- as.integer(weights$index)
+    weight <- as.numeric(weights$weight)
+    if (length(index) != length(weight) || length(index) == 0L) {
+        stop("Invalid theta support weights.", call. = FALSE)
+    }
+
+    if (length(dim(arr)) == 3L) {
+        out <- array(0.0, dim = dim(arr)[1:2], dimnames = dimnames(arr)[1:2])
+        for (idx in seq_along(index)) {
+            out <- out + weight[[idx]] * arr[, , index[[idx]]]
+        }
+        return(out)
+    }
+
+    out <- rep(0.0, ncol(as.matrix(arr)))
+    for (idx in seq_along(index)) {
+        out <- out + weight[[idx]] * as.numeric(as.matrix(arr)[index[[idx]], ])
+    }
+    out
+}
+
+blend_theta_log_constant <- function(theta_evidence, weights) {
+    values <- as.numeric(theta_evidence$log_constants)
+    sum(as.numeric(weights$weight) * values[as.integer(weights$index)])
 }
 
 theta_evidence_block_at <- function(theta_evidence, theta, fixed_names, iid_levels) {
@@ -2915,32 +3048,113 @@ theta_evidence_block_at <- function(theta_evidence, theta, fixed_names, iid_leve
     )
 }
 
+theta_evidence_block_at_signature <- function(theta_evidence, theta, state, backend_signature) {
+    weights <- theta_evidence_support_weights(theta_evidence, theta)
+    fixed_names <- as.character(backend_signature$fixed_names)
+    old_fixed_names <- dimnames(theta_evidence$H_beta_beta)[[1L]]
+    if (!identical(as.character(old_fixed_names), fixed_names)) {
+        stop("Cannot compose update states with changed fixed-effect columns.", call. = FALSE)
+    }
+
+    expanded <- expand_theta_evidence_for_new_iid_blocks(
+        theta_evidence = theta_evidence,
+        state = state,
+        backend_signature = backend_signature
+    )
+    n_latent <- as.integer(backend_signature$n_latent)
+    latent_names <- as.character(seq_len(n_latent))
+
+    H_beta_beta <- as.matrix(blend_theta_array_weighted(theta_evidence$H_beta_beta, weights))
+    h_beta <- as.numeric(blend_theta_array_weighted(theta_evidence$h_beta, weights))
+    H_u_u_diag <- as.numeric(blend_theta_array_weighted(expanded$latent_precision, weights))
+    h_u <- as.numeric(blend_theta_array_weighted(expanded$latent_linear, weights))
+    H_u_beta <- as.matrix(blend_theta_array_weighted(expanded$latent_fixed, weights))
+
+    dimnames(H_beta_beta) <- list(fixed_names, fixed_names)
+    names(h_beta) <- fixed_names
+    names(H_u_u_diag) <- latent_names
+    names(h_u) <- latent_names
+    dimnames(H_u_beta) <- list(latent_names, fixed_names)
+
+    sparse <- list(i = integer(), j = integer(), x = numeric())
+    if (!is.null(expanded$latent_sparse) &&
+        length(expanded$latent_sparse$i) > 0L &&
+        ncol(as.matrix(expanded$latent_sparse$x)) == length(expanded$latent_sparse$i)) {
+        sparse <- list(
+            i = as.integer(expanded$latent_sparse$i),
+            j = as.integer(expanded$latent_sparse$j),
+            x = as.numeric(blend_theta_array_weighted(expanded$latent_sparse$x, weights))
+        )
+    }
+
+    list(
+        H_beta_beta = H_beta_beta,
+        h_beta = h_beta,
+        H_u_u_diag = H_u_u_diag,
+        h_u = h_u,
+        H_u_beta = H_u_beta,
+        H_u_u_sparse = sparse,
+        log_constant = blend_theta_log_constant(theta_evidence, weights)
+    )
+}
+
+theta_sparse_matrix_or_empty <- function(theta_evidence) {
+    n_support <- as.integer(theta_evidence$n_support)
+    sparse <- theta_evidence$H_u_u_sparse
+    if (is.null(sparse) || length(sparse$i) == 0L) {
+        return(list(i = integer(), j = integer(), x = matrix(numeric(), nrow = n_support)))
+    }
+    x <- as.matrix(sparse$x)
+    if (nrow(x) != n_support || ncol(x) != length(sparse$i)) {
+        stop("theta_evidence sparse iid-iid support dimensions are inconsistent.", call. = FALSE)
+    }
+    list(i = as.integer(sparse$i), j = as.integer(sparse$j), x = x)
+}
+
 compose_theta_evidence <- function(previous_state, incremental_state) {
     theta_evidence <- incremental_state$theta_evidence
     previous_theta_evidence <- previous_state$theta_evidence
     if (is.null(theta_evidence) || is.null(previous_theta_evidence)) {
         stop("Composed update states require theta_evidence in both states.", call. = FALSE)
     }
-    if (ncol(as.matrix(theta_evidence$theta)) != 1L ||
-        ncol(as.matrix(previous_theta_evidence$theta)) != 1L) {
-        stop("Composed update states currently support exactly one theta dimension.", call. = FALSE)
+    if (ncol(as.matrix(theta_evidence$theta)) != ncol(as.matrix(previous_theta_evidence$theta))) {
+        stop("Composed update states require matching theta dimensions.", call. = FALSE)
     }
 
     fixed_names <- incremental_state$fixed$names
-    iid_levels <- incremental_state$iid$levels
+    use_flat_signature <- length(state_iid_blocks(incremental_state)) > 1L ||
+        ncol(as.matrix(theta_evidence$theta)) > 1L
+    iid_levels <- if (use_flat_signature) {
+        as.character(seq_len(as.integer(incremental_state$signature$n_latent)))
+    } else {
+        incremental_state$iid$levels
+    }
     n_support <- as.integer(theta_evidence$n_support)
     composed <- theta_evidence
     composed$version <- 3L
-    composed$strategy <- "composed_ccd_support_modes"
+    composed$strategy <- if (use_flat_signature) {
+        "composed_guarded_nd_support_modes"
+    } else {
+        "composed_ccd_support_modes"
+    }
     composed$solver_status <- "not_integrated"
 
     for (support_idx in seq_len(n_support)) {
-        old_block <- theta_evidence_block_at(
-            theta_evidence = previous_theta_evidence,
-            theta = theta_evidence$theta[support_idx, ],
-            fixed_names = fixed_names,
-            iid_levels = iid_levels
-        )
+        old_block <- if (use_flat_signature) {
+            theta_evidence_block_at_signature(
+                theta_evidence = previous_theta_evidence,
+                theta = theta_evidence$theta[support_idx, ],
+                state = previous_state,
+                backend_signature = incremental_state$signature
+            )
+        } else {
+            theta_evidence_block_at(
+                theta_evidence = previous_theta_evidence,
+                theta = theta_evidence$theta[support_idx, ],
+                fixed_names = fixed_names,
+                iid_levels = iid_levels
+            )
+        }
         composed$H_beta_beta[, , support_idx] <-
             theta_evidence$H_beta_beta[, , support_idx] + old_block$H_beta_beta
         composed$h_beta[support_idx, ] <-
@@ -2955,18 +3169,62 @@ compose_theta_evidence <- function(previous_state, incremental_state) {
             theta_evidence$log_constants[[support_idx]] + old_block$log_constant
     }
 
+    if (use_flat_signature) {
+        previous_expanded <- expand_theta_evidence_for_new_iid_blocks(
+            theta_evidence = previous_theta_evidence,
+            state = previous_state,
+            backend_signature = incremental_state$signature
+        )
+        previous_sparse <- previous_expanded$latent_sparse
+        previous_sparse_x <- matrix(numeric(), nrow = n_support)
+        previous_sparse_i <- integer()
+        previous_sparse_j <- integer()
+        if (!is.null(previous_sparse) &&
+            length(previous_sparse$i) > 0L &&
+            ncol(as.matrix(previous_sparse$x)) == length(previous_sparse$i)) {
+            previous_sparse_i <- as.integer(previous_sparse$i)
+            previous_sparse_j <- as.integer(previous_sparse$j)
+            previous_sparse_x <- matrix(0.0, nrow = n_support, ncol = length(previous_sparse_i))
+            for (support_idx in seq_len(n_support)) {
+                weights <- theta_evidence_support_weights(
+                    previous_theta_evidence,
+                    theta_evidence$theta[support_idx, ]
+                )
+                previous_sparse_x[support_idx, ] <-
+                    as.numeric(blend_theta_array_weighted(previous_sparse$x, weights))
+            }
+        }
+        incremental_sparse <- theta_sparse_matrix_or_empty(theta_evidence)
+        composed$H_u_u_sparse <- aggregate_sparse_pair_matrix_0(
+            i = c(as.integer(incremental_sparse$i), previous_sparse_i),
+            j = c(as.integer(incremental_sparse$j), previous_sparse_j),
+            x = cbind(incremental_sparse$x, previous_sparse_x)
+        )
+        rownames(composed$H_u_u_sparse$x) <- rownames(theta_evidence$theta)
+    }
+
     composed
 }
 
 compose_source_mode_evidence <- function(previous_state, incremental_state, theta_evidence) {
     fixed_names <- incremental_state$fixed$names
-    iid_levels <- incremental_state$iid$levels
-    source_block <- theta_evidence_block_at(
-        theta_evidence = theta_evidence,
-        theta = incremental_state$theta_mode,
-        fixed_names = fixed_names,
-        iid_levels = iid_levels
-    )
+    if (length(state_iid_blocks(incremental_state)) > 1L ||
+        ncol(as.matrix(theta_evidence$theta)) > 1L) {
+        source_block <- theta_evidence_block_at_signature(
+            theta_evidence = theta_evidence,
+            theta = incremental_state$theta_mode,
+            state = incremental_state,
+            backend_signature = incremental_state$signature
+        )
+    } else {
+        iid_levels <- incremental_state$iid$levels
+        source_block <- theta_evidence_block_at(
+            theta_evidence = theta_evidence,
+            theta = incremental_state$theta_mode,
+            fixed_names = fixed_names,
+            iid_levels = iid_levels
+        )
+    }
     source_block
 }
 
@@ -3080,12 +3338,26 @@ rusty_compose_update_state <- function(previous_state, fit, min_variance = 1e-10
     incremental_state <- rusty_update_state(fit, min_variance = min_variance)
     validate_update_state_composition_inputs(previous_state, fit, incremental_state)
 
-    can_use_theta_composition <- length(state_iid_blocks(previous_state)) == 1L &&
-        length(state_iid_blocks(incremental_state)) == 1L &&
-        length(previous_state$theta_mode) == 1L &&
-        length(incremental_state$theta_mode) == 1L &&
-        !is.null(previous_state$theta_evidence) &&
-        !is.null(incremental_state$theta_evidence)
+    previous_n_blocks <- length(state_iid_blocks(previous_state))
+    incremental_n_blocks <- length(state_iid_blocks(incremental_state))
+    previous_theta_cols <- if (is.null(previous_state$theta_evidence)) {
+        0L
+    } else {
+        ncol(as.matrix(previous_state$theta_evidence$theta))
+    }
+    incremental_theta_cols <- if (is.null(incremental_state$theta_evidence)) {
+        0L
+    } else {
+        ncol(as.matrix(incremental_state$theta_evidence$theta))
+    }
+    can_use_theta_composition <- !is.null(previous_state$theta_evidence) &&
+        !is.null(incremental_state$theta_evidence) &&
+        previous_theta_cols == incremental_theta_cols &&
+        length(previous_state$theta_mode) == previous_theta_cols &&
+        length(incremental_state$theta_mode) == incremental_theta_cols &&
+        previous_n_blocks == incremental_n_blocks &&
+        previous_n_blocks >= 1L &&
+        previous_theta_cols == previous_n_blocks
     if (!isTRUE(can_use_theta_composition)) {
         return(compose_source_mode_update_state(previous_state, incremental_state))
     }
@@ -3097,7 +3369,11 @@ rusty_compose_update_state <- function(previous_state, fit, min_variance = 1e-10
     composed$version <- 4L
     composed$approximation <- "fixed_iid_cross_theta_evidence_composed"
     composed$semantics <- fixed_iid_update_state_semantics("ccd_support_modes_not_integrated")
-    composed$semantics$theta_policy <- "composed_ccd_support_linear_1d"
+    composed$semantics$theta_policy <- if (previous_theta_cols == 1L) {
+        "composed_ccd_support_linear_1d"
+    } else {
+        "composed_guarded_shepard_nd"
+    }
     composed$semantics$composition <- "previous_compressed_evidence_plus_current_likelihood_evidence"
     composed$signature <- incremental_state$signature
     composed$source$n_obs <- as.integer(previous_state$source$n_obs + incremental_state$source$n_obs)
@@ -3108,13 +3384,51 @@ rusty_compose_update_state <- function(previous_state, fit, min_variance = 1e-10
     composed$theta_evidence <- theta_evidence
     composed$fixed$evidence_precision <- source_block$H_beta_beta
     composed$fixed$evidence_linear <- source_block$h_beta
-    composed$iid$evidence_precision_diag <- source_block$H_u_u_diag
-    composed$iid$evidence_linear <- source_block$h_u
-    composed$iid_fixed_cross_precision <- source_block$H_u_beta
+
+    ranges <- latent_block_ranges(composed$signature)
+    for (idx in seq_along(composed$iid_blocks)) {
+        latent_idx <- ranges[[idx]]$index1
+        block <- composed$iid_blocks[[idx]]
+        block$evidence_precision_diag <- as.numeric(source_block$H_u_u_diag[latent_idx])
+        block$evidence_linear <- as.numeric(source_block$h_u[latent_idx])
+        block$fixed_cross_precision <- as.matrix(source_block$H_u_beta[latent_idx, , drop = FALSE])
+        names(block$evidence_precision_diag) <- block$levels
+        names(block$evidence_linear) <- block$levels
+        dimnames(block$fixed_cross_precision) <- list(block$levels, composed$fixed$names)
+        composed$iid_blocks[[idx]] <- block
+    }
+
+    first_iid <- composed$iid_blocks[[1L]]
+    composed$iid <- list(
+        covariate_name = first_iid$covariate_name,
+        levels = first_iid$levels,
+        mode = first_iid$mode,
+        variance_theta_opt = first_iid$variance_theta_opt,
+        tau_at_source_theta = first_iid$tau_at_source_theta,
+        evidence_precision_diag = first_iid$evidence_precision_diag,
+        evidence_linear = first_iid$evidence_linear,
+        dropped_negative_precision = 0L
+    )
+    composed$iid_fixed_cross_precision <- first_iid$fixed_cross_precision
+    composed$latent_pair_precision <- if (!is.null(source_block$H_u_u_sparse) &&
+        length(source_block$H_u_u_sparse$x) > 0L) {
+        aggregate_sparse_pairs_0(
+            i = as.integer(source_block$H_u_u_sparse$i),
+            j = as.integer(source_block$H_u_u_sparse$j),
+            x = as.numeric(source_block$H_u_u_sparse$x)
+        )
+    } else {
+        list(i = integer(), j = integer(), x = numeric())
+    }
+    composed$graph$latent_pair_precision <- composed$latent_pair_precision
     composed$caveats <- c(
         "Experimental composed fixed+iid Gaussian old-data likelihood evidence approximation.",
         "Adds previous compressed evidence to the current fit's extracted likelihood evidence.",
-        "Uses one-dimensional linear interpolation over the previous theta-evidence support.",
+        if (previous_theta_cols == 1L) {
+            "Uses one-dimensional linear interpolation over the previous theta-evidence support."
+        } else {
+            "Uses guarded multidimensional interpolation over a composed multi-iid theta-evidence support."
+        },
         "Intended for rolling diagnostics; validate against joint refits before production use."
     )
     class(composed) <- "rusty_update_state"

@@ -82,7 +82,7 @@ Deferred out of Phase 7A:
 
 ### 2. Phase 8 prior/control metadata reuse
 
-Status: Phase 8A active and Phase 8B started. See
+Status: Phase 8A-8I active experimental implementation. See
 [PHASE8_ROADMAP.md](PHASE8_ROADMAP.md).
 
 Why next:
@@ -108,6 +108,11 @@ Expected work:
   fitted values, theta marginals, tails, time, and memory
 - Phase 8F: defer broader latent structures (`rw1`, `rw2`, `ar1`, `ar2`) until
   the one-`iid` path is benchmark-clean
+- Phase 8G-8I: represent multiple `iid` blocks as a sparse recursive evidence
+  graph, validate two-iid theta evidence, and expand multi-iid theta support
+- Phase 8J: generalize composed theta evidence from the stable two-iid case to
+  recursive K-iid composition; the first three-iid synthetic pressure test is
+  active, with harder dormant/re-entry and real-data cases still needed
 - inventory the existing model, likelihood, and fixed-effect prior metadata
 - design a shared prior specification representation for Rust and R bridge
   code

@@ -243,10 +243,10 @@ truth comparator:
 
 For multi-iid rolling runs, the template selects the evidence mode from the
 current state. A state with multi-point `theta_evidence` uses
-`fixed_iid_cross_theta_evidence`; a composed multi-iid state without
-multi-dimensional theta composition falls back to
-`fixed_iid_cross_gaussian_evidence`. This keeps the rolling path runnable while
-making the theta limitation explicit in `realdata_rolling_update_times.csv`.
+`fixed_iid_cross_theta_evidence`. Composed states with one theta dimension per
+iid block preserve theta-dependent evidence across rolling periods by aligning
+the old recursive evidence graph onto the current graph. The selected mode is
+recorded in `realdata_rolling_update_times.csv`.
 
 It writes:
 
@@ -323,54 +323,57 @@ Core diagnostics:
 - exposure/claim summaries by factor level and period, useful for sparse
   levels such as `modeloc(20,25]`
 
-## Current Corrected Two-Iid Rolling Result
+## Current Two-Iid Rolling Result
 
-After fixing formula-offset extraction, the first all-period two-iid diagnostic
-ran from `2021_y` through `2025_4t` with a final cumulative joint refit:
+After fixing formula-offset extraction and adding multi-iid theta-evidence
+composition, the two-iid all-period diagnostic ran from `2021_y` through `2025_4t`
+with a final cumulative joint refit:
 
 ```text
 report_dir:
-  scratch/phase8_reports/realdata_two_iid_all_periods_offsetfix_final_joint_v2
+  scratch/phase8_reports/realdata_two_iid_all_periods_theta_comp_final_joint
 
 base fit:
-  35.36 sec, 3.97 MB object
+  35.47 sec, 3.97 MB object
 
 rolling updates:
-  first update mode: fixed_iid_cross_theta_evidence
-  later composed-state mode: fixed_iid_cross_gaussian_evidence
-  final update 2025_4t: 24.94 sec, 5.14 MB object
+  every period mode: fixed_iid_cross_theta_evidence
+  final update 2025_4t: 20.09 sec, 5.14 MB object
 
 final joint refit:
-  189.56 sec, 60.54 MB object
+  190.75 sec, 60.54 MB object
 ```
 
 Final-period update versus cumulative joint refit:
 
 ```text
-theta internal drift max:      0.108704
-theta CDF KS max:              0.113248
-fixed mean max abs drift:      0.098801
-random mean max abs drift:     0.052692
-fitted max relative drift:     0.107920
-fitted total update vs joint:  1104.03 vs 1087.55
+theta internal drift max:      0.119118
+theta CDF KS max:              0.092032
+fixed mean max abs drift:      0.097599
+random mean max abs drift:     0.051523
+fitted max relative drift:     0.108167
+fitted total update vs joint:  1105.16 vs 1087.55
 ```
 
 By block, the final theta drift is mostly geographic:
 
 ```text
 desc_edo_circula:
-  log-precision mean drift: 0.111272
-  block SD relative drift:  0.057213
+  log-precision mean drift: 0.088188
+  log-precision mode drift: 0.119118
+  block SD relative drift:  0.045081
 
 desc_armadora:
-  log-precision mean drift: 0.007390
-  block SD relative drift:  0.003702
+  log-precision mean drift: 0.011210
+  log-precision mode drift: 0.064118
+  block SD relative drift:  0.005589
 ```
 
-This result is a usable MVP diagnostic, not a final claim of exact full Bayes:
-multi-iid theta composition is still source-mode after the first update. The
-drifts above are therefore the main evidence for whether that approximation is
-acceptable on this portfolio.
+This result is a usable MVP diagnostic, not a final claim of exact full Bayes.
+The two-iid rolling path now keeps theta-dependent evidence through every
+period, but the evidence is still a compressed local Gaussian approximation and
+uses guarded support interpolation rather than refitting or storing the full old
+data likelihood.
 
 ## Walkthrough script
 

@@ -472,6 +472,10 @@ Scope implemented:
 - `fixed_iid_cross_theta_evidence` can consume multi-iid theta support by
   carrying dense fixed, diagonal iid, fixed-iid, and sparse iid-iid evidence
   at each support point
+- composed multi-iid states now preserve theta-dependent evidence across
+  rolling periods when there is one theta dimension per iid block, by blending
+  the previous support graph onto the current support graph and summing sparse
+  iid-iid edges support-by-support
 
 First validation target:
 
@@ -481,8 +485,15 @@ First validation target:
 - source-mode and theta-dependent updates versus joint refit
 - current source-mode result: theta drift `6.205979`, fixed drift `0.007414`,
   random drift `0.021681`, fitted max relative drift `0.029236`
-- current theta-dependent result: theta drift `6.099695`, fixed drift
-  `0.007255`, random drift `0.021344`, fitted max relative drift `0.028684`
+- current expanded theta-dependent result: theta drift `1.999375`, fixed drift
+  `0.003713`, random drift `0.006223`, fitted max relative drift `0.008653`
+- current composed third-period two-iid result: theta-mode fitted max relative
+  drift `0.010941`; the raw precision-scale theta summary remains a
+  diagnostic (`2.323604`) and should be interpreted alongside log-precision,
+  block-SD, and CDF diagnostics
+- current composed third-period three-iid result:
+  log-theta drift `0.202709`, block-SD relative drift `0.106669`, fixed drift
+  `0.011176`, random drift `0.016738`, fitted max relative drift `0.030865`
 
 Important limitation:
 
@@ -494,6 +505,9 @@ Important limitation:
   joint-refit theta lies far outside the old CCD support for the first iid
   precision; broader real-data validation is still needed before trusting
   multi-iid hyperparameters year-by-year
+- the composed theta path is still experimental for K greater than two; the
+  first three-iid synthetic pressure test passes, but real-data and larger-K
+  validation are still needed before trusting hyperparameters year-by-year
 
 ## Phase 8I: expanded multi-iid theta support
 
@@ -539,6 +553,35 @@ Important limitation:
 - adaptive support refinement during the update would be stronger, but would
   require keeping access to the old data rather than using only the compressed
   state
+
+## Phase 8J: recursive K-iid theta composition
+
+Status: active experimental implementation; first three-iid synthetic pressure
+test passes.
+
+Goal: generalize the two-iid composed theta-evidence path to arbitrary small K
+without adding hard-coded cases for each number of iid blocks.
+
+Planned shape:
+
+- represent evidence as a recursive block graph with dense beta-beta node,
+  diagonal iid nodes, dense beta-iid edges, and sparse iid-iid edges
+- align old levels to new levels block-by-block; born levels receive zero old
+  evidence
+- at each current theta support point, evaluate the previous compressed graph
+  at that theta, then add the current graph
+- store the result as a theta-dependent graph with the same support shape the
+  backend already consumes
+
+Current target:
+
+- keep two-iid composition as the stable reference case
+- keep the focused three-iid synthetic composition test with born levels in
+  multiple blocks as the first generalization gate
+- compare fixed means, random means by block, fitted values, log-precision
+  diagnostics, block-SD diagnostics, and CDF KS against the joint refit
+- next, add a harder three-iid case with dormant/re-entering levels and a
+  real-data candidate before treating K-iid theta composition as stable
 
 ## Phase 9 complement: clean-room actuarial distributions
 

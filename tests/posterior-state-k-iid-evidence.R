@@ -292,6 +292,75 @@ run_k_iid_case <- function(k) {
         stop(sprintf("%d-iid theta update drift exceeded the synthetic tolerance.", k), call. = FALSE)
     }
 
+    if (k == 3L) {
+        third_data <- make_k_iid_batch(
+            n = 100L + 30L * k,
+            k = k,
+            level_specs = level_specs,
+            seed = 93000L + k,
+            shift = 0.06,
+            old = FALSE
+        )
+        joint123_data <- rbind(old_data, new_data, third_data)
+        for (spec in level_specs) {
+            joint123_data[[spec$name]] <- factor(joint123_data[[spec$name]], levels = spec$all_levels)
+        }
+
+        compose_run <- timed_fit(rusty_compose_update_state(state, theta_fit))
+        composed_state <- compose_run$value
+        if (is.null(composed_state$theta_evidence) ||
+            ncol(as.matrix(composed_state$theta_evidence$theta)) != k ||
+            length(composed_state$theta_evidence$H_u_u_sparse$i) == 0L) {
+            stop("Three-iid composed state should preserve theta-dependent sparse evidence.", call. = FALSE)
+        }
+        rolling3_run <- timed_fit(rusty_inla(
+            formula,
+            data = third_data,
+            family = "poisson",
+            control.update = list(
+                state = composed_state,
+                mode = "fixed_iid_cross_theta_evidence"
+            )
+        ))
+        rolling3_fit <- rolling3_run$value
+        joint123_run <- timed_fit(rusty_inla(formula, data = joint123_data, family = "poisson"))
+        joint123_fit <- joint123_run$value
+        joint123_third_rows <- seq.int(nrow(old_data) + nrow(new_data) + 1L, nrow(joint123_data))
+        composed_fitted <- max_fitted_rel_diff(rolling3_fit, joint123_fit, joint123_third_rows)
+        composed_fixed <- max(abs(
+            as.numeric(rolling3_fit$summary.fixed$mean) -
+                as.numeric(joint123_fit$summary.fixed$mean)
+        ))
+        composed_random <- max_random_diff(rolling3_fit, joint123_fit, blocks)
+        composed_theta_scale <- theta_scale_diagnostics(rolling3_fit, joint123_fit, k)
+        if (!identical(rolling3_fit$posterior_state_used$theta_evidence_solver_status, "guarded_shepard_nd_integrated")) {
+            stop("Three-iid composed theta evidence should use the guarded multidimensional path.", call. = FALSE)
+        }
+        if (!is.finite(composed_fitted) || !is.finite(composed_fixed) ||
+            !is.finite(composed_random) || !is.finite(composed_theta_scale$max_log_mean)) {
+            stop("Three-iid composed update produced non-finite diagnostics.", call. = FALSE)
+        }
+        if (composed_fitted > 0.18 || composed_fixed > 0.18 || composed_random > 0.30) {
+            stop("Three-iid composed theta update drift exceeded the synthetic tolerance.", call. = FALSE)
+        }
+        cat(sprintf(
+            paste(
+                "posterior_state_k_iid_composition[K=3]:",
+                "compose %.3fs; theta_update %.3fs; joint %.3fs;",
+                "log_theta %.6f; sd_rel %.6f; fixed %.6f;",
+                "random %.6f; fitted_rel %.6f\n"
+            ),
+            compose_run$elapsed,
+            rolling3_run$elapsed,
+            joint123_run$elapsed,
+            composed_theta_scale$max_log_mean,
+            composed_theta_scale$max_block_sd_rel,
+            composed_fixed,
+            composed_random,
+            composed_fitted
+        ))
+    }
+
     invisible(NULL)
 }
 

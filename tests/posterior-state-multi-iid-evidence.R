@@ -230,8 +230,10 @@ if (!inherits(composed_state, "rusty_update_state") ||
     !identical(composed_state$semantics$composition, "previous_compressed_evidence_plus_current_likelihood_evidence")) {
     stop("Multi-iid composed state did not preserve composition semantics.", call. = FALSE)
 }
-if (!is.null(composed_state$theta_evidence)) {
-    stop("Multi-iid composed state should fall back to source-mode evidence until theta composition is generalized.", call. = FALSE)
+if (is.null(composed_state$theta_evidence) ||
+    ncol(as.matrix(composed_state$theta_evidence$theta)) != 2L ||
+    length(composed_state$theta_evidence$H_u_u_sparse$i) == 0L) {
+    stop("Two-iid composed state should preserve theta-dependent sparse evidence.", call. = FALSE)
 }
 rolling3_fit <- rusty_inla(
     formula,
@@ -239,18 +241,26 @@ rolling3_fit <- rusty_inla(
     family = "poisson",
     control.update = list(
         state = composed_state,
-        mode = "fixed_iid_cross_gaussian_evidence"
+        mode = "fixed_iid_cross_theta_evidence"
     )
 )
 joint123_fit <- rusty_inla(formula, data = joint123_data, family = "poisson")
 joint123_third_rows <- seq.int(nrow(old_data) + nrow(new_data) + 1L, nrow(joint123_data))
 composed_fitted_rel_diff <- max_fitted_rel_diff(rolling3_fit, joint123_fit, joint123_third_rows)
+composed_theta_diff <- max(abs(
+    as.numeric(rolling3_fit$summary.hyperpar$mean[seq_len(2L)]) -
+        as.numeric(joint123_fit$summary.hyperpar$mean[seq_len(2L)])
+))
+if (!identical(rolling3_fit$posterior_state_used$theta_evidence_solver_status, "guarded_shepard_nd_integrated")) {
+    stop("Two-iid composed theta evidence should use the guarded multidimensional path.", call. = FALSE)
+}
 if (!is.finite(composed_fitted_rel_diff) || composed_fitted_rel_diff > 0.12) {
-    stop("Multi-iid composed source-mode update drift exceeded the focused synthetic tolerance.", call. = FALSE)
+    stop("Two-iid composed theta update drift exceeded the focused synthetic tolerance.", call. = FALSE)
 }
 cat(sprintf(
-    "posterior_state_multi_iid_composition: source-mode fitted_rel %.6f\n",
-    composed_fitted_rel_diff
+    "posterior_state_multi_iid_composition: theta fitted_rel %.6f; theta %.6f\n",
+    composed_fitted_rel_diff,
+    composed_theta_diff
 ))
 
 cat("posterior_state_multi_iid_evidence: PASS\n")
