@@ -46,7 +46,7 @@ load_rustyinla_for_benchmarks <- function(repo_root = getwd()) {
     dll_path <- dll_candidates[[1]]
     r_files <- file.path(
         repo_root,
-        c("R/extendr-wrappers.R", "R/f.R", "R/interface.R")
+        c("R/extendr-wrappers.R", "R/f.R", "R/interface.R", "R/update-state.R")
     )
 
     loaded_dlls <- getLoadedDLLs()

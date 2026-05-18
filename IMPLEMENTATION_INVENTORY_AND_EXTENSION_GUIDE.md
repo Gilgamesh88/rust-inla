@@ -70,6 +70,7 @@ For `ar2`, the current implementation uses INLA-style PACF hyperparameters inter
 | thin R binding crate | [src/rust/src/lib.rs](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/src/rust/src/lib.rs) | name-based registration, input validation, result export |
 | R helper for latent terms | [R/f.R](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/R/f.R) | supported `f(..., model=...)` interface |
 | R formula and backend spec builder | [R/interface.R](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/R/interface.R) | formula parsing, matrix building, output shaping |
+| R Phase 8 update state helpers | [R/update-state.R](C:/Users/Antonio/Documents/rustyINLA/rustyINLA/R/update-state.R) | posterior/update-state extraction, theta evidence, recursive iid evidence graph composition |
 
 ## 3. Reverse-engineered subset by responsibility
 

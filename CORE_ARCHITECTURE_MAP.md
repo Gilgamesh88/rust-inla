@@ -72,7 +72,8 @@ Core idea:
 
 | File | Role |
 | --- | --- |
-| [R/interface.R](R/interface.R) | Main R API, formula validation, backend spec builder, output shaping, prediction, Phase 8 update-state extraction/composition. |
+| [R/interface.R](R/interface.R) | Main R API, formula validation, backend spec builder, output shaping, and prediction. |
+| [R/update-state.R](R/update-state.R) | Phase 8 posterior/update-state extraction, theta evidence, recursive iid evidence graph composition, and update-state print methods. |
 | [R/f.R](R/f.R) | User-facing latent term helper `f(covariate, model, constr)`. Supports `iid`, `rw1`, `rw2`, `ar1`, `ar2`. |
 | [R/extendr-wrappers.R](R/extendr-wrappers.R) | Generated `.Call()` wrapper for `rust_inla_run()`. |
 | [NAMESPACE](NAMESPACE) | Exports `rusty_inla`, `f`, `predict`, print/summary methods, and Phase 8 update helpers. |
@@ -251,7 +252,7 @@ arrays and trait objects.
 
 ## Phase 8 Update-State Path
 
-The current Phase 8 workflow is implemented mostly in [R/interface.R](R/interface.R)
+The current Phase 8 workflow is implemented mostly in [R/update-state.R](R/update-state.R)
 with numerical support in `inla_core`.
 
 ```mermaid
@@ -320,6 +321,7 @@ edge into a block-sparse evidence graph.
 rustyINLA/
   R/
     interface.R              main R API and output shaping
+    update-state.R           Phase 8 update-state and theta-evidence helpers
     f.R                      latent term helper
     extendr-wrappers.R       .Call wrapper
 
